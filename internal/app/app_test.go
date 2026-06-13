@@ -168,12 +168,16 @@ func (f *fakeReceiver) Receive(ctx context.Context, handle func(context.Context,
 }
 
 type fakeSender struct {
-	ids      []string
-	messages []contracts.OutboundMessage
+	ids       []string
+	failAfter int
+	messages  []contracts.OutboundMessage
 }
 
 func (f *fakeSender) Send(ctx context.Context, msg contracts.OutboundMessage) (contracts.SentMessage, error) {
 	f.messages = append(f.messages, msg)
+	if f.failAfter > 0 && len(f.messages) >= f.failAfter {
+		return contracts.SentMessage{}, os.ErrPermission
+	}
 	id := "msg"
 	if len(f.ids) > 0 {
 		id = f.ids[0]
@@ -183,8 +187,9 @@ func (f *fakeSender) Send(ctx context.Context, msg contracts.OutboundMessage) (c
 }
 
 type fakeRunner struct {
-	result    contracts.RunResult
-	execCalls int
+	result      contracts.RunResult
+	execCalls   int
+	resumeCalls int
 }
 
 func (f *fakeRunner) Exec(ctx context.Context, in codexrunner.ExecInput) (contracts.RunResult, error) {
@@ -198,5 +203,9 @@ func (f *fakeRunner) Exec(ctx context.Context, in codexrunner.ExecInput) (contra
 }
 
 func (f *fakeRunner) Resume(ctx context.Context, in codexrunner.ResumeInput) (contracts.RunResult, error) {
+	f.resumeCalls++
+	if in.OnSessionID != nil && in.SessionID != "" {
+		_ = in.OnSessionID(in.SessionID)
+	}
 	return f.result, nil
 }

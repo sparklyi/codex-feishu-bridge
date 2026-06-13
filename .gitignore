@@ -1,0 +1,6 @@
+/bin/
+/codex-feishu-bridge
+coverage.out
+*.test
+*.log
+.DS_Store

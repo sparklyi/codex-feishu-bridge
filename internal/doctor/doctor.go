@@ -6,10 +6,10 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
-	"path/filepath"
 	"strings"
 
 	"github.com/sihuo/codex-feishu-bridge/internal/config"
+	"github.com/sihuo/codex-feishu-bridge/internal/store"
 )
 
 type Level = config.DiagnosticLevel
@@ -53,7 +53,7 @@ func Check(ctx context.Context, opts Options) Report {
 	for _, diag := range cfg.Validate(opts.Getenv, opts.Stat) {
 		diags = append(diags, fromConfigDiagnostic(diag))
 	}
-	diags = append(diags, checkWritableFileParent("paths.state_db", cfg.Paths.StateDB)...)
+	diags = append(diags, checkSQLite(ctx, cfg.Paths.StateDB)...)
 	diags = append(diags, checkWritableDir("paths.log_dir", cfg.Paths.LogDir)...)
 	diags = append(diags, checkCodex(ctx, cfg.Codex.Command, opts)...)
 	return Report{Diagnostics: diags}
@@ -139,11 +139,18 @@ func containsAny(text string, needles ...string) bool {
 	return false
 }
 
-func checkWritableFileParent(code, path string) []Diagnostic {
+func checkSQLite(ctx context.Context, path string) []Diagnostic {
 	if path == "" {
-		return []Diagnostic{{Level: LevelError, Code: code, Message: "path is empty"}}
+		return []Diagnostic{{Level: LevelError, Code: "paths.state_db", Message: "path is empty"}}
 	}
-	return checkWritableDir(code, filepath.Dir(path))
+	s, err := store.Open(ctx, path)
+	if err != nil {
+		return []Diagnostic{{Level: LevelError, Code: "paths.state_db", Message: err.Error()}}
+	}
+	if err := s.Close(); err != nil {
+		return []Diagnostic{{Level: LevelError, Code: "paths.state_db", Message: err.Error()}}
+	}
+	return []Diagnostic{{Level: LevelOK, Code: "paths.state_db", Message: "SQLite database migrated and writable"}}
 }
 
 func checkWritableDir(code, dir string) []Diagnostic {

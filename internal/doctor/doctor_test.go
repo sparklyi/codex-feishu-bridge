@@ -2,6 +2,7 @@ package doctor
 
 import (
 	"context"
+	"database/sql"
 	"errors"
 	"os"
 	"path/filepath"
@@ -101,6 +102,45 @@ func TestCheckFailsMissingRequiredCodexFlags(t *testing.T) {
 		if !report.Has(LevelError, code) {
 			t.Fatalf("missing FAIL %s in:\n%s", code, report.Render())
 		}
+	}
+}
+
+func TestSQLiteMigrationCheck(t *testing.T) {
+	cfgPath, dir := writeDoctorConfig(t)
+	report := Check(context.Background(), Options{
+		ConfigPath: cfgPath,
+		Getenv: func(key string) string {
+			if key == "FEISHU_APP_SECRET" {
+				return "secret"
+			}
+			if key == "HOME" {
+				return dir
+			}
+			return ""
+		},
+		LookPath: func(command string) (string, error) { return command, nil },
+		RunCommand: func(ctx context.Context, command string, args ...string) (string, error) {
+			switch strings.Join(args, " ") {
+			case "exec --help":
+				return "Usage: codex exec --json -C --cd -s --sandbox -m --model resume", nil
+			case "exec resume --help":
+				return "Usage: codex exec resume <SESSION_ID> <PROMPT>", nil
+			default:
+				return "", errors.New("unexpected command")
+			}
+		},
+	})
+	if report.HasErrors() {
+		t.Fatalf("expected no doctor errors, got:\n%s", report.Render())
+	}
+	db, err := sql.Open("sqlite", filepath.Join(dir, "state", "state.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	var name string
+	if err := db.QueryRow(`SELECT name FROM sqlite_master WHERE type='table' AND name='tasks'`).Scan(&name); err != nil {
+		t.Fatalf("doctor did not run migrations: %v", err)
 	}
 }
 

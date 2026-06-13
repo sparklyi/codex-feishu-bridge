@@ -60,6 +60,18 @@ func (n *Notifier) RoutingError(ctx context.Context, chatID, replyToMessageID st
 	})
 }
 
+func (n *Notifier) Rejection(ctx context.Context, chatID, replyToMessageID, body string) error {
+	_, err := n.sender.Send(ctx, contracts.OutboundMessage{
+		ChatID:           chatID,
+		ReplyToMessageID: replyToMessageID,
+		CardKind:         contracts.CardRoutingError,
+		Status:           "rejected",
+		Title:            "Request rejected",
+		BodyMarkdown:     redact.FeishuText(body, failureBodyLimit),
+	})
+	return err
+}
+
 func (n *Notifier) sendTask(ctx context.Context, kind contracts.CardKind, title string, in TaskCardInput, limit int) (contracts.SentMessage, error) {
 	body := buildBody(in, limit)
 	msg := contracts.OutboundMessage{

@@ -48,7 +48,7 @@ func NormalizeMessageJSON(raw []byte, opts VerifyOptions) (contracts.InboundEven
 	return contracts.InboundEvent{
 		DedupKey:      dedup,
 		Kind:          kind,
-		ChatType:      nonEmpty(msg.Event.Message.ChatType, "unknown"),
+		ChatType:      normalizeChatType(msg.Event.Message.ChatType),
 		ChatID:        msg.Event.Message.ChatID,
 		SenderOpenID:  msg.Event.Sender.SenderID.OpenID,
 		MessageID:     msg.Event.Message.MessageID,
@@ -83,7 +83,7 @@ func NormalizeCardActionJSON(raw []byte, opts VerifyOptions) (contracts.InboundE
 	return contracts.InboundEvent{
 		DedupKey:      dedup,
 		Kind:          contracts.InboundCardAction,
-		ChatType:      nonEmpty(card.Event.Message.ChatType, "unknown"),
+		ChatType:      normalizeChatType(card.Event.Message.ChatType),
 		ChatID:        card.Event.Message.ChatID,
 		SenderOpenID:  card.Event.Operator.OpenID,
 		MessageID:     card.Event.Message.MessageID,
@@ -143,6 +143,19 @@ func nonEmpty(value, fallback string) string {
 		return fallback
 	}
 	return value
+}
+
+func normalizeChatType(value string) string {
+	switch value {
+	case "private", "p2p":
+		return "private"
+	case "group", "topic_group":
+		return "group"
+	case "":
+		return "unknown"
+	default:
+		return value
+	}
 }
 
 type feishuHeader struct {

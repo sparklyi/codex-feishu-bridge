@@ -7,6 +7,8 @@ import (
 	"fmt"
 	"time"
 
+	lark "github.com/larksuite/oapi-sdk-go/v3"
+	larkim "github.com/larksuite/oapi-sdk-go/v3/service/im/v1"
 	"github.com/sihuo/codex-feishu-bridge/internal/contracts"
 )
 
@@ -33,6 +35,59 @@ func NewSenderFromEnv(appID, secretEnv string, getenv func(string) string, api C
 		return nil, fmt.Errorf("missing Feishu app secret env %s", secretEnv)
 	}
 	return &Sender{AppID: appID, AppSecret: secret, API: api}, nil
+}
+
+func NewSDKCardAPI(appID, appSecret string) *SDKCardAPI {
+	return &SDKCardAPI{client: lark.NewClient(appID, appSecret)}
+}
+
+type SDKCardAPI struct {
+	client *lark.Client
+}
+
+func (api *SDKCardAPI) SendCard(ctx context.Context, chatID, replyToMessageID string, cardJSON []byte) (string, time.Duration, error) {
+	content := string(cardJSON)
+	if replyToMessageID != "" {
+		body := larkim.NewReplyMessageReqBodyBuilder().
+			MsgType("interactive").
+			Content(content).
+			Build()
+		req := larkim.NewReplyMessageReqBuilder().
+			MessageId(replyToMessageID).
+			Body(body).
+			Build()
+		resp, err := api.client.Im.Message.Reply(ctx, req)
+		if err != nil {
+			return "", 0, err
+		}
+		if !resp.Success() {
+			return "", 0, fmt.Errorf("feishu reply failed: code=%d msg=%s", resp.Code, resp.Msg)
+		}
+		if resp.Data == nil || resp.Data.MessageId == nil {
+			return "", 0, nil
+		}
+		return *resp.Data.MessageId, 0, nil
+	}
+	body := larkim.NewCreateMessageReqBodyBuilder().
+		ReceiveId(chatID).
+		MsgType("interactive").
+		Content(content).
+		Build()
+	req := larkim.NewCreateMessageReqBuilder().
+		ReceiveIdType("chat_id").
+		Body(body).
+		Build()
+	resp, err := api.client.Im.Message.Create(ctx, req)
+	if err != nil {
+		return "", 0, err
+	}
+	if !resp.Success() {
+		return "", 0, fmt.Errorf("feishu send failed: code=%d msg=%s", resp.Code, resp.Msg)
+	}
+	if resp.Data == nil || resp.Data.MessageId == nil {
+		return "", 0, nil
+	}
+	return *resp.Data.MessageId, 0, nil
 }
 
 func (s *Sender) Send(ctx context.Context, msg contracts.OutboundMessage) (contracts.SentMessage, error) {

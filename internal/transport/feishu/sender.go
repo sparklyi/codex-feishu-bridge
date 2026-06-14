@@ -139,17 +139,21 @@ func BuildInteractiveCard(msg contracts.OutboundMessage) ([]byte, error) {
 	}
 	if len(msg.Fields) > 0 {
 		elements := card["elements"].([]any)
-		elements = append(elements, map[string]any{"tag": "markdown", "content": fieldMarkdown(msg.Fields)})
+		elements = append(elements,
+			map[string]any{"tag": "hr"},
+			map[string]any{"tag": "markdown", "content": fieldMarkdown(msg.Fields)},
+		)
 		card["elements"] = elements
 	}
 	if len(msg.Actions) > 0 {
 		elements := card["elements"].([]any)
 		if needsFollowUpInput(msg.Actions) {
+			elements = append(elements, map[string]any{"tag": "hr"})
 			elements = append(elements, map[string]any{
 				"tag":         "input",
 				"name":        "text",
 				"multiline":   true,
-				"placeholder": map[string]any{"tag": "plain_text", "content": "Follow up"},
+				"placeholder": map[string]any{"tag": "plain_text", "content": "继续补充需求或问题"},
 			})
 		}
 		actions := make([]any, 0, len(msg.Actions))
@@ -186,9 +190,10 @@ func templateFor(msg contracts.OutboundMessage) string {
 }
 
 func fieldMarkdown(fields []contracts.Field) string {
-	lines := make([]string, 0, len(fields))
+	lines := make([]string, 0, len(fields)+1)
+	lines = append(lines, "**任务信息**")
 	for _, field := range fields {
-		lines = append(lines, "**"+field.Title+"**: "+field.Value)
+		lines = append(lines, field.Title+"：`"+field.Value+"`")
 	}
 	return strings.Join(lines, "\n")
 }

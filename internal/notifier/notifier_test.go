@@ -28,9 +28,19 @@ func TestTaskCardsAreRedactedAndRouteable(t *testing.T) {
 		t.Fatalf("unexpected sent message: %+v", sent)
 	}
 	msg := sender.messages[0]
-	for _, want := range []string{"cx_123", "running", "backend", "[local-path]"} {
-		if !strings.Contains(msg.BodyMarkdown, want) {
-			t.Fatalf("card body missing %q: %q", want, msg.BodyMarkdown)
+	if !strings.Contains(msg.Title, "cx_123") {
+		t.Fatalf("card title missing task id: %q", msg.Title)
+	}
+	if !strings.Contains(msg.BodyMarkdown, "Codex 正在处理") {
+		t.Fatalf("card body missing running progress: %q", msg.BodyMarkdown)
+	}
+	gotFields := map[string]string{}
+	for _, field := range msg.Fields {
+		gotFields[field.Title] = field.Value
+	}
+	for title, want := range map[string]string{"状态": "运行中", "项目": "backend", "工作区": "[local-path]"} {
+		if gotFields[title] != want {
+			t.Fatalf("field %q mismatch: got %q want %q in %+v", title, gotFields[title], want, msg.Fields)
 		}
 	}
 	for _, banned := range []string{"/Users/sihuo", "abc123", "user:pass@", "019ec257-e6fd-7be1-9a5e-c47442df292c"} {
@@ -46,6 +56,60 @@ func TestTaskCardsAreRedactedAndRouteable(t *testing.T) {
 	}
 	if len(msg.Fields) == 0 {
 		t.Fatalf("missing compact metadata fields: %+v", msg)
+	}
+}
+
+func TestTaskCardsUseCompactChineseLayout(t *testing.T) {
+	sender := &fakeSender{messageID: "msg_success"}
+	n := New(sender)
+	_, err := n.Success(context.Background(), TaskCardInput{
+		ChatID:       "chat_1",
+		TaskID:       "cx_8ae94f",
+		Status:       "succeeded",
+		ProjectAlias: "default",
+		CWDLabel:     "/Users/sihuo/GoProject/codex-feishu-bridge",
+		Body:         "Hello，我在。",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	msg := sender.messages[0]
+	if msg.Title != "任务已完成 · cx_8ae94f" {
+		t.Fatalf("unexpected localized title: %q", msg.Title)
+	}
+	for _, banned := range []string{"Task:", "Status:", "Project:", "Workspace:"} {
+		if strings.Contains(msg.BodyMarkdown, banned) {
+			t.Fatalf("task metadata leaked into body as raw label %q: %q", banned, msg.BodyMarkdown)
+		}
+	}
+	if !strings.Contains(msg.BodyMarkdown, "Hello，我在。") || !strings.Contains(msg.BodyMarkdown, "**结果**") {
+		t.Fatalf("body should focus on the codex result: %q", msg.BodyMarkdown)
+	}
+	wantFields := []contracts.Field{
+		{Title: "状态", Value: "已完成"},
+		{Title: "项目", Value: "default"},
+		{Title: "工作区", Value: "[local-path]"},
+	}
+	if len(msg.Fields) != len(wantFields) {
+		t.Fatalf("unexpected fields: %+v", msg.Fields)
+	}
+	for i, want := range wantFields {
+		if msg.Fields[i] != want {
+			t.Fatalf("field %d mismatch: got %+v want %+v", i, msg.Fields[i], want)
+		}
+	}
+	for _, want := range []string{"继续跟进", "总结", "解释错误", "运行测试", "生成 MR 描述"} {
+		found := false
+		for _, action := range msg.Actions {
+			if action.Label == want {
+				found = true
+				break
+			}
+		}
+		if !found {
+			t.Fatalf("missing localized action %q in %+v", want, msg.Actions)
+		}
 	}
 }
 

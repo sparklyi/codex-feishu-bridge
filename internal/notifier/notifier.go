@@ -62,15 +62,15 @@ func New(sender transport.Sender) *Notifier {
 }
 
 func (n *Notifier) Start(ctx context.Context, in TaskCardInput) (contracts.SentMessage, error) {
-	return n.sendTask(ctx, contracts.CardStart, "Codex task started", in, successBodyLimit)
+	return n.sendTask(ctx, contracts.CardStart, in, successBodyLimit)
 }
 
 func (n *Notifier) Success(ctx context.Context, in TaskCardInput) (contracts.SentMessage, error) {
-	return n.sendTask(ctx, contracts.CardSuccess, "Codex task succeeded", in, successBodyLimit)
+	return n.sendTask(ctx, contracts.CardSuccess, in, successBodyLimit)
 }
 
 func (n *Notifier) Failure(ctx context.Context, in TaskCardInput) (contracts.SentMessage, error) {
-	return n.sendTask(ctx, contracts.CardFailure, "Codex task failed", in, failureBodyLimit)
+	return n.sendTask(ctx, contracts.CardFailure, in, failureBodyLimit)
 }
 
 func (n *Notifier) RoutingError(ctx context.Context, chatID, replyToMessageID string) (contracts.SentMessage, error) {
@@ -173,18 +173,18 @@ func (n *Notifier) Rejection(ctx context.Context, chatID, replyToMessageID, body
 	return err
 }
 
-func (n *Notifier) sendTask(ctx context.Context, kind contracts.CardKind, title string, in TaskCardInput, limit int) (contracts.SentMessage, error) {
-	body := buildBody(in, limit)
+func (n *Notifier) sendTask(ctx context.Context, kind contracts.CardKind, in TaskCardInput, limit int) (contracts.SentMessage, error) {
+	body := buildTaskBody(kind, in, limit)
 	msg := contracts.OutboundMessage{
 		ChatID:           in.ChatID,
 		ReplyToMessageID: in.ReplyToMessageID,
 		CardKind:         kind,
 		TaskID:           in.TaskID,
 		Status:           in.Status,
-		Title:            redact.FeishuText(title+" "+in.TaskID, 120),
+		Title:            redact.FeishuText(taskTitle(kind, in.TaskID), 120),
 		BodyMarkdown:     body,
 		Fields:           taskFields(in),
-		Actions:          taskActions(in.TaskID),
+		Actions:          taskActions(kind, in.TaskID),
 	}
 	sent, err := n.sender.Send(ctx, msg)
 	if err != nil {
@@ -202,38 +202,85 @@ func taskFields(in TaskCardInput) []contracts.Field {
 		project = "default"
 	}
 	return []contracts.Field{
-		{Title: "Status", Value: in.Status},
-		{Title: "Project", Value: project},
-		{Title: "Workspace", Value: redact.FeishuText(in.CWDLabel, 200)},
+		{Title: "状态", Value: localizedStatus(in.Status)},
+		{Title: "项目", Value: project},
+		{Title: "工作区", Value: redact.FeishuText(in.CWDLabel, 200)},
 	}
 }
 
-func taskActions(taskID string) []contracts.Action {
-	return []contracts.Action{
-		{ID: continueActionID, Label: "Continue", Style: "primary", Value: map[string]string{"action": "continue", "task_id": taskID}},
-		{ID: "shortcut", Label: "Summarize", Value: map[string]string{"action": "shortcut", "shortcut": "summarize", "task_id": taskID}},
-		{ID: "shortcut", Label: "Explain error", Value: map[string]string{"action": "shortcut", "shortcut": "explain_error", "task_id": taskID}},
-		{ID: "shortcut", Label: "Run tests", Value: map[string]string{"action": "shortcut", "shortcut": "run_tests", "task_id": taskID}},
-		{ID: "shortcut", Label: "MR description", Value: map[string]string{"action": "shortcut", "shortcut": "mr_description", "task_id": taskID}},
+func taskActions(kind contracts.CardKind, taskID string) []contracts.Action {
+	actions := []contracts.Action{
+		{ID: continueActionID, Label: "继续跟进", Style: "primary", Value: map[string]string{"action": "continue", "task_id": taskID}},
 	}
+	if kind == contracts.CardFailure {
+		return append(actions,
+			contracts.Action{ID: "shortcut", Label: "解释错误", Value: map[string]string{"action": "shortcut", "shortcut": "explain_error", "task_id": taskID}},
+			contracts.Action{ID: "shortcut", Label: "运行测试", Value: map[string]string{"action": "shortcut", "shortcut": "run_tests", "task_id": taskID}},
+			contracts.Action{ID: "shortcut", Label: "总结", Value: map[string]string{"action": "shortcut", "shortcut": "summarize", "task_id": taskID}},
+			contracts.Action{ID: "shortcut", Label: "生成 MR 描述", Value: map[string]string{"action": "shortcut", "shortcut": "mr_description", "task_id": taskID}},
+		)
+	}
+	return append(actions,
+		contracts.Action{ID: "shortcut", Label: "总结", Value: map[string]string{"action": "shortcut", "shortcut": "summarize", "task_id": taskID}},
+		contracts.Action{ID: "shortcut", Label: "解释错误", Value: map[string]string{"action": "shortcut", "shortcut": "explain_error", "task_id": taskID}},
+		contracts.Action{ID: "shortcut", Label: "运行测试", Value: map[string]string{"action": "shortcut", "shortcut": "run_tests", "task_id": taskID}},
+		contracts.Action{ID: "shortcut", Label: "生成 MR 描述", Value: map[string]string{"action": "shortcut", "shortcut": "mr_description", "task_id": taskID}},
+	)
 }
 
-func buildBody(in TaskCardInput, limit int) string {
-	project := in.ProjectAlias
-	if project == "" {
-		project = "default"
-	}
+func buildTaskBody(kind contracts.CardKind, in TaskCardInput, limit int) string {
 	body := in.Body
 	if in.CodexSessionID != "" {
 		body = strings.ReplaceAll(body, in.CodexSessionID, "[codex-session]")
 	}
-	text := strings.Join([]string{
-		"Task: " + in.TaskID,
-		"Status: " + in.Status,
-		"Project: " + project,
-		"Workspace: " + in.CWDLabel,
-		"",
-		body,
-	}, "\n")
+	body = strings.TrimSpace(body)
+	if kind == contracts.CardStart || body == "" || body == "Task accepted." {
+		body = "已接收，Codex 正在处理。"
+	}
+	text := "**" + bodyHeading(kind) + "**\n" + body
 	return redact.FeishuText(text, limit)
+}
+
+func taskTitle(kind contracts.CardKind, taskID string) string {
+	prefix := "任务状态"
+	switch kind {
+	case contracts.CardStart:
+		prefix = "正在处理"
+	case contracts.CardSuccess:
+		prefix = "任务已完成"
+	case contracts.CardFailure:
+		prefix = "任务失败"
+	}
+	if taskID == "" {
+		return prefix
+	}
+	return prefix + " · " + taskID
+}
+
+func bodyHeading(kind contracts.CardKind) string {
+	switch kind {
+	case contracts.CardStart:
+		return "进度"
+	case contracts.CardSuccess:
+		return "结果"
+	case contracts.CardFailure:
+		return "错误"
+	default:
+		return "摘要"
+	}
+}
+
+func localizedStatus(status string) string {
+	switch status {
+	case "running":
+		return "运行中"
+	case "succeeded":
+		return "已完成"
+	case "failed":
+		return "失败"
+	case "":
+		return "未知"
+	default:
+		return status
+	}
 }

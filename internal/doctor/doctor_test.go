@@ -52,13 +52,12 @@ func TestCheckDetectsCapabilitiesAndWarnsApprovalOptional(t *testing.T) {
 
 func TestCheckReportsMissingConfigAndWorkspaceValues(t *testing.T) {
 	dir := t.TempDir()
-	cfgPath := filepath.Join(dir, "config.toml")
+	cfgPath := filepath.Join(dir, "config.yaml")
 	if err := os.WriteFile(cfgPath, []byte(`
-[feishu]
-app_secret_env = "FEISHU_APP_SECRET"
-
-[workspace]
-default = "/missing/workspace"
+feishu:
+  app_secret_env: FEISHU_APP_SECRET
+workspace:
+  default: /missing/workspace
 `), 0o600); err != nil {
 		t.Fatal(err)
 	}
@@ -171,28 +170,25 @@ func writeDoctorConfig(t *testing.T) (string, string) {
 			t.Fatal(err)
 		}
 	}
-	cfgPath := filepath.Join(dir, "config.toml")
+	cfgPath := filepath.Join(dir, "config.yaml")
 	content := `
-[feishu]
-app_id = "cli_test"
-app_secret_env = "FEISHU_APP_SECRET"
-connection = "websocket"
-
-[security]
-allowed_open_ids = ["ou_owner"]
-
-[codex]
-command = "codex"
-
-[workspace]
-default = "` + workspace + `"
-
-[paths]
-state_db = "` + filepath.Join(dir, "state", "state.db") + `"
-log_dir = "` + filepath.Join(dir, "logs") + `"
-
-[projects.backend]
-cwd = "` + project + `"
+feishu:
+  app_id: cli_test
+  app_secret_env: FEISHU_APP_SECRET
+  connection: websocket
+security:
+  allowed_open_ids:
+    - ou_owner
+codex:
+  command: codex
+workspace:
+  default: "` + workspace + `"
+paths:
+  state_db: "` + filepath.Join(dir, "state", "state.db") + `"
+  log_dir: "` + filepath.Join(dir, "logs") + `"
+projects:
+  backend:
+    cwd: "` + project + `"
 `
 	if err := os.WriteFile(cfgPath, []byte(content), 0o600); err != nil {
 		t.Fatal(err)

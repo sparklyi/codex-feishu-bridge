@@ -153,28 +153,26 @@ func startPruneLoop(ctx context.Context, dir string, retentionDays int, now func
 	}()
 }
 
-const defaultConfig = `[feishu]
-app_id = "cli_xxx"
-app_secret_env = "FEISHU_APP_SECRET"
-connection = "websocket"
-
-[security]
-allowed_open_ids = ["ou_xxx"]
-
-[codex]
-command = "codex"
-default_model = ""
-sandbox = "workspace-write"
-approval = "never"
-extra_args = []
-log_retention_days = 14
-
-[workspace]
-default = "/path/to/default/repo"
-
-[projects.backend]
-cwd = "/path/to/backend"
-model = ""
-sandbox = "workspace-write"
-approval = "never"
+const defaultConfig = `feishu:
+  app_id: cli_xxx
+  app_secret_env: FEISHU_APP_SECRET
+  connection: websocket
+security:
+  allowed_open_ids:
+    - ou_xxx
+codex:
+  command: codex
+  default_model: ""
+  sandbox: workspace-write
+  approval: never
+  extra_args: []
+  log_retention_days: 14
+workspace:
+  default: /path/to/default/repo
+projects:
+  backend:
+    cwd: /path/to/backend
+    model: ""
+    sandbox: workspace-write
+    approval: never
 `

@@ -13,4 +13,4 @@ lint:
 	go vet ./...
 
 doctor:
-	go run ./cmd/codex-feishu-bridge doctor --config config.example.toml
+	go run ./cmd/codex-feishu-bridge doctor --config config.example.yaml

@@ -15,13 +15,12 @@ import (
 
 func TestDoctorCommandRendersReport(t *testing.T) {
 	dir := t.TempDir()
-	configPath := filepath.Join(dir, "config.toml")
+	configPath := filepath.Join(dir, "config.yaml")
 	if err := os.WriteFile(configPath, []byte(`
-[feishu]
-app_secret_env = "FEISHU_APP_SECRET"
-
-[workspace]
-default = "/missing"
+feishu:
+  app_secret_env: FEISHU_APP_SECRET
+workspace:
+  default: /missing
 `), 0o600); err != nil {
 		t.Fatal(err)
 	}
@@ -36,7 +35,7 @@ default = "/missing"
 }
 
 func TestInitConfigCommand(t *testing.T) {
-	path := filepath.Join(t.TempDir(), "config.toml")
+	path := filepath.Join(t.TempDir(), "config.yaml")
 	var stdout, stderr bytes.Buffer
 	code := runWithIO(context.Background(), []string{"init-config", "--config", path}, &stdout, &stderr)
 	if code != 0 {
@@ -58,18 +57,16 @@ func TestTasksListAndShowCommands(t *testing.T) {
 	if err := os.MkdirAll(workspace, 0o755); err != nil {
 		t.Fatal(err)
 	}
-	configPath := filepath.Join(dir, "config.toml")
+	configPath := filepath.Join(dir, "config.yaml")
 	if err := os.WriteFile(configPath, []byte(`
-[feishu]
-app_id = "cli_test"
-app_secret_env = "FEISHU_APP_SECRET"
-
-[workspace]
-default = "`+workspace+`"
-
-[paths]
-state_db = "`+filepath.Join(dir, "state.db")+`"
-log_dir = "`+filepath.Join(dir, "logs")+`"
+feishu:
+  app_id: cli_test
+  app_secret_env: FEISHU_APP_SECRET
+workspace:
+  default: "`+workspace+`"
+paths:
+  state_db: "`+filepath.Join(dir, "state.db")+`"
+  log_dir: "`+filepath.Join(dir, "logs")+`"
 `), 0o600); err != nil {
 		t.Fatal(err)
 	}

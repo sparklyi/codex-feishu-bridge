@@ -4,7 +4,7 @@
 
 Controls:
 
-- User allowlist: `[security].allowed_open_ids`.
+- User allowlist: `security.allowed_open_ids`.
 - Unknown users never invoke Codex.
 - Private unauthorized requests get a short rejection.
 - Group unauthorized requests are silent.

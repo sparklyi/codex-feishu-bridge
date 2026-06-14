@@ -102,7 +102,7 @@ func TestServeStartupAndReceiverFlow(t *testing.T) {
 }
 
 func TestInitConfig(t *testing.T) {
-	path := filepath.Join(t.TempDir(), "config.toml")
+	path := filepath.Join(t.TempDir(), "config.yaml")
 	if err := InitConfig(path, false); err != nil {
 		t.Fatal(err)
 	}
@@ -110,7 +110,7 @@ func TestInitConfig(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(string(data), "[feishu]") || !strings.Contains(string(data), "FEISHU_APP_SECRET") {
+	if !strings.Contains(string(data), "feishu:") || !strings.Contains(string(data), "FEISHU_APP_SECRET") {
 		t.Fatalf("unexpected config:\n%s", string(data))
 	}
 	if err := InitConfig(path, false); err == nil {
@@ -123,28 +123,25 @@ func TestInitConfig(t *testing.T) {
 
 func writeAppConfig(t *testing.T, dir, workspace string) string {
 	t.Helper()
-	path := filepath.Join(dir, "config.toml")
+	path := filepath.Join(dir, "config.yaml")
 	content := `
-[feishu]
-app_id = "cli_test"
-app_secret_env = "FEISHU_APP_SECRET"
-connection = "websocket"
-
-[security]
-allowed_open_ids = ["ou_owner"]
-
-[codex]
-command = "codex"
-sandbox = "workspace-write"
-approval = "never"
-log_retention_days = 14
-
-[workspace]
-default = "` + workspace + `"
-
-[paths]
-state_db = "` + filepath.Join(dir, "state.db") + `"
-log_dir = "` + filepath.Join(dir, "logs") + `"
+feishu:
+  app_id: cli_test
+  app_secret_env: FEISHU_APP_SECRET
+  connection: websocket
+security:
+  allowed_open_ids:
+    - ou_owner
+codex:
+  command: codex
+  sandbox: workspace-write
+  approval: never
+  log_retention_days: 14
+workspace:
+  default: "` + workspace + `"
+paths:
+  state_db: "` + filepath.Join(dir, "state.db") + `"
+  log_dir: "` + filepath.Join(dir, "logs") + `"
 `
 	if err := os.WriteFile(path, []byte(content), 0o600); err != nil {
 		t.Fatal(err)

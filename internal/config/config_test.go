@@ -73,7 +73,7 @@ func TestProjectApprovalFallbackAndOverride(t *testing.T) {
 	}
 }
 
-func TestLoadTomlAndValidate(t *testing.T) {
+func TestLoadYAMLAndValidate(t *testing.T) {
 	dir := t.TempDir()
 	workspace := filepath.Join(dir, "workspace")
 	project := filepath.Join(dir, "backend")
@@ -83,28 +83,27 @@ func TestLoadTomlAndValidate(t *testing.T) {
 	if err := os.MkdirAll(project, 0o755); err != nil {
 		t.Fatal(err)
 	}
-	path := filepath.Join(dir, "config.toml")
-	toml := `
-[feishu]
-app_id = "cli_test"
-app_secret_env = "FEISHU_APP_SECRET"
-connection = "websocket"
-
-[security]
-allowed_open_ids = ["ou_owner"]
-
-[codex]
-extra_args = ["--skip-git-repo-check"]
-
-[workspace]
-default = "` + strings.ReplaceAll(workspace, `\`, `\\`) + `"
-
-[projects.backend]
-cwd = "` + strings.ReplaceAll(project, `\`, `\\`) + `"
-sandbox = "read-only"
-approval = "on-request"
+	path := filepath.Join(dir, "config.yaml")
+	yaml := `
+feishu:
+  app_id: cli_test
+  app_secret_env: FEISHU_APP_SECRET
+  connection: websocket
+security:
+  allowed_open_ids:
+    - ou_owner
+codex:
+  extra_args:
+    - --skip-git-repo-check
+workspace:
+  default: "` + strings.ReplaceAll(workspace, `\`, `\\`) + `"
+projects:
+  backend:
+    cwd: "` + strings.ReplaceAll(project, `\`, `\\`) + `"
+    sandbox: read-only
+    approval: on-request
 `
-	if err := os.WriteFile(path, []byte(toml), 0o600); err != nil {
+	if err := os.WriteFile(path, []byte(yaml), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	cfg, err := Load(path, func(key string) string {
@@ -155,14 +154,14 @@ func TestValidateReportsMissingRequiredValues(t *testing.T) {
 
 func TestDefaultPath(t *testing.T) {
 	got := DefaultPath("/home/alice")
-	want := filepath.Join("/home/alice", ".codex-feishu-bridge", "config.toml")
+	want := filepath.Join("/home/alice", ".codex-feishu-bridge", "config.yaml")
 	if got != want {
 		t.Fatalf("DefaultPath() = %q, want %q", got, want)
 	}
 }
 
 func TestExampleConfigParses(t *testing.T) {
-	cfg, err := Load(filepath.Join("..", "..", "config.example.toml"), func(key string) string {
+	cfg, err := Load(filepath.Join("..", "..", "config.example.yaml"), func(key string) string {
 		if key == "HOME" {
 			return t.TempDir()
 		}

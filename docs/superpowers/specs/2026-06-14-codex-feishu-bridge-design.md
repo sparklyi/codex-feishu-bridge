@@ -39,7 +39,7 @@ Main modules:
 - `taskstore`: SQLite persistence for tasks, message routes, runs, and allowlisted users.
 - `codexrunner`: executes `codex exec --json` and `codex exec --json resume`, parses JSONL events, and stores raw logs.
 - `notifier`: sends Feishu start, success, and failure cards.
-- `config`: loads local TOML config and merges project-level defaults.
+- `config`: loads local YAML config and merges project-level defaults.
 
 High-level flow:
 
@@ -253,36 +253,34 @@ Status transition rules:
 Default config path:
 
 ```text
-~/.codex-feishu-bridge/config.toml
+~/.codex-feishu-bridge/config.yaml
 ```
 
 Example:
 
-```toml
-[feishu]
-app_id = "cli_xxx"
-app_secret_env = "FEISHU_APP_SECRET"
-connection = "websocket"
-
-[security]
-allowed_open_ids = ["ou_xxx"]
-
-[codex]
-command = "codex"
-default_model = ""
-sandbox = "workspace-write"
-approval = "never"
-extra_args = []
-log_retention_days = 14
-
-[workspace]
-default = "/path/to/default/repo"
-
-[projects.backend]
-cwd = "/path/to/backend"
-model = ""
-sandbox = "workspace-write"
-approval = "never"
+```yaml
+feishu:
+  app_id: cli_xxx
+  app_secret_env: FEISHU_APP_SECRET
+  connection: websocket
+security:
+  allowed_open_ids:
+    - ou_xxx
+codex:
+  command: codex
+  default_model: ""
+  sandbox: workspace-write
+  approval: never
+  extra_args: []
+  log_retention_days: 14
+workspace:
+  default: /path/to/default/repo
+projects:
+  backend:
+    cwd: /path/to/backend
+    model: ""
+    sandbox: workspace-write
+    approval: never
 ```
 
 Security defaults:
@@ -298,7 +296,7 @@ Security defaults:
 
 Authorization source of truth:
 
-- `[security].allowed_open_ids` is the source of truth in MVP.
+- `security.allowed_open_ids` is the source of truth in MVP.
 - The `users` table is a local audit/cache table refreshed at startup: configured ids are upserted as `enabled = true`, and ids no longer present in config are set to `enabled = false`.
 - Runtime authorization checks use the loaded config plus the refreshed `users.enabled` value. If they disagree, config wins and the daemon logs the mismatch.
 - Unauthorized users always receive a short rejection in private chats. In group chats, unauthorized events are ignored to avoid noisy group responses. In both cases, Codex is never invoked.
@@ -319,10 +317,10 @@ Resume command:
 
 Argument construction:
 
-- `cwd` comes from selected project alias, then `[workspace].default`.
-- `sandbox` comes from project config, then `[codex].sandbox`, then `workspace-write`.
-- `model` comes from project config, then `[codex].default_model`; omit `-m` when empty.
-- `extra_args` from `[codex].extra_args` are Codex exec global args only. They are appended after common flags and before the prompt or `resume` subcommand.
+- `cwd` comes from selected project alias, then `workspace.default`.
+- `sandbox` comes from project config, then `codex.sandbox`, then `workspace-write`.
+- `model` comes from project config, then `codex.default_model`; omit `-m` when empty.
+- `extra_args` from `codex.extra_args` are Codex exec global args only. They are appended after common flags and before the prompt or `resume` subcommand.
 - The config key `approval = "never"` is retained for future compatibility, but the current `codex exec` version may not accept `-a`; the runner must only pass approval flags after `doctor` confirms the local `codex exec --help` supports them. If unsupported, `doctor` should warn and runtime should omit the flag.
 - New task creation must snapshot effective command, cwd, sandbox, model, approval, approval-flag support decision, and extra args into `tasks`.
 - Resume must use the same effective command, cwd, sandbox, model, approval behavior, and extra args stored on the task at creation time unless the user explicitly changes task config in a future feature. This prevents an old task from changing behavior because the config file changed after the task was created.
@@ -352,7 +350,7 @@ The runner must:
 - Preserve exit code and error text.
 - Update `tasks.codex_session_id` as soon as a session id is known.
 - Redact secrets and local absolute paths before sending any error, log tail, or final text to Feishu. Local logs may keep full raw JSONL, but Feishu-facing text must be truncated and redacted.
-- Keep a configurable log retention window. MVP default is 14 days from `[codex].log_retention_days`.
+- Keep a configurable log retention window. MVP default is 14 days from `codex.log_retention_days`.
 - Log pruning runs at daemon startup and then once per day while `serve` is running. Pruning deletes run log files older than the retention window and may keep their SQLite `runs` rows with `log_path` marked missing.
 
 If session id cannot be parsed, mark the run failed and do not allow resume for that task.
@@ -489,7 +487,7 @@ Manual E2E:
 Repository should include:
 
 - `README.md`
-- `config.example.toml`
+- `config.example.yaml`
 - Feishu app setup guide
 - macOS LaunchAgent example
 - Linux systemd example

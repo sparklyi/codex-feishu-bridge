@@ -6,7 +6,7 @@ import (
 	"os"
 	"path/filepath"
 
-	"github.com/pelletier/go-toml/v2"
+	"gopkg.in/yaml.v3"
 )
 
 const (
@@ -18,47 +18,47 @@ const (
 )
 
 type Config struct {
-	Feishu    FeishuConfig             `toml:"feishu"`
-	Security  SecurityConfig           `toml:"security"`
-	Codex     CodexConfig              `toml:"codex"`
-	Workspace WorkspaceConfig          `toml:"workspace"`
-	Projects  map[string]ProjectConfig `toml:"projects"`
-	Paths     RuntimePaths             `toml:"paths"`
+	Feishu    FeishuConfig             `yaml:"feishu"`
+	Security  SecurityConfig           `yaml:"security"`
+	Codex     CodexConfig              `yaml:"codex"`
+	Workspace WorkspaceConfig          `yaml:"workspace"`
+	Projects  map[string]ProjectConfig `yaml:"projects"`
+	Paths     RuntimePaths             `yaml:"paths"`
 }
 
 type FeishuConfig struct {
-	AppID        string `toml:"app_id"`
-	AppSecretEnv string `toml:"app_secret_env"`
-	Connection   string `toml:"connection"`
+	AppID        string `yaml:"app_id"`
+	AppSecretEnv string `yaml:"app_secret_env"`
+	Connection   string `yaml:"connection"`
 }
 
 type SecurityConfig struct {
-	AllowedOpenIDs []string `toml:"allowed_open_ids"`
+	AllowedOpenIDs []string `yaml:"allowed_open_ids"`
 }
 
 type CodexConfig struct {
-	Command          string   `toml:"command"`
-	DefaultModel     string   `toml:"default_model"`
-	Sandbox          string   `toml:"sandbox"`
-	Approval         string   `toml:"approval"`
-	ExtraArgs        []string `toml:"extra_args"`
-	LogRetentionDays int      `toml:"log_retention_days"`
+	Command          string   `yaml:"command"`
+	DefaultModel     string   `yaml:"default_model"`
+	Sandbox          string   `yaml:"sandbox"`
+	Approval         string   `yaml:"approval"`
+	ExtraArgs        []string `yaml:"extra_args"`
+	LogRetentionDays int      `yaml:"log_retention_days"`
 }
 
 type WorkspaceConfig struct {
-	Default string `toml:"default"`
+	Default string `yaml:"default"`
 }
 
 type ProjectConfig struct {
-	CWD      string `toml:"cwd"`
-	Model    string `toml:"model"`
-	Sandbox  string `toml:"sandbox"`
-	Approval string `toml:"approval"`
+	CWD      string `yaml:"cwd"`
+	Model    string `yaml:"model"`
+	Sandbox  string `yaml:"sandbox"`
+	Approval string `yaml:"approval"`
 }
 
 type RuntimePaths struct {
-	StateDB string `toml:"state_db"`
-	LogDir  string `toml:"log_dir"`
+	StateDB string `yaml:"state_db"`
+	LogDir  string `yaml:"log_dir"`
 }
 
 type ResolvedProject struct {
@@ -87,7 +87,7 @@ type Diagnostic struct {
 }
 
 func DefaultPath(home string) string {
-	return filepath.Join(home, ".codex-feishu-bridge", "config.toml")
+	return filepath.Join(home, ".codex-feishu-bridge", "config.yaml")
 }
 
 func Load(path string, getenv func(string) string) (Config, error) {
@@ -96,7 +96,7 @@ func Load(path string, getenv func(string) string) (Config, error) {
 		return Config{}, err
 	}
 	var cfg Config
-	if err := toml.Unmarshal(data, &cfg); err != nil {
+	if err := yaml.Unmarshal(data, &cfg); err != nil {
 		return Config{}, err
 	}
 	cfg.applyDefaults(homeDir(getenv))

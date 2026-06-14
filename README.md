@@ -9,7 +9,7 @@ go install github.com/sparklyi/codex-feishu-bridge/cmd/codex-feishu-bridge@lates
 codex-feishu-bridge init-config
 ```
 
-Edit `~/.codex-feishu-bridge/config.toml`, then run:
+Edit `~/.codex-feishu-bridge/config.yaml`, then run:
 
 ```bash
 export FEISHU_APP_SECRET=...
@@ -40,7 +40,7 @@ codex-feishu-bridge tasks show [--config path] <task_id>
 
 ## Security Model
 
-Only `[security].allowed_open_ids` can run Codex. Private-chat unauthorized requests receive a rejection; group-chat unauthorized requests are ignored. Task continuation is creator-only.
+Only `security.allowed_open_ids` can run Codex. Private-chat unauthorized requests receive a rejection; group-chat unauthorized requests are ignored. Task continuation is creator-only.
 
 Feishu cards redact local absolute paths, secrets, proxy credentials, and full Codex session ids. Raw Codex JSONL logs are stored locally with `0600` permissions under `~/.codex-feishu-bridge/logs`.
 

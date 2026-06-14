@@ -851,7 +851,7 @@ git commit -m "feat(router): report running task conflicts"
 - Modify: `internal/router/router_test.go`
 - Modify: `internal/notifier/notifier.go`
 
-- [ ] **Step 1: Write failing shortcut tests**
+- [x] **Step 1: Write failing shortcut tests**
 
 Add tests:
 
@@ -893,13 +893,13 @@ func TestRouterShortcutRunTestsRequiresConfirmation(t *testing.T) {
 }
 ```
 
-- [ ] **Step 2: Run shortcut tests and verify failure**
+- [x] **Step 2: Run shortcut tests and verify failure**
 
 Run: `go test ./internal/router -run 'TestRouterShortcutSummarizeResumesImmediately|TestRouterShortcutRunTestsRequiresConfirmation' -count=1`
 
 Expected: FAIL because shortcuts are not routed.
 
-- [ ] **Step 3: Implement shortcut routing**
+- [x] **Step 3: Implement shortcut routing**
 
 Add shortcut prompt mapping in router or a small `internal/intent/shortcuts.go`:
 
@@ -914,13 +914,13 @@ var ShortcutPrompts = map[string]Shortcut{
 
 Immediate shortcuts call the existing resume path with the preset prompt. Confirmed shortcuts send a confirmation card with action values `{action: confirm_shortcut, shortcut: run_tests}`. Confirmed callback then resumes.
 
-- [ ] **Step 4: Run router tests**
+- [x] **Step 4: Run router tests**
 
 Run: `go test ./internal/router -count=1`
 
 Expected: PASS.
 
-- [ ] **Step 5: Commit shortcut routing**
+- [x] **Step 5: Commit shortcut routing**
 
 ```bash
 git add internal/router/router.go internal/router/router_test.go internal/notifier/notifier.go internal/intent

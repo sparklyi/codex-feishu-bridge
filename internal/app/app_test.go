@@ -128,6 +128,7 @@ func writeAppConfig(t *testing.T, dir, workspace string) string {
 feishu:
   app_id: cli_test
   app_secret_env: FEISHU_APP_SECRET
+  bot_open_id: ou_bot
   connection: websocket
 security:
   allowed_open_ids:
@@ -139,6 +140,9 @@ codex:
   log_retention_days: 14
 workspace:
   default: "` + workspace + `"
+projects:
+  backend:
+    cwd: "` + workspace + `"
 paths:
   state_db: "` + filepath.Join(dir, "state.db") + `"
   log_dir: "` + filepath.Join(dir, "logs") + `"

@@ -20,6 +20,14 @@ func TestIntegration(t *testing.T) {
 		}
 	})
 
+	t.Run("private plain task", func(t *testing.T) {
+		env := newIntegrationEnv(t, []contracts.InboundEvent{{Kind: contracts.InboundNewTask, DedupKey: "plain_1", ChatType: "private", ChatID: "chat", SenderOpenID: "ou_owner", MessageID: "msg_user", Text: "fix the failing router test"}})
+		env.run(t)
+		if env.runner.execCalls != 1 || env.sender.messages[0].CardKind != contracts.CardStart {
+			t.Fatalf("private plain task did not start exec=%d messages=%+v", env.runner.execCalls, env.sender.messages)
+		}
+	})
+
 	t.Run("card reply resume", func(t *testing.T) {
 		env := newIntegrationEnv(t, []contracts.InboundEvent{
 			{Kind: contracts.InboundNewTask, DedupKey: "evt_1", ChatType: "private", ChatID: "chat", SenderOpenID: "ou_owner", MessageID: "msg_user", Text: "hello"},
@@ -28,6 +36,40 @@ func TestIntegration(t *testing.T) {
 		env.run(t)
 		if env.runner.resumeCalls != 1 {
 			t.Fatalf("resume calls = %d", env.runner.resumeCalls)
+		}
+	})
+
+	t.Run("group mention project selection then task", func(t *testing.T) {
+		env := newIntegrationEnv(t, []contracts.InboundEvent{{
+			Kind: contracts.InboundNewTask, DedupKey: "group_1", ChatType: "group",
+			ChatID: "chat", SenderOpenID: "ou_owner", MessageID: "msg_user",
+			Text: "fix tests", BotMentioned: true,
+		}})
+		env.run(t)
+		if env.runner.execCalls != 0 || len(env.sender.messages) != 1 || env.sender.messages[0].CardKind != contracts.CardProjectSelection {
+			t.Fatalf("expected project selection exec=%d messages=%+v", env.runner.execCalls, env.sender.messages)
+		}
+		pendingID := env.sender.messages[0].Actions[0].Value["pending_id"]
+		env.receiver.events = []contracts.InboundEvent{{
+			Kind: contracts.InboundCardAction, DedupKey: "group_2", ChatType: "group",
+			ChatID: "chat", SenderOpenID: "ou_owner", MessageID: "card_cb",
+			ActionID:    "project_select",
+			ActionValue: map[string]string{"action": "select_project", "pending_id": pendingID, "project": "backend"},
+		}}
+		env.run(t)
+		if env.runner.execCalls != 1 {
+			t.Fatalf("project selection did not start task, exec=%d messages=%+v", env.runner.execCalls, env.sender.messages)
+		}
+	})
+
+	t.Run("route miss never falls back to latest task", func(t *testing.T) {
+		env := newIntegrationEnv(t, []contracts.InboundEvent{
+			{Kind: contracts.InboundNewTask, DedupKey: "miss_1", ChatType: "private", ChatID: "chat", SenderOpenID: "ou_owner", MessageID: "msg_user", Text: "hello"},
+			{Kind: contracts.InboundReply, DedupKey: "miss_2", ChatType: "private", ChatID: "chat", SenderOpenID: "ou_owner", MessageID: "msg_reply", RootMessageID: "missing", Text: "continue"},
+		})
+		env.run(t)
+		if env.runner.resumeCalls != 0 || env.sender.messages[len(env.sender.messages)-1].CardKind != contracts.CardRoutingError {
+			t.Fatalf("route miss should not resume latest task resumes=%d messages=%+v", env.runner.resumeCalls, env.sender.messages)
 		}
 	})
 

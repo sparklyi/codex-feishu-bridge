@@ -172,9 +172,13 @@ func cardCallbackEnvelope(event *callback.CardActionTriggerEvent) map[string]any
 	req := event.Event
 	actionID := ""
 	text := ""
+	actionValue := map[string]any{}
 	if req != nil && req.Action != nil {
 		if value, ok := req.Action.Value["action_id"].(string); ok {
 			actionID = value
+		}
+		for key, value := range req.Action.Value {
+			actionValue[key] = value
 		}
 		if value, ok := req.Action.Value["text"].(string); ok {
 			text = value
@@ -188,6 +192,9 @@ func cardCallbackEnvelope(event *callback.CardActionTriggerEvent) map[string]any
 		if actionID == "" {
 			actionID = req.Action.Name
 		}
+	}
+	if text != "" {
+		actionValue["text"] = text
 	}
 	operator := map[string]any{}
 	contextMap := map[string]any{}
@@ -213,9 +220,7 @@ func cardCallbackEnvelope(event *callback.CardActionTriggerEvent) map[string]any
 			"message":  message,
 			"action": map[string]any{
 				"action_id": actionID,
-				"value": map[string]any{
-					"text": text,
-				},
+				"value":     actionValue,
 			},
 		},
 	}

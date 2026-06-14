@@ -246,6 +246,9 @@ func (r *Router) startTask(ctx context.Context, ev contracts.InboundEvent, alias
 func (r *Router) handleContinuation(ctx context.Context, ev contracts.InboundEvent) error {
 	text := strings.TrimSpace(ev.Text)
 	if ev.Kind == contracts.InboundCardAction && text == "" {
+		if ev.ActionID == "continue_submit" || ev.ActionValue["action"] == "continue" {
+			return nil
+		}
 		return r.notifier.Rejection(ctx, ev.ChatID, ev.MessageID, "Follow-up text is required.")
 	}
 	return r.resumeTask(ctx, ev, text)

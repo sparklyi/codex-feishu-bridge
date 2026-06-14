@@ -6,6 +6,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/larksuite/oapi-sdk-go/v3/event/dispatcher/callback"
 	"github.com/sparklyi/codex-feishu-bridge/internal/contracts"
 )
 
@@ -71,6 +72,59 @@ func TestReceiverReconnectsAfterDisconnect(t *testing.T) {
 	}
 	if len(got) != 1 || got[0].Kind != contracts.InboundCardAction {
 		t.Fatalf("unexpected events: %+v", got)
+	}
+}
+
+func TestCardCallbackEnvelopePreservesButtonActionValue(t *testing.T) {
+	raw := mustMarshal(cardCallbackEnvelope(&callback.CardActionTriggerEvent{
+		Event: &callback.CardActionTriggerRequest{
+			Operator: &callback.Operator{OpenID: "ou_owner"},
+			Context:  &callback.Context{OpenMessageID: "card_msg_1", OpenChatID: "chat_1"},
+			Action: &callback.CallBackAction{
+				Value: map[string]interface{}{
+					"action_id": "shortcut",
+					"action":    "shortcut",
+					"shortcut":  "summarize",
+					"task_id":   "cx_1",
+				},
+			},
+		},
+	}))
+	ev, err := NormalizeCardActionJSON(raw, VerifyOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if ev.ActionID != "shortcut" || ev.ActionValue["action"] != "shortcut" || ev.ActionValue["shortcut"] != "summarize" {
+		t.Fatalf("button action value was not preserved: %+v", ev)
+	}
+	if ev.Text != "" {
+		t.Fatalf("button callback without form input should not synthesize text, got %q", ev.Text)
+	}
+}
+
+func TestCardCallbackEnvelopeUsesFormValueText(t *testing.T) {
+	raw := mustMarshal(cardCallbackEnvelope(&callback.CardActionTriggerEvent{
+		Event: &callback.CardActionTriggerRequest{
+			Operator: &callback.Operator{OpenID: "ou_owner"},
+			Context:  &callback.Context{OpenMessageID: "card_msg_1", OpenChatID: "chat_1"},
+			Action: &callback.CallBackAction{
+				Value: map[string]interface{}{
+					"action_id": "continue_submit",
+					"action":    "continue",
+					"task_id":   "cx_1",
+				},
+				FormValue: map[string]interface{}{
+					"text": "继续检查服务日志",
+				},
+			},
+		},
+	}))
+	ev, err := NormalizeCardActionJSON(raw, VerifyOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if ev.ActionID != "continue_submit" || ev.ActionValue["action"] != "continue" || ev.Text != "继续检查服务日志" {
+		t.Fatalf("form callback text was not preserved: %+v", ev)
 	}
 }
 

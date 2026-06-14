@@ -12,6 +12,7 @@ import (
 	"github.com/sparklyi/codex-feishu-bridge/internal/codexrunner"
 	"github.com/sparklyi/codex-feishu-bridge/internal/config"
 	"github.com/sparklyi/codex-feishu-bridge/internal/contracts"
+	"github.com/sparklyi/codex-feishu-bridge/internal/intent"
 	notify "github.com/sparklyi/codex-feishu-bridge/internal/notifier"
 	"github.com/sparklyi/codex-feishu-bridge/internal/store"
 )
@@ -25,6 +26,9 @@ type TaskStore interface {
 	UserEnabled(ctx context.Context, openID string) (bool, error)
 	InsertMessageRoute(ctx context.Context, messageID, taskID, routeType string) error
 	ResolveMessageRoute(ctx context.Context, messageID string) (store.Task, error)
+	CreatePendingIntent(ctx context.Context, in store.CreatePendingIntentInput) (store.PendingIntent, error)
+	ConsumePendingIntent(ctx context.Context, id, createdBy string, now time.Time) (store.PendingIntent, error)
+	FindRunningTask(ctx context.Context, chatID, creatorOpenID string) (store.Task, bool, error)
 }
 
 type Runner interface {
@@ -38,26 +42,32 @@ type Notifier interface {
 	Failure(ctx context.Context, in notify.TaskCardInput) (contracts.SentMessage, error)
 	RoutingError(ctx context.Context, chatID, replyToMessageID string) (contracts.SentMessage, error)
 	Rejection(ctx context.Context, chatID, replyToMessageID, body string) error
+	MigrationHint(ctx context.Context, chatID, replyToMessageID string) error
+	ProjectSelection(ctx context.Context, in notify.ProjectSelectionInput) (contracts.SentMessage, error)
+	RunningConflict(ctx context.Context, in notify.RunningConflictInput) error
+	ShortcutConfirmation(ctx context.Context, in notify.ShortcutConfirmationInput) (contracts.SentMessage, error)
 }
 
 type RouterOptions struct {
-	Config    config.Config
-	Store     TaskStore
-	Runner    Runner
-	Notifier  Notifier
-	Now       func() time.Time
-	NewTaskID func() string
-	NewRunID  func() string
+	Config       config.Config
+	Store        TaskStore
+	Runner       Runner
+	Notifier     Notifier
+	Now          func() time.Time
+	NewTaskID    func() string
+	NewRunID     func() string
+	NewPendingID func() string
 }
 
 type Router struct {
-	cfg       config.Config
-	store     TaskStore
-	runner    Runner
-	notifier  Notifier
-	now       func() time.Time
-	newTaskID func() string
-	newRunID  func() string
+	cfg          config.Config
+	store        TaskStore
+	runner       Runner
+	notifier     Notifier
+	now          func() time.Time
+	newTaskID    func() string
+	newRunID     func() string
+	newPendingID func() string
 }
 
 func New(opts RouterOptions) *Router {
@@ -73,7 +83,11 @@ func New(opts RouterOptions) *Router {
 	if newRunID == nil {
 		newRunID = func() string { return "run_" + time.Now().UTC().Format("20060102150405.000000000") }
 	}
-	return &Router{cfg: opts.Config, store: opts.Store, runner: opts.Runner, notifier: opts.Notifier, now: now, newTaskID: newTaskID, newRunID: newRunID}
+	newPendingID := opts.NewPendingID
+	if newPendingID == nil {
+		newPendingID = randomPendingID
+	}
+	return &Router{cfg: opts.Config, store: opts.Store, runner: opts.Runner, notifier: opts.Notifier, now: now, newTaskID: newTaskID, newRunID: newRunID, newPendingID: newPendingID}
 }
 
 func (r *Router) Handle(ctx context.Context, ev contracts.InboundEvent) error {
@@ -86,7 +100,17 @@ func (r *Router) Handle(ctx context.Context, ev contracts.InboundEvent) error {
 	switch ev.Kind {
 	case contracts.InboundNewTask:
 		return r.handleNewTask(ctx, ev)
-	case contracts.InboundReply, contracts.InboundCardAction:
+	case contracts.InboundCardAction:
+		switch {
+		case ev.ActionValue["action"] == "select_project":
+			return r.handleProjectSelection(ctx, ev)
+		case ev.ActionValue["action"] == "confirm_shortcut":
+			return r.handleShortcutConfirmation(ctx, ev)
+		case ev.ActionID == "shortcut" || ev.ActionValue["action"] == "shortcut":
+			return r.handleShortcut(ctx, ev)
+		}
+		return r.handleContinuation(ctx, ev)
+	case contracts.InboundReply:
 		return r.handleContinuation(ctx, ev)
 	default:
 		return nil
@@ -94,9 +118,83 @@ func (r *Router) Handle(ctx context.Context, ev contracts.InboundEvent) error {
 }
 
 func (r *Router) handleNewTask(ctx context.Context, ev contracts.InboundEvent) error {
-	alias, prompt, ok := ParseCommand(ev.Text)
-	if !ok {
-		return r.notifier.Rejection(ctx, ev.ChatID, ev.MessageID, "Use `/codex <prompt>` to start a task.")
+	parsed := intent.ParseStart(intent.ParseInput{Event: ev, ProjectAliases: r.cfg.ProjectAliases()})
+	switch parsed.Kind {
+	case intent.KindIgnored:
+		return nil
+	case intent.KindMigrationHint:
+		return r.notifier.MigrationHint(ctx, ev.ChatID, ev.MessageID)
+	case intent.KindUnknownProject:
+		return r.notifier.Rejection(ctx, ev.ChatID, ev.MessageID, "Project configuration error: unknown project alias "+parsed.ProjectAlias)
+	case intent.KindProjectSelection:
+		return r.sendProjectSelection(ctx, ev, parsed.Prompt)
+	case intent.KindStartTask:
+	default:
+		return nil
+	}
+	return r.startTask(ctx, ev, parsed.ProjectAlias, parsed.Prompt)
+}
+
+func (r *Router) sendProjectSelection(ctx context.Context, ev contracts.InboundEvent, prompt string) error {
+	pendingID := r.newPendingID()
+	aliases := r.cfg.ProjectAliases()
+	pending, err := r.store.CreatePendingIntent(ctx, store.CreatePendingIntentInput{
+		ID:             pendingID,
+		ChatID:         ev.ChatID,
+		CreatedBy:      ev.SenderOpenID,
+		Prompt:         prompt,
+		ProjectAliases: aliases,
+		Now:            r.now(),
+		ExpiresAt:      r.now().Add(10 * time.Minute),
+	})
+	if err != nil {
+		return err
+	}
+	_, err = r.notifier.ProjectSelection(ctx, notify.ProjectSelectionInput{
+		ChatID:           ev.ChatID,
+		ReplyToMessageID: ev.MessageID,
+		PendingID:        pending.ID,
+		Prompt:           pending.Prompt,
+		ProjectAliases:   pending.ProjectAliases,
+	})
+	return err
+}
+
+func (r *Router) handleProjectSelection(ctx context.Context, ev contracts.InboundEvent) error {
+	pending, err := r.store.ConsumePendingIntent(ctx, ev.ActionValue["pending_id"], ev.SenderOpenID, r.now())
+	if errors.Is(err, store.ErrNotFound) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	alias := ev.ActionValue["project"]
+	if !containsProjectAlias(pending.ProjectAliases, alias) {
+		_, sendErr := r.notifier.ProjectSelection(ctx, notify.ProjectSelectionInput{
+			ChatID:           ev.ChatID,
+			ReplyToMessageID: ev.MessageID,
+			PendingID:        pending.ID,
+			Prompt:           pending.Prompt,
+			ProjectAliases:   pending.ProjectAliases,
+		})
+		return sendErr
+	}
+	return r.startTask(ctx, ev, alias, pending.Prompt)
+}
+
+func (r *Router) startTask(ctx context.Context, ev contracts.InboundEvent, alias, prompt string) error {
+	running, ok, err := r.store.FindRunningTask(ctx, ev.ChatID, ev.SenderOpenID)
+	if err != nil {
+		return err
+	}
+	if ok {
+		return r.notifier.RunningConflict(ctx, notify.RunningConflictInput{
+			ChatID:           ev.ChatID,
+			ReplyToMessageID: ev.MessageID,
+			TaskID:           running.ID,
+			Status:           running.Status,
+			ProjectAlias:     running.ProjectAlias,
+		})
 	}
 	project, err := r.cfg.ResolveProject(alias)
 	if err != nil {
@@ -148,8 +246,43 @@ func (r *Router) handleNewTask(ctx context.Context, ev contracts.InboundEvent) e
 func (r *Router) handleContinuation(ctx context.Context, ev contracts.InboundEvent) error {
 	text := strings.TrimSpace(ev.Text)
 	if ev.Kind == contracts.InboundCardAction && text == "" {
+		if ev.ActionID == "continue_submit" || ev.ActionValue["action"] == "continue" {
+			return nil
+		}
 		return r.notifier.Rejection(ctx, ev.ChatID, ev.MessageID, "Follow-up text is required.")
 	}
+	return r.resumeTask(ctx, ev, text)
+}
+
+func (r *Router) handleShortcut(ctx context.Context, ev contracts.InboundEvent) error {
+	shortcutName := ev.ActionValue["shortcut"]
+	shortcut, ok := intent.LookupShortcut(shortcutName)
+	if !ok {
+		return r.notifier.Rejection(ctx, ev.ChatID, ev.MessageID, "Unknown shortcut.")
+	}
+	if shortcut.Immediate {
+		return r.resumeTask(ctx, ev, shortcut.Prompt)
+	}
+	_, err := r.notifier.ShortcutConfirmation(ctx, notify.ShortcutConfirmationInput{
+		ChatID:           ev.ChatID,
+		ReplyToMessageID: ev.MessageID,
+		RootMessageID:    ev.RootMessageID,
+		Shortcut:         shortcutName,
+		Prompt:           shortcut.Prompt,
+	})
+	return err
+}
+
+func (r *Router) handleShortcutConfirmation(ctx context.Context, ev contracts.InboundEvent) error {
+	shortcutName := ev.ActionValue["shortcut"]
+	shortcut, ok := intent.LookupShortcut(shortcutName)
+	if !ok {
+		return r.notifier.Rejection(ctx, ev.ChatID, ev.MessageID, "Unknown shortcut.")
+	}
+	return r.resumeTask(ctx, ev, shortcut.Prompt)
+}
+
+func (r *Router) resumeTask(ctx context.Context, ev contracts.InboundEvent, text string) error {
 	task, err := r.store.ResolveMessageRoute(ctx, ev.RootMessageID)
 	if errors.Is(err, store.ErrRouteMiss) {
 		_, sendErr := r.notifier.RoutingError(ctx, ev.ChatID, ev.MessageID)
@@ -276,10 +409,27 @@ func sourceFor(ev contracts.InboundEvent) string {
 	return "message"
 }
 
+func containsProjectAlias(aliases []string, want string) bool {
+	for _, alias := range aliases {
+		if alias == want {
+			return true
+		}
+	}
+	return false
+}
+
 func randomTaskID() string {
 	var buf [3]byte
 	if _, err := rand.Read(buf[:]); err != nil {
 		return fmt.Sprintf("cx_%d", time.Now().UnixNano())
 	}
 	return "cx_" + hex.EncodeToString(buf[:])
+}
+
+func randomPendingID() string {
+	var buf [3]byte
+	if _, err := rand.Read(buf[:]); err != nil {
+		return fmt.Sprintf("pi_%d", time.Now().UnixNano())
+	}
+	return "pi_" + hex.EncodeToString(buf[:])
 }

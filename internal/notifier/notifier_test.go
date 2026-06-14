@@ -28,9 +28,19 @@ func TestTaskCardsAreRedactedAndRouteable(t *testing.T) {
 		t.Fatalf("unexpected sent message: %+v", sent)
 	}
 	msg := sender.messages[0]
-	for _, want := range []string{"cx_123", "running", "backend", "[local-path]"} {
-		if !strings.Contains(msg.BodyMarkdown, want) {
-			t.Fatalf("card body missing %q: %q", want, msg.BodyMarkdown)
+	if !strings.Contains(msg.Title, "cx_123") {
+		t.Fatalf("card title missing task id: %q", msg.Title)
+	}
+	if !strings.Contains(msg.BodyMarkdown, "Codex 正在处理") {
+		t.Fatalf("card body missing running progress: %q", msg.BodyMarkdown)
+	}
+	gotFields := map[string]string{}
+	for _, field := range msg.Fields {
+		gotFields[field.Title] = field.Value
+	}
+	for title, want := range map[string]string{"状态": "运行中", "项目": "backend", "工作区": "[local-path]"} {
+		if gotFields[title] != want {
+			t.Fatalf("field %q mismatch: got %q want %q in %+v", title, gotFields[title], want, msg.Fields)
 		}
 	}
 	for _, banned := range []string{"/Users/sihuo", "abc123", "user:pass@", "019ec257-e6fd-7be1-9a5e-c47442df292c"} {
@@ -38,8 +48,115 @@ func TestTaskCardsAreRedactedAndRouteable(t *testing.T) {
 			t.Fatalf("card leaked %q in %+v", banned, msg)
 		}
 	}
-	if len(msg.Actions) != 1 || msg.Actions[0].ID != "continue_submit" {
-		t.Fatalf("missing continue action: %+v", msg.Actions)
+	if len(msg.Actions) != 1 || msg.Actions[0].ID != "continue_submit" || msg.Actions[0].Label != "继续跟进" {
+		t.Fatalf("task card should only expose the continue action: %+v", msg.Actions)
+	}
+	if len(msg.Fields) == 0 {
+		t.Fatalf("missing compact metadata fields: %+v", msg)
+	}
+}
+
+func TestTaskCardsUseCompactChineseLayout(t *testing.T) {
+	sender := &fakeSender{messageID: "msg_success"}
+	n := New(sender)
+	_, err := n.Success(context.Background(), TaskCardInput{
+		ChatID:       "chat_1",
+		TaskID:       "cx_8ae94f",
+		Status:       "succeeded",
+		ProjectAlias: "default",
+		CWDLabel:     "/Users/sihuo/GoProject/codex-feishu-bridge",
+		Body:         "Hello，我在。",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	msg := sender.messages[0]
+	if msg.Title != "任务已完成 · cx_8ae94f" {
+		t.Fatalf("unexpected localized title: %q", msg.Title)
+	}
+	for _, banned := range []string{"Task:", "Status:", "Project:", "Workspace:"} {
+		if strings.Contains(msg.BodyMarkdown, banned) {
+			t.Fatalf("task metadata leaked into body as raw label %q: %q", banned, msg.BodyMarkdown)
+		}
+	}
+	if !strings.Contains(msg.BodyMarkdown, "Hello，我在。") || !strings.Contains(msg.BodyMarkdown, "**结果**") {
+		t.Fatalf("body should focus on the codex result: %q", msg.BodyMarkdown)
+	}
+	if !strings.Contains(msg.BodyMarkdown, "直接回复这张任务卡片") {
+		t.Fatalf("body should include reply fallback for continuing the task: %q", msg.BodyMarkdown)
+	}
+	wantFields := []contracts.Field{
+		{Title: "状态", Value: "已完成"},
+		{Title: "项目", Value: "default"},
+		{Title: "工作区", Value: "[local-path]"},
+	}
+	if len(msg.Fields) != len(wantFields) {
+		t.Fatalf("unexpected fields: %+v", msg.Fields)
+	}
+	for i, want := range wantFields {
+		if msg.Fields[i] != want {
+			t.Fatalf("field %d mismatch: got %+v want %+v", i, msg.Fields[i], want)
+		}
+	}
+	if len(msg.Actions) != 1 || msg.Actions[0].ID != "continue_submit" || msg.Actions[0].Label != "继续跟进" {
+		t.Fatalf("task card should only expose the continue action: %+v", msg.Actions)
+	}
+}
+
+func TestProjectSelectionCardActions(t *testing.T) {
+	sender := &fakeSender{messageID: "msg_project"}
+	n := New(sender)
+	_, err := n.ProjectSelection(context.Background(), ProjectSelectionInput{
+		ChatID: "chat", ReplyToMessageID: "msg_user", PendingID: "pi_1",
+		Prompt: "fix tests", ProjectAliases: []string{"backend", "frontend"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	msg := sender.messages[0]
+	if msg.CardKind != contracts.CardProjectSelection || len(msg.Actions) != 2 {
+		t.Fatalf("unexpected project selection: %+v", msg)
+	}
+	if msg.Actions[0].Value["action"] != "select_project" || msg.Actions[0].Value["pending_id"] != "pi_1" {
+		t.Fatalf("missing action payload: %+v", msg.Actions[0])
+	}
+}
+
+func TestRunningConflictAndMigrationCards(t *testing.T) {
+	sender := &fakeSender{messageID: "msg_status"}
+	n := New(sender)
+	if err := n.RunningConflict(context.Background(), RunningConflictInput{
+		ChatID: "chat", ReplyToMessageID: "msg_user", TaskID: "cx_1", Status: "running", ProjectAlias: "backend",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := n.MigrationHint(context.Background(), "chat", "msg_old"); err != nil {
+		t.Fatal(err)
+	}
+	if sender.messages[0].CardKind != contracts.CardRunningConflict || sender.messages[0].TaskID != "cx_1" {
+		t.Fatalf("unexpected running conflict card: %+v", sender.messages[0])
+	}
+	if sender.messages[1].CardKind != contracts.CardMigrationHint {
+		t.Fatalf("unexpected migration hint card: %+v", sender.messages[1])
+	}
+}
+
+func TestShortcutConfirmationActions(t *testing.T) {
+	sender := &fakeSender{messageID: "msg_confirm"}
+	n := New(sender)
+	if _, err := n.ShortcutConfirmation(context.Background(), ShortcutConfirmationInput{
+		ChatID: "chat", ReplyToMessageID: "msg_user", RootMessageID: "msg_result",
+		Shortcut: "run_tests", Prompt: "Run tests.",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	msg := sender.messages[0]
+	if msg.CardKind != contracts.CardShortcutConfirm || len(msg.Actions) != 2 {
+		t.Fatalf("unexpected confirmation card: %+v", msg)
+	}
+	if msg.Actions[0].Value["action"] != "confirm_shortcut" || msg.Actions[1].Value["action"] != "cancel_shortcut" {
+		t.Fatalf("missing confirmation payloads: %+v", msg.Actions)
 	}
 }
 

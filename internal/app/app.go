@@ -67,7 +67,7 @@ func Serve(ctx context.Context, opts ServeOptions) error {
 			return errors.New("missing Feishu app secret")
 		}
 		source := feishu.NewSDKEventSource(cfg.Feishu.AppID, secret, "")
-		receiver = feishu.Receiver{Source: source, Verify: feishu.VerifyOptions{AppID: cfg.Feishu.AppID}}
+		receiver = feishu.Receiver{Source: source, Verify: feishu.VerifyOptions{AppID: cfg.Feishu.AppID, BotOpenID: cfg.Feishu.BotOpenID}}
 	}
 	if sender == nil {
 		api := feishu.NewSDKCardAPI(cfg.Feishu.AppID, secret)
@@ -156,6 +156,7 @@ func startPruneLoop(ctx context.Context, dir string, retentionDays int, now func
 const defaultConfig = `feishu:
   app_id: cli_xxx
   app_secret_env: FEISHU_APP_SECRET
+  bot_open_id: ou_bot_xxx
   connection: websocket
 security:
   allowed_open_ids:

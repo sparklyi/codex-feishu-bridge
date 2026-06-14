@@ -1222,6 +1222,6 @@ Run: `git status --short && git diff --stat origin/dev...HEAD`
 
 Expected: no unstaged files; diff contains only the planned UX, parser, store, notifier, renderer, integration, and docs changes.
 
-- [ ] **Step 5: Prepare final PR or merge workflow**
+- [x] **Step 5: Prepare final PR or merge workflow**
 
 Use repository workflow requested by the user. If pushing to GitHub over normal git HTTPS fails, use the same GitHub API fallback pattern already proven in this repo only after confirming local and remote base SHAs match.

@@ -31,33 +31,6 @@ func TestBuildInteractiveCard(t *testing.T) {
 	}
 }
 
-func TestBuildInteractiveCardWithActionValues(t *testing.T) {
-	card, err := BuildInteractiveCard(contracts.OutboundMessage{
-		CardKind:     contracts.CardProjectSelection,
-		Title:        "Choose project",
-		BodyMarkdown: "Select a project.",
-		Fields:       []contracts.Field{{Title: "Prompt", Value: "fix tests"}},
-		Actions: []contracts.Action{
-			{ID: "project_select", Label: "backend", Value: map[string]string{"action": "select_project", "project": "backend", "pending_id": "pi_1"}},
-			{ID: "project_select", Label: "frontend", Value: map[string]string{"action": "select_project", "project": "frontend", "pending_id": "pi_1"}},
-		},
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	var decoded map[string]any
-	if err := json.Unmarshal(card, &decoded); err != nil {
-		t.Fatalf("invalid card json: %v", err)
-	}
-	if !jsonContains(string(card), "select_project") || !jsonContains(string(card), "backend") || !jsonContains(string(card), "Prompt") {
-		t.Fatalf("card missing action values or fields: %s", string(card))
-	}
-	header := decoded["header"].(map[string]any)
-	if header["template"] == nil {
-		t.Fatalf("missing header template: %s", string(card))
-	}
-}
-
 func TestSenderRateLimitRetryAndMessageID(t *testing.T) {
 	api := &fakeCardAPI{
 		results: []sendResult{

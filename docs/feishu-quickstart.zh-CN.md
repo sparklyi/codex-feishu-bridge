@@ -1,6 +1,6 @@
 # 飞书机器人接入教程
 
-这份教程从零开始配置一个飞书机器人，通过 WebSocket 长连接连接到本机 `codex-feishu-bridge`，并完成一次真实 Codex 任务和卡片回调验证。
+这份教程从零开始配置一个飞书机器人，通过 WebSocket 长连接连接到本机 `codex-feishu-bridge`，并完成一次真实 `/codex` 任务和卡片回调验证。
 
 ## 准备
 
@@ -82,7 +82,7 @@ export FEISHU_APP_SECRET='<your app secret>'
 - `卡片回传交互`
 - callback key：`card.action.trigger`
 
-这个回调用于处理结果卡片里的 Continue、快捷按钮和表单提交。
+这个回调用于处理结果卡片里的 Continue 按钮和表单提交。
 
 ![飞书卡片回调](assets/feishu-card-callback.jpg)
 
@@ -106,7 +106,7 @@ scripts/capture-open-id.sh --app-id cli_xxx
 然后在飞书里打开机器人私聊，发送：
 
 ```text
-ping
+/codex ping
 ```
 
 脚本会输出：
@@ -181,7 +181,7 @@ connected to wss://msg-frontier.feishu.cn/ws/v2...
 在飞书机器人私聊中发送：
 
 ```text
-Reply with exactly OK.
+/codex Reply with exactly OK.
 ```
 
 期望看到：
@@ -190,21 +190,6 @@ Reply with exactly OK.
 2. Codex 执行完成后返回 `Codex task succeeded ...` 结果卡片。
 3. 结果正文包含 `OK`。
 4. 点击结果卡片的 Continue。如果没有填 follow-up 文本，服务会返回 `Follow-up text is required.`，这说明卡片回调已经通过长连接到达本机服务。
-5. 点击 Summarize 或 Explain error 会立即作为续写请求发送给 Codex；点击 Run tests 或 MR description 会先返回确认卡片。
-
-私聊里也可以用项目别名前缀：
-
-```text
-@backend fix the failing router test
-```
-
-群聊里需要 @ 机器人并指定项目：
-
-```text
-@Codex @backend fix the failing router test
-```
-
-如果群聊里发送 `@Codex fix the failing router test`，服务会返回项目选择卡片。旧的 `/codex` 命令不再作为任务入口，会返回迁移提示。
 
 本地也可以确认任务状态：
 
@@ -241,7 +226,7 @@ go run ./cmd/codex-feishu-bridge doctor --config ~/.codex-feishu-bridge/config.y
 
 ### 群聊里没有响应
 
-群聊中未授权用户会被静默忽略。群聊场景还需要开通群消息相关权限，并且需要 @ 机器人；没有项目别名时会返回项目选择卡片。
+群聊中未授权用户会被静默忽略。群聊场景还需要开通群消息相关权限，并且通常需要 @ 机器人。
 
 ### 不想把 secret 写入 shell 历史
 

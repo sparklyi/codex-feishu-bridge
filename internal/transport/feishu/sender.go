@@ -5,7 +5,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"strings"
 	"time"
 
 	lark "github.com/larksuite/oapi-sdk-go/v3"
@@ -130,92 +129,38 @@ func BuildInteractiveCard(msg contracts.OutboundMessage) ([]byte, error) {
 	card := map[string]any{
 		"config": map[string]any{"wide_screen_mode": true},
 		"header": map[string]any{
-			"template": templateFor(msg),
-			"title":    map[string]any{"tag": "plain_text", "content": msg.Title},
+			"title": map[string]any{"tag": "plain_text", "content": msg.Title},
 		},
 		"elements": []any{
 			map[string]any{"tag": "markdown", "content": msg.BodyMarkdown},
 		},
 	}
-	if len(msg.Fields) > 0 {
-		elements := card["elements"].([]any)
-		elements = append(elements, map[string]any{"tag": "markdown", "content": fieldMarkdown(msg.Fields)})
-		card["elements"] = elements
-	}
 	if len(msg.Actions) > 0 {
 		elements := card["elements"].([]any)
-		if needsFollowUpInput(msg.Actions) {
-			elements = append(elements, map[string]any{
+		elements = append(elements,
+			map[string]any{
 				"tag":         "input",
 				"name":        "text",
 				"multiline":   true,
 				"placeholder": map[string]any{"tag": "plain_text", "content": "Follow up"},
-			})
-		}
-		actions := make([]any, 0, len(msg.Actions))
-		for _, action := range msg.Actions {
-			actions = append(actions, map[string]any{
-				"tag":   "button",
-				"type":  buttonType(action.Style),
-				"text":  map[string]any{"tag": "plain_text", "content": action.Label},
-				"value": actionValue(action),
-			})
-		}
-		elements = append(elements, map[string]any{"tag": "action", "actions": actions})
+			},
+			map[string]any{
+				"tag": "action",
+				"actions": []any{
+					map[string]any{
+						"tag":  "button",
+						"type": "primary",
+						"text": map[string]any{"tag": "plain_text", "content": msg.Actions[0].Label},
+						"value": map[string]any{
+							"action_id": msg.Actions[0].ID,
+						},
+					},
+				},
+			},
+		)
 		card["elements"] = elements
 	}
 	return json.Marshal(card)
-}
-
-func templateFor(msg contracts.OutboundMessage) string {
-	switch msg.CardKind {
-	case contracts.CardSuccess:
-		return "green"
-	case contracts.CardFailure, contracts.CardRoutingError:
-		return "red"
-	case contracts.CardRunningConflict, contracts.CardShortcutConfirm:
-		return "orange"
-	case contracts.CardProjectSelection, contracts.CardMigrationHint:
-		return "blue"
-	default:
-		if msg.Status == "failed" {
-			return "red"
-		}
-		return "wathet"
-	}
-}
-
-func fieldMarkdown(fields []contracts.Field) string {
-	lines := make([]string, 0, len(fields))
-	for _, field := range fields {
-		lines = append(lines, "**"+field.Title+"**: "+field.Value)
-	}
-	return strings.Join(lines, "\n")
-}
-
-func needsFollowUpInput(actions []contracts.Action) bool {
-	for _, action := range actions {
-		if action.ID == "continue_submit" {
-			return true
-		}
-	}
-	return false
-}
-
-func actionValue(action contracts.Action) map[string]string {
-	value := make(map[string]string, len(action.Value)+1)
-	for key, val := range action.Value {
-		value[key] = val
-	}
-	value["action_id"] = action.ID
-	return value
-}
-
-func buttonType(style string) string {
-	if style == "" {
-		return "default"
-	}
-	return style
 }
 
 func (s *Sender) sleep(ctx context.Context, d time.Duration) error {

@@ -1,7 +1,6 @@
 feishu:
   app_id: cli_xxx
   app_secret_env: FEISHU_APP_SECRET
-  bot_open_id: ou_bot_xxx
   connection: websocket
 security:
   allowed_open_ids:

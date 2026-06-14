@@ -6,10 +6,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"strconv"
-	"strings"
 	"time"
-	"unicode"
-	"unicode/utf8"
 
 	"github.com/sparklyi/codex-feishu-bridge/internal/contracts"
 )
@@ -17,7 +14,6 @@ import (
 type VerifyOptions struct {
 	AppID             string
 	VerificationToken string
-	BotOpenID         string
 }
 
 func NormalizeMessageJSON(raw []byte, opts VerifyOptions) (contracts.InboundEvent, error) {
@@ -32,7 +28,6 @@ func NormalizeMessageJSON(raw []byte, opts VerifyOptions) (contracts.InboundEven
 	if err != nil {
 		return contracts.InboundEvent{}, err
 	}
-	text, botMentioned := normalizeBotMention(text, msg.Event.Message.Mentions, opts.BotOpenID)
 	rootID := msg.Event.Message.RootID
 	if rootID == "" {
 		rootID = msg.Event.Message.ParentID
@@ -53,7 +48,6 @@ func NormalizeMessageJSON(raw []byte, opts VerifyOptions) (contracts.InboundEven
 		SenderOpenID:  msg.Event.Sender.SenderID.OpenID,
 		MessageID:     msg.Event.Message.MessageID,
 		RootMessageID: rootID,
-		BotMentioned:  botMentioned,
 		Text:          text,
 		RawReceivedAt: parseFeishuTime(msg.Header.CreateTime),
 	}, nil
@@ -67,11 +61,14 @@ func NormalizeCardActionJSON(raw []byte, opts VerifyOptions) (contracts.InboundE
 	if err := verifyHeader(card.Header, opts); err != nil {
 		return contracts.InboundEvent{}, err
 	}
-	actionValue, textRaw, err := normalizeActionValue(card.Event.Action.Value)
-	if err != nil {
-		return contracts.InboundEvent{}, err
+	textRaw, ok := card.Event.Action.Value["text"]
+	if !ok {
+		textRaw = json.RawMessage(`""`)
 	}
-	text := actionValue["text"]
+	var text string
+	if err := json.Unmarshal(textRaw, &text); err != nil {
+		return contracts.InboundEvent{}, fmt.Errorf("callback text must be a string: %w", err)
+	}
 	rootID := card.Event.Context.OpenMessageID
 	dedup := card.Header.EventID
 	if dedup == "" {
@@ -87,7 +84,6 @@ func NormalizeCardActionJSON(raw []byte, opts VerifyOptions) (contracts.InboundE
 		MessageID:     card.Event.Message.MessageID,
 		RootMessageID: rootID,
 		ActionID:      card.Event.Action.ActionID,
-		ActionValue:   actionValue,
 		Text:          text,
 		RawReceivedAt: parseFeishuTime(card.Header.CreateTime),
 	}, nil
@@ -124,74 +120,6 @@ func extractMessageText(raw json.RawMessage) (string, error) {
 		return "", err
 	}
 	return content.Text, nil
-}
-
-func normalizeActionValue(values map[string]json.RawMessage) (map[string]string, json.RawMessage, error) {
-	actionValue := make(map[string]string, len(values))
-	textRaw, ok := values["text"]
-	if !ok {
-		textRaw = json.RawMessage(`""`)
-	}
-	for key, raw := range values {
-		var value string
-		if err := json.Unmarshal(raw, &value); err != nil {
-			if key == "text" {
-				return nil, nil, fmt.Errorf("callback text must be a string: %w", err)
-			}
-			continue
-		}
-		actionValue[key] = value
-	}
-	if _, ok := actionValue["text"]; !ok {
-		actionValue["text"] = ""
-	}
-	return actionValue, textRaw, nil
-}
-
-func normalizeBotMention(text string, mentions []messageMention, botOpenID string) (string, bool) {
-	if botOpenID == "" {
-		return text, false
-	}
-	for _, mention := range mentions {
-		if mention.ID.OpenID != botOpenID {
-			continue
-		}
-		stripped, ok := stripLeadingMention(text, mention.Key)
-		if ok {
-			text = stripped
-		}
-		return text, true
-	}
-	return text, false
-}
-
-func stripLeadingMention(text, key string) (string, bool) {
-	text = strings.TrimSpace(text)
-	key = strings.TrimSpace(key)
-	if key == "" {
-		return text, false
-	}
-	candidates := []string{key}
-	if !strings.HasPrefix(key, "@") {
-		candidates = append(candidates, "@"+key)
-	}
-	for _, candidate := range candidates {
-		if text == candidate {
-			return "", true
-		}
-		if !strings.HasPrefix(text, candidate) {
-			continue
-		}
-		rest := text[len(candidate):]
-		if rest == "" {
-			return "", true
-		}
-		r, _ := utf8.DecodeRuneInString(rest)
-		if unicode.IsSpace(r) {
-			return strings.TrimSpace(rest), true
-		}
-	}
-	return text, false
 }
 
 func parseFeishuTime(value string) time.Time {
@@ -241,22 +169,14 @@ type messageEnvelope struct {
 			} `json:"sender_id"`
 		} `json:"sender"`
 		Message struct {
-			MessageID string           `json:"message_id"`
-			ChatID    string           `json:"chat_id"`
-			ChatType  string           `json:"chat_type"`
-			Content   json.RawMessage  `json:"content"`
-			Mentions  []messageMention `json:"mentions"`
-			ParentID  string           `json:"parent_id"`
-			RootID    string           `json:"root_id"`
+			MessageID string          `json:"message_id"`
+			ChatID    string          `json:"chat_id"`
+			ChatType  string          `json:"chat_type"`
+			Content   json.RawMessage `json:"content"`
+			ParentID  string          `json:"parent_id"`
+			RootID    string          `json:"root_id"`
 		} `json:"message"`
 	} `json:"event"`
-}
-
-type messageMention struct {
-	Key string `json:"key"`
-	ID  struct {
-		OpenID string `json:"open_id"`
-	} `json:"id"`
 }
 
 type cardEnvelope struct {

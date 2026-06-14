@@ -1,6 +1,6 @@
 package store
 
-const migrationVersion = 2
+const migrationVersion = 1
 
 var migrations = []string{
 	`
@@ -71,20 +71,5 @@ CREATE INDEX IF NOT EXISTS idx_runs_task_id ON runs(task_id);
 CREATE INDEX IF NOT EXISTS idx_runs_status ON runs(status);
 CREATE INDEX IF NOT EXISTS idx_message_routes_task_id ON message_routes(task_id);
 CREATE UNIQUE INDEX IF NOT EXISTS runs_one_active_per_task ON runs(task_id) WHERE status = 'running';
-`,
-	`
-CREATE TABLE IF NOT EXISTS pending_intents (
-	id TEXT PRIMARY KEY,
-	chat_id TEXT NOT NULL,
-	created_by TEXT NOT NULL,
-	prompt TEXT NOT NULL,
-	project_aliases_json TEXT NOT NULL DEFAULT '[]',
-	status TEXT NOT NULL CHECK (status IN ('pending','consumed','expired')),
-	created_at TEXT NOT NULL,
-	expires_at TEXT NOT NULL,
-	consumed_at TEXT
-);
-
-CREATE INDEX IF NOT EXISTS idx_pending_intents_chat_creator ON pending_intents(chat_id, created_by, status);
 `,
 }

@@ -33,30 +33,6 @@ type TaskCardInput struct {
 	CodexSessionID   string
 }
 
-type ProjectSelectionInput struct {
-	ChatID           string
-	ReplyToMessageID string
-	PendingID        string
-	Prompt           string
-	ProjectAliases   []string
-}
-
-type RunningConflictInput struct {
-	ChatID           string
-	ReplyToMessageID string
-	TaskID           string
-	Status           string
-	ProjectAlias     string
-}
-
-type ShortcutConfirmationInput struct {
-	ChatID           string
-	ReplyToMessageID string
-	RootMessageID    string
-	Shortcut         string
-	Prompt           string
-}
-
 func New(sender transport.Sender) *Notifier {
 	return &Notifier{sender: sender}
 }
@@ -80,84 +56,7 @@ func (n *Notifier) RoutingError(ctx context.Context, chatID, replyToMessageID st
 		CardKind:         contracts.CardRoutingError,
 		Status:           "routing_error",
 		Title:            "Cannot route reply",
-		BodyMarkdown:     "Please reply from a task card or start a new task in a private chat.",
-	})
-}
-
-func (n *Notifier) MigrationHint(ctx context.Context, chatID, replyToMessageID string) error {
-	_, err := n.sender.Send(ctx, contracts.OutboundMessage{
-		ChatID:           chatID,
-		ReplyToMessageID: replyToMessageID,
-		CardKind:         contracts.CardMigrationHint,
-		Status:           "migration_hint",
-		Title:            "Command updated",
-		BodyMarkdown:     "Send plain text in a private chat to start a Codex task. Use `@project prompt` when you need a configured project.",
-	})
-	return err
-}
-
-func (n *Notifier) ProjectSelection(ctx context.Context, in ProjectSelectionInput) (contracts.SentMessage, error) {
-	body := "Prompt: " + redact.FeishuText(in.Prompt, 500)
-	if len(in.ProjectAliases) > 0 {
-		body += "\nProjects: " + strings.Join(in.ProjectAliases, ", ")
-	}
-	actions := make([]contracts.Action, 0, len(in.ProjectAliases))
-	for _, alias := range in.ProjectAliases {
-		actions = append(actions, contracts.Action{
-			ID:    "project_select",
-			Label: alias,
-			Value: map[string]string{
-				"action":     "select_project",
-				"pending_id": in.PendingID,
-				"project":    alias,
-			},
-		})
-	}
-	return n.sender.Send(ctx, contracts.OutboundMessage{
-		ChatID:           in.ChatID,
-		ReplyToMessageID: in.ReplyToMessageID,
-		CardKind:         contracts.CardProjectSelection,
-		Status:           "project_selection",
-		Title:            "Choose project",
-		BodyMarkdown:     body,
-		Actions:          actions,
-	})
-}
-
-func (n *Notifier) RunningConflict(ctx context.Context, in RunningConflictInput) error {
-	project := in.ProjectAlias
-	if project == "" {
-		project = "default"
-	}
-	_, err := n.sender.Send(ctx, contracts.OutboundMessage{
-		ChatID:           in.ChatID,
-		ReplyToMessageID: in.ReplyToMessageID,
-		CardKind:         contracts.CardRunningConflict,
-		TaskID:           in.TaskID,
-		Status:           "running_conflict",
-		Title:            "Task already running",
-		BodyMarkdown:     "Task: " + in.TaskID + "\nStatus: " + in.Status + "\nProject: " + project,
-		Fields: []contracts.Field{
-			{Title: "Task", Value: in.TaskID},
-			{Title: "Status", Value: in.Status},
-			{Title: "Project", Value: project},
-		},
-	})
-	return err
-}
-
-func (n *Notifier) ShortcutConfirmation(ctx context.Context, in ShortcutConfirmationInput) (contracts.SentMessage, error) {
-	return n.sender.Send(ctx, contracts.OutboundMessage{
-		ChatID:           in.ChatID,
-		ReplyToMessageID: in.ReplyToMessageID,
-		CardKind:         contracts.CardShortcutConfirm,
-		Status:           "shortcut_confirmation",
-		Title:            "Confirm shortcut",
-		BodyMarkdown:     redact.FeishuText(in.Prompt, failureBodyLimit),
-		Actions: []contracts.Action{
-			{ID: "confirm_shortcut", Label: "Run", Style: "primary", Value: map[string]string{"action": "confirm_shortcut", "shortcut": in.Shortcut, "root_message_id": in.RootMessageID}},
-			{ID: "cancel_shortcut", Label: "Cancel", Value: map[string]string{"action": "cancel_shortcut", "shortcut": in.Shortcut}},
-		},
+		BodyMarkdown:     "Please reply from a task card or start a new `/codex` task.",
 	})
 }
 
@@ -183,8 +82,7 @@ func (n *Notifier) sendTask(ctx context.Context, kind contracts.CardKind, title 
 		Status:           in.Status,
 		Title:            redact.FeishuText(title+" "+in.TaskID, 120),
 		BodyMarkdown:     body,
-		Fields:           taskFields(in),
-		Actions:          taskActions(in.TaskID),
+		Actions:          []contracts.Action{{ID: continueActionID, Label: "Continue"}},
 	}
 	sent, err := n.sender.Send(ctx, msg)
 	if err != nil {
@@ -194,28 +92,6 @@ func (n *Notifier) sendTask(ctx context.Context, kind contracts.CardKind, title 
 		return contracts.SentMessage{}, ErrMissingMessageID
 	}
 	return sent, nil
-}
-
-func taskFields(in TaskCardInput) []contracts.Field {
-	project := in.ProjectAlias
-	if project == "" {
-		project = "default"
-	}
-	return []contracts.Field{
-		{Title: "Status", Value: in.Status},
-		{Title: "Project", Value: project},
-		{Title: "Workspace", Value: redact.FeishuText(in.CWDLabel, 200)},
-	}
-}
-
-func taskActions(taskID string) []contracts.Action {
-	return []contracts.Action{
-		{ID: continueActionID, Label: "Continue", Style: "primary", Value: map[string]string{"action": "continue", "task_id": taskID}},
-		{ID: "shortcut", Label: "Summarize", Value: map[string]string{"action": "shortcut", "shortcut": "summarize", "task_id": taskID}},
-		{ID: "shortcut", Label: "Explain error", Value: map[string]string{"action": "shortcut", "shortcut": "explain_error", "task_id": taskID}},
-		{ID: "shortcut", Label: "Run tests", Value: map[string]string{"action": "shortcut", "shortcut": "run_tests", "task_id": taskID}},
-		{ID: "shortcut", Label: "MR description", Value: map[string]string{"action": "shortcut", "shortcut": "mr_description", "task_id": taskID}},
-	}
 }
 
 func buildBody(in TaskCardInput, limit int) string {

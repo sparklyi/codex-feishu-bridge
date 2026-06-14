@@ -42,7 +42,7 @@ func TestServeStartupAndReceiverFlow(t *testing.T) {
 	if err := os.Chtimes(oldLog, now.Add(-20*24*time.Hour), now.Add(-20*24*time.Hour)); err != nil {
 		t.Fatal(err)
 	}
-	receiver := &fakeReceiver{events: []contracts.InboundEvent{{Kind: contracts.InboundNewTask, DedupKey: "evt_1", ChatType: "private", ChatID: "chat", SenderOpenID: "ou_owner", MessageID: "msg_user", Text: "hello"}}}
+	receiver := &fakeReceiver{events: []contracts.InboundEvent{{Kind: contracts.InboundNewTask, DedupKey: "evt_1", ChatType: "private", ChatID: "chat", SenderOpenID: "ou_owner", MessageID: "msg_user", Text: "/codex hello"}}}
 	sender := &fakeSender{ids: []string{"msg_start", "msg_result"}}
 	runner := &fakeRunner{result: contracts.RunResult{CodexSessionID: "thread_1", FinalText: "done", StartedAt: now, FinishedAt: now}}
 	err = Serve(ctx, ServeOptions{
@@ -128,7 +128,6 @@ func writeAppConfig(t *testing.T, dir, workspace string) string {
 feishu:
   app_id: cli_test
   app_secret_env: FEISHU_APP_SECRET
-  bot_open_id: ou_bot
   connection: websocket
 security:
   allowed_open_ids:
@@ -140,9 +139,6 @@ codex:
   log_retention_days: 14
 workspace:
   default: "` + workspace + `"
-projects:
-  backend:
-    cwd: "` + workspace + `"
 paths:
   state_db: "` + filepath.Join(dir, "state.db") + `"
   log_dir: "` + filepath.Join(dir, "logs") + `"

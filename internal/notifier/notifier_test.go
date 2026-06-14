@@ -38,70 +38,8 @@ func TestTaskCardsAreRedactedAndRouteable(t *testing.T) {
 			t.Fatalf("card leaked %q in %+v", banned, msg)
 		}
 	}
-	if len(msg.Actions) < 5 || msg.Actions[0].ID != "continue_submit" {
+	if len(msg.Actions) != 1 || msg.Actions[0].ID != "continue_submit" {
 		t.Fatalf("missing continue action: %+v", msg.Actions)
-	}
-	if msg.Actions[1].Value["shortcut"] != "summarize" {
-		t.Fatalf("missing shortcut action payloads: %+v", msg.Actions)
-	}
-	if len(msg.Fields) == 0 {
-		t.Fatalf("missing compact metadata fields: %+v", msg)
-	}
-}
-
-func TestProjectSelectionCardActions(t *testing.T) {
-	sender := &fakeSender{messageID: "msg_project"}
-	n := New(sender)
-	_, err := n.ProjectSelection(context.Background(), ProjectSelectionInput{
-		ChatID: "chat", ReplyToMessageID: "msg_user", PendingID: "pi_1",
-		Prompt: "fix tests", ProjectAliases: []string{"backend", "frontend"},
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	msg := sender.messages[0]
-	if msg.CardKind != contracts.CardProjectSelection || len(msg.Actions) != 2 {
-		t.Fatalf("unexpected project selection: %+v", msg)
-	}
-	if msg.Actions[0].Value["action"] != "select_project" || msg.Actions[0].Value["pending_id"] != "pi_1" {
-		t.Fatalf("missing action payload: %+v", msg.Actions[0])
-	}
-}
-
-func TestRunningConflictAndMigrationCards(t *testing.T) {
-	sender := &fakeSender{messageID: "msg_status"}
-	n := New(sender)
-	if err := n.RunningConflict(context.Background(), RunningConflictInput{
-		ChatID: "chat", ReplyToMessageID: "msg_user", TaskID: "cx_1", Status: "running", ProjectAlias: "backend",
-	}); err != nil {
-		t.Fatal(err)
-	}
-	if err := n.MigrationHint(context.Background(), "chat", "msg_old"); err != nil {
-		t.Fatal(err)
-	}
-	if sender.messages[0].CardKind != contracts.CardRunningConflict || sender.messages[0].TaskID != "cx_1" {
-		t.Fatalf("unexpected running conflict card: %+v", sender.messages[0])
-	}
-	if sender.messages[1].CardKind != contracts.CardMigrationHint {
-		t.Fatalf("unexpected migration hint card: %+v", sender.messages[1])
-	}
-}
-
-func TestShortcutConfirmationActions(t *testing.T) {
-	sender := &fakeSender{messageID: "msg_confirm"}
-	n := New(sender)
-	if _, err := n.ShortcutConfirmation(context.Background(), ShortcutConfirmationInput{
-		ChatID: "chat", ReplyToMessageID: "msg_user", RootMessageID: "msg_result",
-		Shortcut: "run_tests", Prompt: "Run tests.",
-	}); err != nil {
-		t.Fatal(err)
-	}
-	msg := sender.messages[0]
-	if msg.CardKind != contracts.CardShortcutConfirm || len(msg.Actions) != 2 {
-		t.Fatalf("unexpected confirmation card: %+v", msg)
-	}
-	if msg.Actions[0].Value["action"] != "confirm_shortcut" || msg.Actions[1].Value["action"] != "cancel_shortcut" {
-		t.Fatalf("missing confirmation payloads: %+v", msg.Actions)
 	}
 }
 

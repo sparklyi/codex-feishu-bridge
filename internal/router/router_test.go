@@ -4,8 +4,6 @@ import (
 	"context"
 	"errors"
 	"path/filepath"
-	"strconv"
-	"strings"
 	"testing"
 	"time"
 
@@ -28,7 +26,7 @@ func TestRouterNewTaskRecordsRoutesAndSessionBeforeFinish(t *testing.T) {
 			t.Fatalf("session should be persisted before finish, task=%+v", task)
 		}
 	}
-	if err := rt.Handle(ctx, contracts.InboundEvent{Kind: contracts.InboundNewTask, DedupKey: "evt_1", ChatType: "private", ChatID: "chat", SenderOpenID: "ou_owner", MessageID: "msg_user", Text: "hello"}); err != nil {
+	if err := rt.Handle(ctx, contracts.InboundEvent{Kind: contracts.InboundNewTask, DedupKey: "evt_1", ChatType: "private", ChatID: "chat", SenderOpenID: "ou_owner", MessageID: "msg_user", Text: "/codex hello"}); err != nil {
 		t.Fatal(err)
 	}
 	if runner.execCalls != 1 {
@@ -48,32 +46,10 @@ func TestRouterNewTaskRecordsRoutesAndSessionBeforeFinish(t *testing.T) {
 	}
 }
 
-func TestRouterPrivatePlainTextStartsTask(t *testing.T) {
-	ctx := context.Background()
-	rt, _, runner, notes := newTestRouter(t, []string{"ou_owner"})
-	if err := rt.Handle(ctx, contracts.InboundEvent{Kind: contracts.InboundNewTask, DedupKey: "evt_1", ChatType: "private", ChatID: "chat", SenderOpenID: "ou_owner", MessageID: "msg_user", Text: "hello"}); err != nil {
-		t.Fatal(err)
-	}
-	if runner.execCalls != 1 || len(notes.starts) != 1 {
-		t.Fatalf("plain private text should start task exec=%d notes=%+v", runner.execCalls, notes)
-	}
-}
-
-func TestRouterCodexCommandSendsMigrationHint(t *testing.T) {
-	ctx := context.Background()
-	rt, _, runner, notes := newTestRouter(t, []string{"ou_owner"})
-	if err := rt.Handle(ctx, contracts.InboundEvent{Kind: contracts.InboundNewTask, DedupKey: "evt_1", ChatType: "private", ChatID: "chat", SenderOpenID: "ou_owner", MessageID: "msg_user", Text: "/codex hello"}); err != nil {
-		t.Fatal(err)
-	}
-	if runner.execCalls != 0 || len(notes.migrationHints) != 1 {
-		t.Fatalf("codex command should not execute exec=%d notes=%+v", runner.execCalls, notes)
-	}
-}
-
 func TestRouterReplyResumesCreatorOnlyAndRejectsRouteMiss(t *testing.T) {
 	ctx := context.Background()
 	rt, _, runner, notes := newTestRouter(t, []string{"ou_owner", "ou_other"})
-	if err := rt.Handle(ctx, contracts.InboundEvent{Kind: contracts.InboundNewTask, DedupKey: "evt_1", ChatType: "private", ChatID: "chat", SenderOpenID: "ou_owner", MessageID: "msg_user", Text: "hello"}); err != nil {
+	if err := rt.Handle(ctx, contracts.InboundEvent{Kind: contracts.InboundNewTask, DedupKey: "evt_1", ChatType: "private", ChatID: "chat", SenderOpenID: "ou_owner", MessageID: "msg_user", Text: "/codex hello"}); err != nil {
 		t.Fatal(err)
 	}
 	if err := rt.Handle(ctx, contracts.InboundEvent{Kind: contracts.InboundReply, DedupKey: "evt_2", ChatType: "private", ChatID: "chat", SenderOpenID: "ou_owner", MessageID: "msg_reply", RootMessageID: "msg_result", Text: "continue"}); err != nil {
@@ -99,23 +75,23 @@ func TestRouterReplyResumesCreatorOnlyAndRejectsRouteMiss(t *testing.T) {
 func TestRouterAuthorizationDuplicateAndStartFailure(t *testing.T) {
 	ctx := context.Background()
 	rt, st, runner, notes := newTestRouter(t, []string{"ou_owner"})
-	if err := rt.Handle(ctx, contracts.InboundEvent{Kind: contracts.InboundNewTask, DedupKey: "unauth_private", ChatType: "private", ChatID: "chat", SenderOpenID: "ou_bad", MessageID: "msg", Text: "hello"}); err != nil {
+	if err := rt.Handle(ctx, contracts.InboundEvent{Kind: contracts.InboundNewTask, DedupKey: "unauth_private", ChatType: "private", ChatID: "chat", SenderOpenID: "ou_bad", MessageID: "msg", Text: "/codex hello"}); err != nil {
 		t.Fatal(err)
 	}
 	if len(notes.rejections) != 1 || runner.execCalls != 0 {
 		t.Fatalf("private unauthorized should reject without runner: notes=%+v exec=%d", notes, runner.execCalls)
 	}
-	if err := rt.Handle(ctx, contracts.InboundEvent{Kind: contracts.InboundNewTask, DedupKey: "unauth_group", ChatType: "group", ChatID: "chat", SenderOpenID: "ou_bad", MessageID: "msg", Text: "hello"}); err != nil {
+	if err := rt.Handle(ctx, contracts.InboundEvent{Kind: contracts.InboundNewTask, DedupKey: "unauth_group", ChatType: "group", ChatID: "chat", SenderOpenID: "ou_bad", MessageID: "msg", Text: "/codex hello"}); err != nil {
 		t.Fatal(err)
 	}
 	if len(notes.rejections) != 1 || runner.execCalls != 0 {
 		t.Fatalf("group unauthorized should be silent: notes=%+v exec=%d", notes, runner.execCalls)
 	}
 
-	if err := rt.Handle(ctx, contracts.InboundEvent{Kind: contracts.InboundNewTask, DedupKey: "evt_1", ChatType: "private", ChatID: "chat", SenderOpenID: "ou_owner", MessageID: "msg", Text: "hello"}); err != nil {
+	if err := rt.Handle(ctx, contracts.InboundEvent{Kind: contracts.InboundNewTask, DedupKey: "evt_1", ChatType: "private", ChatID: "chat", SenderOpenID: "ou_owner", MessageID: "msg", Text: "/codex hello"}); err != nil {
 		t.Fatal(err)
 	}
-	if err := rt.Handle(ctx, contracts.InboundEvent{Kind: contracts.InboundNewTask, DedupKey: "evt_1", ChatType: "private", ChatID: "chat", SenderOpenID: "ou_owner", MessageID: "msg", Text: "hello again"}); err != nil {
+	if err := rt.Handle(ctx, contracts.InboundEvent{Kind: contracts.InboundNewTask, DedupKey: "evt_1", ChatType: "private", ChatID: "chat", SenderOpenID: "ou_owner", MessageID: "msg", Text: "/codex hello again"}); err != nil {
 		t.Fatal(err)
 	}
 	if runner.execCalls != 1 {
@@ -124,7 +100,7 @@ func TestRouterAuthorizationDuplicateAndStartFailure(t *testing.T) {
 
 	rt2, st2, runner2, notes2 := newTestRouter(t, []string{"ou_owner"})
 	notes2.startErr = errors.New("send failed")
-	if err := rt2.Handle(ctx, contracts.InboundEvent{Kind: contracts.InboundNewTask, DedupKey: "evt_start_fail", ChatType: "private", ChatID: "chat", SenderOpenID: "ou_owner", MessageID: "msg", Text: "hello"}); err != nil {
+	if err := rt2.Handle(ctx, contracts.InboundEvent{Kind: contracts.InboundNewTask, DedupKey: "evt_start_fail", ChatType: "private", ChatID: "chat", SenderOpenID: "ou_owner", MessageID: "msg", Text: "/codex hello"}); err != nil {
 		t.Fatal(err)
 	}
 	if runner2.execCalls != 0 {
@@ -143,7 +119,7 @@ func TestRouterAuthorizationDuplicateAndStartFailure(t *testing.T) {
 func TestRouterCardActionEmptyTextRejectedBeforeRun(t *testing.T) {
 	ctx := context.Background()
 	rt, _, runner, notes := newTestRouter(t, []string{"ou_owner"})
-	if err := rt.Handle(ctx, contracts.InboundEvent{Kind: contracts.InboundNewTask, DedupKey: "evt_1", ChatType: "private", ChatID: "chat", SenderOpenID: "ou_owner", MessageID: "msg", Text: "hello"}); err != nil {
+	if err := rt.Handle(ctx, contracts.InboundEvent{Kind: contracts.InboundNewTask, DedupKey: "evt_1", ChatType: "private", ChatID: "chat", SenderOpenID: "ou_owner", MessageID: "msg", Text: "/codex hello"}); err != nil {
 		t.Fatal(err)
 	}
 	if err := rt.Handle(ctx, contracts.InboundEvent{Kind: contracts.InboundCardAction, DedupKey: "evt_2", ChatType: "private", ChatID: "chat", SenderOpenID: "ou_owner", MessageID: "card_cb", RootMessageID: "msg_result", ActionID: "continue_submit", Text: "   "}); err != nil {
@@ -154,125 +130,7 @@ func TestRouterCardActionEmptyTextRejectedBeforeRun(t *testing.T) {
 	}
 }
 
-func TestRouterGroupMentionWithoutProjectSendsProjectSelection(t *testing.T) {
-	ctx := context.Background()
-	rt, _, runner, notes := newTestRouterWithProjects(t, []string{"ou_owner"}, map[string]config.ProjectConfig{
-		"backend": {CWD: t.TempDir()},
-	})
-	if err := rt.Handle(ctx, contracts.InboundEvent{Kind: contracts.InboundNewTask, DedupKey: "evt_1", ChatType: "group", ChatID: "chat", SenderOpenID: "ou_owner", MessageID: "msg_user", Text: "fix tests", BotMentioned: true}); err != nil {
-		t.Fatal(err)
-	}
-	if runner.execCalls != 0 || len(notes.projectSelections) != 1 {
-		t.Fatalf("expected project selection exec=%d notes=%+v", runner.execCalls, notes)
-	}
-}
-
-func TestRouterProjectSelectionStartsPendingTaskOnce(t *testing.T) {
-	ctx := context.Background()
-	rt, _, runner, notes := newTestRouterWithProjects(t, []string{"ou_owner"}, map[string]config.ProjectConfig{
-		"backend": {CWD: t.TempDir()},
-	})
-	err := rt.Handle(ctx, contracts.InboundEvent{
-		Kind: contracts.InboundNewTask, DedupKey: "evt_1", ChatType: "group",
-		ChatID: "chat", SenderOpenID: "ou_owner", MessageID: "msg_user",
-		Text: "fix tests", BotMentioned: true,
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(notes.projectSelections) != 1 {
-		t.Fatalf("expected project selection: %+v", notes)
-	}
-	pendingID := notes.projectSelections[0].PendingID
-	err = rt.Handle(ctx, contracts.InboundEvent{
-		Kind: contracts.InboundCardAction, DedupKey: "evt_2", ChatType: "group",
-		ChatID: "chat", SenderOpenID: "ou_owner", MessageID: "card_cb",
-		ActionID:    "project_select",
-		ActionValue: map[string]string{"action": "select_project", "pending_id": pendingID, "project": "backend"},
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if runner.execCalls != 1 {
-		t.Fatalf("project selection should start one task, exec=%d", runner.execCalls)
-	}
-	err = rt.Handle(ctx, contracts.InboundEvent{
-		Kind: contracts.InboundCardAction, DedupKey: "evt_3", ChatType: "group",
-		ChatID: "chat", SenderOpenID: "ou_owner", MessageID: "card_cb2",
-		ActionID:    "project_select",
-		ActionValue: map[string]string{"action": "select_project", "pending_id": pendingID, "project": "backend"},
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if runner.execCalls != 1 {
-		t.Fatalf("consumed pending intent should not run twice, exec=%d", runner.execCalls)
-	}
-}
-
-func TestRouterRunningConflictDoesNotStartSecondTask(t *testing.T) {
-	ctx := context.Background()
-	rt, _, runner, notes := newTestRouter(t, []string{"ou_owner"})
-	sentSecond := false
-	runner.onSession = func() {
-		if sentSecond {
-			return
-		}
-		sentSecond = true
-		if err := rt.Handle(ctx, contracts.InboundEvent{Kind: contracts.InboundNewTask, DedupKey: "evt_2", ChatType: "private", ChatID: "chat", SenderOpenID: "ou_owner", MessageID: "msg_2", Text: "second"}); err != nil {
-			t.Fatal(err)
-		}
-	}
-	if err := rt.Handle(ctx, contracts.InboundEvent{Kind: contracts.InboundNewTask, DedupKey: "evt_1", ChatType: "private", ChatID: "chat", SenderOpenID: "ou_owner", MessageID: "msg_1", Text: "first"}); err != nil {
-		t.Fatal(err)
-	}
-	if runner.execCalls != 1 || len(notes.runningConflicts) != 1 {
-		t.Fatalf("second task should be blocked exec=%d notes=%+v", runner.execCalls, notes)
-	}
-}
-
-func TestRouterShortcutSummarizeResumesImmediately(t *testing.T) {
-	ctx := context.Background()
-	rt, _, runner, _ := newTestRouter(t, []string{"ou_owner"})
-	startTaskForShortcutTest(t, ctx, rt)
-	err := rt.Handle(ctx, contracts.InboundEvent{
-		Kind: contracts.InboundCardAction, DedupKey: "shortcut_1", ChatType: "private",
-		ChatID: "chat", SenderOpenID: "ou_owner", MessageID: "card_cb",
-		RootMessageID: "msg_result", ActionID: "shortcut",
-		ActionValue: map[string]string{"shortcut": "summarize"},
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if runner.resumeCalls != 1 || !strings.Contains(runner.lastResumeReply, "Summarize") {
-		t.Fatalf("unexpected shortcut resume calls=%d reply=%q", runner.resumeCalls, runner.lastResumeReply)
-	}
-}
-
-func TestRouterShortcutRunTestsRequiresConfirmation(t *testing.T) {
-	ctx := context.Background()
-	rt, _, runner, notes := newTestRouter(t, []string{"ou_owner"})
-	startTaskForShortcutTest(t, ctx, rt)
-	err := rt.Handle(ctx, contracts.InboundEvent{
-		Kind: contracts.InboundCardAction, DedupKey: "shortcut_1", ChatType: "private",
-		ChatID: "chat", SenderOpenID: "ou_owner", MessageID: "card_cb",
-		RootMessageID: "msg_result", ActionID: "shortcut",
-		ActionValue: map[string]string{"shortcut": "run_tests"},
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if runner.resumeCalls != 0 || len(notes.confirmations) != 1 {
-		t.Fatalf("run tests should require confirmation resumes=%d notes=%+v", runner.resumeCalls, notes)
-	}
-}
-
 func newTestRouter(t *testing.T, allowed []string) (*Router, *store.Store, *fakeRunner, *fakeNotifier) {
-	t.Helper()
-	return newTestRouterWithProjects(t, allowed, nil)
-}
-
-func newTestRouterWithProjects(t *testing.T, allowed []string, projects map[string]config.ProjectConfig) (*Router, *store.Store, *fakeRunner, *fakeNotifier) {
 	t.Helper()
 	ctx := context.Background()
 	st, err := store.Open(ctx, filepath.Join(t.TempDir(), "state.db"))
@@ -292,9 +150,7 @@ func newTestRouterWithProjects(t *testing.T, allowed []string, projects map[stri
 		Security:  config.SecurityConfig{AllowedOpenIDs: allowed},
 		Codex:     config.CodexConfig{Command: "codex", Sandbox: "workspace-write", Approval: "never"},
 		Workspace: config.WorkspaceConfig{Default: t.TempDir()},
-		Projects:  projects,
 	}
-	nextTaskID := 0
 	rt := New(RouterOptions{
 		Config:   cfg,
 		Store:    st,
@@ -302,8 +158,7 @@ func newTestRouterWithProjects(t *testing.T, allowed []string, projects map[stri
 		Notifier: notes,
 		Now:      func() time.Time { return time.Date(2026, 6, 14, 12, 0, 0, 0, time.UTC) },
 		NewTaskID: func() string {
-			nextTaskID++
-			return "cx_" + strconv.Itoa(nextTaskID)
+			return "cx_1"
 		},
 		NewRunID: func() string {
 			return "run_" + time.Now().Format("150405.000000000")
@@ -313,11 +168,10 @@ func newTestRouterWithProjects(t *testing.T, allowed []string, projects map[stri
 }
 
 type fakeRunner struct {
-	result          contracts.RunResult
-	execCalls       int
-	resumeCalls     int
-	onSession       func()
-	lastResumeReply string
+	result      contracts.RunResult
+	execCalls   int
+	resumeCalls int
+	onSession   func()
 }
 
 func (f *fakeRunner) Exec(ctx context.Context, in codexrunner.ExecInput) (contracts.RunResult, error) {
@@ -335,7 +189,6 @@ func (f *fakeRunner) Exec(ctx context.Context, in codexrunner.ExecInput) (contra
 
 func (f *fakeRunner) Resume(ctx context.Context, in codexrunner.ResumeInput) (contracts.RunResult, error) {
 	f.resumeCalls++
-	f.lastResumeReply = in.Reply
 	if in.SessionID == "" {
 		return contracts.RunResult{}, errors.New("missing session")
 	}
@@ -346,18 +199,14 @@ func (f *fakeRunner) Resume(ctx context.Context, in codexrunner.ResumeInput) (co
 }
 
 type fakeNotifier struct {
-	startIDs          []string
-	resultIDs         []string
-	startErr          error
-	starts            []notifier.TaskCardInput
-	successes         []notifier.TaskCardInput
-	failures          []notifier.TaskCardInput
-	rejections        []string
-	routingErrors     []string
-	migrationHints    []string
-	projectSelections []notifier.ProjectSelectionInput
-	runningConflicts  []notifier.RunningConflictInput
-	confirmations     []notifier.ShortcutConfirmationInput
+	startIDs      []string
+	resultIDs     []string
+	startErr      error
+	starts        []notifier.TaskCardInput
+	successes     []notifier.TaskCardInput
+	failures      []notifier.TaskCardInput
+	rejections    []string
+	routingErrors []string
 }
 
 func (f *fakeNotifier) Start(ctx context.Context, in notifier.TaskCardInput) (contracts.SentMessage, error) {
@@ -386,33 +235,6 @@ func (f *fakeNotifier) RoutingError(ctx context.Context, chatID, replyToMessageI
 func (f *fakeNotifier) Rejection(ctx context.Context, chatID, replyToMessageID, body string) error {
 	f.rejections = append(f.rejections, body)
 	return nil
-}
-
-func (f *fakeNotifier) MigrationHint(ctx context.Context, chatID, replyToMessageID string) error {
-	f.migrationHints = append(f.migrationHints, replyToMessageID)
-	return nil
-}
-
-func (f *fakeNotifier) ProjectSelection(ctx context.Context, in notifier.ProjectSelectionInput) (contracts.SentMessage, error) {
-	f.projectSelections = append(f.projectSelections, in)
-	return contracts.SentMessage{MessageID: "msg_project"}, nil
-}
-
-func (f *fakeNotifier) RunningConflict(ctx context.Context, in notifier.RunningConflictInput) error {
-	f.runningConflicts = append(f.runningConflicts, in)
-	return nil
-}
-
-func (f *fakeNotifier) ShortcutConfirmation(ctx context.Context, in notifier.ShortcutConfirmationInput) (contracts.SentMessage, error) {
-	f.confirmations = append(f.confirmations, in)
-	return contracts.SentMessage{MessageID: "msg_confirm"}, nil
-}
-
-func startTaskForShortcutTest(t *testing.T, ctx context.Context, rt *Router) {
-	t.Helper()
-	if err := rt.Handle(ctx, contracts.InboundEvent{Kind: contracts.InboundNewTask, DedupKey: "evt_start", ChatType: "private", ChatID: "chat", SenderOpenID: "ou_owner", MessageID: "msg_user", Text: "hello"}); err != nil {
-		t.Fatal(err)
-	}
 }
 
 func popID(ids *[]string) string {

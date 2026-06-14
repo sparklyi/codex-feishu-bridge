@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"path/filepath"
+	"strconv"
 	"testing"
 	"time"
 
@@ -208,6 +209,27 @@ func TestRouterProjectSelectionStartsPendingTaskOnce(t *testing.T) {
 	}
 }
 
+func TestRouterRunningConflictDoesNotStartSecondTask(t *testing.T) {
+	ctx := context.Background()
+	rt, _, runner, notes := newTestRouter(t, []string{"ou_owner"})
+	sentSecond := false
+	runner.onSession = func() {
+		if sentSecond {
+			return
+		}
+		sentSecond = true
+		if err := rt.Handle(ctx, contracts.InboundEvent{Kind: contracts.InboundNewTask, DedupKey: "evt_2", ChatType: "private", ChatID: "chat", SenderOpenID: "ou_owner", MessageID: "msg_2", Text: "second"}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := rt.Handle(ctx, contracts.InboundEvent{Kind: contracts.InboundNewTask, DedupKey: "evt_1", ChatType: "private", ChatID: "chat", SenderOpenID: "ou_owner", MessageID: "msg_1", Text: "first"}); err != nil {
+		t.Fatal(err)
+	}
+	if runner.execCalls != 1 || len(notes.runningConflicts) != 1 {
+		t.Fatalf("second task should be blocked exec=%d notes=%+v", runner.execCalls, notes)
+	}
+}
+
 func newTestRouter(t *testing.T, allowed []string) (*Router, *store.Store, *fakeRunner, *fakeNotifier) {
 	t.Helper()
 	return newTestRouterWithProjects(t, allowed, nil)
@@ -235,6 +257,7 @@ func newTestRouterWithProjects(t *testing.T, allowed []string, projects map[stri
 		Workspace: config.WorkspaceConfig{Default: t.TempDir()},
 		Projects:  projects,
 	}
+	nextTaskID := 0
 	rt := New(RouterOptions{
 		Config:   cfg,
 		Store:    st,
@@ -242,7 +265,8 @@ func newTestRouterWithProjects(t *testing.T, allowed []string, projects map[stri
 		Notifier: notes,
 		Now:      func() time.Time { return time.Date(2026, 6, 14, 12, 0, 0, 0, time.UTC) },
 		NewTaskID: func() string {
-			return "cx_1"
+			nextTaskID++
+			return "cx_" + strconv.Itoa(nextTaskID)
 		},
 		NewRunID: func() string {
 			return "run_" + time.Now().Format("150405.000000000")
@@ -293,6 +317,7 @@ type fakeNotifier struct {
 	routingErrors     []string
 	migrationHints    []string
 	projectSelections []notifier.ProjectSelectionInput
+	runningConflicts  []notifier.RunningConflictInput
 }
 
 func (f *fakeNotifier) Start(ctx context.Context, in notifier.TaskCardInput) (contracts.SentMessage, error) {
@@ -331,6 +356,11 @@ func (f *fakeNotifier) MigrationHint(ctx context.Context, chatID, replyToMessage
 func (f *fakeNotifier) ProjectSelection(ctx context.Context, in notifier.ProjectSelectionInput) (contracts.SentMessage, error) {
 	f.projectSelections = append(f.projectSelections, in)
 	return contracts.SentMessage{MessageID: "msg_project"}, nil
+}
+
+func (f *fakeNotifier) RunningConflict(ctx context.Context, in notifier.RunningConflictInput) error {
+	f.runningConflicts = append(f.runningConflicts, in)
+	return nil
 }
 
 func popID(ids *[]string) string {

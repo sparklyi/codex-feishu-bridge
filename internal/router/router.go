@@ -28,6 +28,7 @@ type TaskStore interface {
 	ResolveMessageRoute(ctx context.Context, messageID string) (store.Task, error)
 	CreatePendingIntent(ctx context.Context, in store.CreatePendingIntentInput) (store.PendingIntent, error)
 	ConsumePendingIntent(ctx context.Context, id, createdBy string, now time.Time) (store.PendingIntent, error)
+	FindRunningTask(ctx context.Context, chatID, creatorOpenID string) (store.Task, bool, error)
 }
 
 type Runner interface {
@@ -43,6 +44,7 @@ type Notifier interface {
 	Rejection(ctx context.Context, chatID, replyToMessageID, body string) error
 	MigrationHint(ctx context.Context, chatID, replyToMessageID string) error
 	ProjectSelection(ctx context.Context, in notify.ProjectSelectionInput) (contracts.SentMessage, error)
+	RunningConflict(ctx context.Context, in notify.RunningConflictInput) error
 }
 
 type RouterOptions struct {
@@ -175,6 +177,19 @@ func (r *Router) handleProjectSelection(ctx context.Context, ev contracts.Inboun
 }
 
 func (r *Router) startTask(ctx context.Context, ev contracts.InboundEvent, alias, prompt string) error {
+	running, ok, err := r.store.FindRunningTask(ctx, ev.ChatID, ev.SenderOpenID)
+	if err != nil {
+		return err
+	}
+	if ok {
+		return r.notifier.RunningConflict(ctx, notify.RunningConflictInput{
+			ChatID:           ev.ChatID,
+			ReplyToMessageID: ev.MessageID,
+			TaskID:           running.ID,
+			Status:           running.Status,
+			ProjectAlias:     running.ProjectAlias,
+		})
+	}
 	project, err := r.cfg.ResolveProject(alias)
 	if err != nil {
 		return r.notifier.Rejection(ctx, ev.ChatID, ev.MessageID, "Project configuration error: "+err.Error())

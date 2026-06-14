@@ -41,6 +41,14 @@ type ProjectSelectionInput struct {
 	ProjectAliases   []string
 }
 
+type RunningConflictInput struct {
+	ChatID           string
+	ReplyToMessageID string
+	TaskID           string
+	Status           string
+	ProjectAlias     string
+}
+
 func New(sender transport.Sender) *Notifier {
 	return &Notifier{sender: sender}
 }
@@ -98,6 +106,23 @@ func (n *Notifier) ProjectSelection(ctx context.Context, in ProjectSelectionInpu
 		BodyMarkdown:     body,
 		Actions:          actions,
 	})
+}
+
+func (n *Notifier) RunningConflict(ctx context.Context, in RunningConflictInput) error {
+	project := in.ProjectAlias
+	if project == "" {
+		project = "default"
+	}
+	_, err := n.sender.Send(ctx, contracts.OutboundMessage{
+		ChatID:           in.ChatID,
+		ReplyToMessageID: in.ReplyToMessageID,
+		CardKind:         contracts.CardRoutingError,
+		TaskID:           in.TaskID,
+		Status:           "running_conflict",
+		Title:            "Task already running",
+		BodyMarkdown:     "Task: " + in.TaskID + "\nStatus: " + in.Status + "\nProject: " + project,
+	})
+	return err
 }
 
 func (n *Notifier) Rejection(ctx context.Context, chatID, replyToMessageID, body string) error {

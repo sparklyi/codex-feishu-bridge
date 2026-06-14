@@ -792,7 +792,7 @@ git commit -m "feat(router): add project selection flow"
 - Modify: `internal/router/router_test.go`
 - Modify: `internal/notifier/notifier.go`
 
-- [ ] **Step 1: Write failing running-conflict test**
+- [x] **Step 1: Write failing running-conflict test**
 
 Add:
 
@@ -815,13 +815,13 @@ func TestRouterRunningConflictDoesNotStartSecondTask(t *testing.T) {
 
 The fake runner can simulate a task remaining running by not calling finish until after the second event, or the test can pre-seed a running task through the store.
 
-- [ ] **Step 2: Run conflict test and verify failure**
+- [x] **Step 2: Run conflict test and verify failure**
 
 Run: `go test ./internal/router -run TestRouterRunningConflictDoesNotStartSecondTask -count=1`
 
 Expected: FAIL because router does not check active tasks before admission.
 
-- [ ] **Step 3: Implement conflict check**
+- [x] **Step 3: Implement conflict check**
 
 Before `AdmitNewTask`, call `FindRunningTask(chatID, senderOpenID)`. If found, call:
 
@@ -831,13 +831,13 @@ RunningConflict(ctx context.Context, in notify.RunningConflictInput) error
 
 Do not insert a dedup row for conflict messages unless store design explicitly tracks rejected events. Keep the behavior idempotent by relying on Feishu event id and no side effects besides the reply card.
 
-- [ ] **Step 4: Run router tests**
+- [x] **Step 4: Run router tests**
 
 Run: `go test ./internal/router -count=1`
 
 Expected: PASS.
 
-- [ ] **Step 5: Commit conflict handling**
+- [x] **Step 5: Commit conflict handling**
 
 ```bash
 git add internal/router/router.go internal/router/router_test.go internal/notifier/notifier.go

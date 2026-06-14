@@ -2,7 +2,7 @@
 
 Prerequisites:
 
-- Go 1.22+
+- Go 1.26
 - Codex CLI available on `PATH`
 - A Feishu app for manual E2E testing
 

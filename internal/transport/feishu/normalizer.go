@@ -67,14 +67,11 @@ func NormalizeCardActionJSON(raw []byte, opts VerifyOptions) (contracts.InboundE
 	if err := verifyHeader(card.Header, opts); err != nil {
 		return contracts.InboundEvent{}, err
 	}
-	textRaw, ok := card.Event.Action.Value["text"]
-	if !ok {
-		textRaw = json.RawMessage(`""`)
+	actionValue, textRaw, err := normalizeActionValue(card.Event.Action.Value)
+	if err != nil {
+		return contracts.InboundEvent{}, err
 	}
-	var text string
-	if err := json.Unmarshal(textRaw, &text); err != nil {
-		return contracts.InboundEvent{}, fmt.Errorf("callback text must be a string: %w", err)
-	}
+	text := actionValue["text"]
 	rootID := card.Event.Context.OpenMessageID
 	dedup := card.Header.EventID
 	if dedup == "" {
@@ -90,6 +87,7 @@ func NormalizeCardActionJSON(raw []byte, opts VerifyOptions) (contracts.InboundE
 		MessageID:     card.Event.Message.MessageID,
 		RootMessageID: rootID,
 		ActionID:      card.Event.Action.ActionID,
+		ActionValue:   actionValue,
 		Text:          text,
 		RawReceivedAt: parseFeishuTime(card.Header.CreateTime),
 	}, nil
@@ -126,6 +124,28 @@ func extractMessageText(raw json.RawMessage) (string, error) {
 		return "", err
 	}
 	return content.Text, nil
+}
+
+func normalizeActionValue(values map[string]json.RawMessage) (map[string]string, json.RawMessage, error) {
+	actionValue := make(map[string]string, len(values))
+	textRaw, ok := values["text"]
+	if !ok {
+		textRaw = json.RawMessage(`""`)
+	}
+	for key, raw := range values {
+		var value string
+		if err := json.Unmarshal(raw, &value); err != nil {
+			if key == "text" {
+				return nil, nil, fmt.Errorf("callback text must be a string: %w", err)
+			}
+			continue
+		}
+		actionValue[key] = value
+	}
+	if _, ok := actionValue["text"]; !ok {
+		actionValue["text"] = ""
+	}
+	return actionValue, textRaw, nil
 }
 
 func normalizeBotMention(text string, mentions []messageMention, botOpenID string) (string, bool) {

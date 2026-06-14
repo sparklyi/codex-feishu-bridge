@@ -936,7 +936,7 @@ git commit -m "feat(router): add task shortcut actions"
 - Modify: `internal/notifier/notifier.go`
 - Modify: `internal/notifier/notifier_test.go`
 
-- [ ] **Step 1: Write failing notifier tests**
+- [x] **Step 1: Write failing notifier tests**
 
 Add tests asserting:
 
@@ -969,13 +969,13 @@ func TestProjectSelectionCardActions(t *testing.T) {
 }
 ```
 
-- [ ] **Step 2: Run notifier tests and verify failure**
+- [x] **Step 2: Run notifier tests and verify failure**
 
 Run: `go test ./internal/notifier -count=1`
 
 Expected: FAIL because new card kinds and action payloads do not exist.
 
-- [ ] **Step 3: Extend contracts and notifier**
+- [x] **Step 3: Extend contracts and notifier**
 
 Add card kinds:
 
@@ -1013,13 +1013,13 @@ where `Field` is a simple title/value pair.
 
 Implement notifier methods for project selection, running conflict, migration hint, and shortcut confirmation. Keep redaction in notifier before data reaches sender.
 
-- [ ] **Step 4: Run notifier tests**
+- [x] **Step 4: Run notifier tests**
 
 Run: `go test ./internal/notifier -count=1`
 
 Expected: PASS.
 
-- [ ] **Step 5: Commit notifier APIs**
+- [x] **Step 5: Commit notifier APIs**
 
 ```bash
 git add internal/contracts/contracts.go internal/notifier/notifier.go internal/notifier/notifier_test.go

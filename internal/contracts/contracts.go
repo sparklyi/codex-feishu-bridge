@@ -18,6 +18,7 @@ type InboundEvent struct {
 	SenderOpenID  string
 	MessageID     string
 	RootMessageID string
+	BotMentioned  bool
 	ActionID      string
 	Text          string
 	RawReceivedAt time.Time

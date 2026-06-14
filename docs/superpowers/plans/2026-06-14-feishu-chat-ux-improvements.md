@@ -154,7 +154,7 @@ git commit -m "feat(config): add Feishu bot identity"
 - Create: `internal/intent/parser.go`
 - Create: `internal/intent/parser_test.go`
 
-- [ ] **Step 1: Write failing parser tests**
+- [x] **Step 1: Write failing parser tests**
 
 Create `internal/intent/parser_test.go` with tests for:
 
@@ -224,13 +224,13 @@ func TestGroupRequiresBotMentionAndProject(t *testing.T) {
 }
 ```
 
-- [ ] **Step 2: Run parser tests and verify failure**
+- [x] **Step 2: Run parser tests and verify failure**
 
 Run: `go test ./internal/intent -count=1`
 
 Expected: FAIL because the package does not exist.
 
-- [ ] **Step 3: Implement parser types and minimal logic**
+- [x] **Step 3: Implement parser types and minimal logic**
 
 Create `internal/intent/intent.go`:
 
@@ -271,13 +271,13 @@ Create `internal/intent/parser.go` with a small parser that:
 - requires project selection for mentioned group messages with no leading alias;
 - returns start intent for private plain text.
 
-- [ ] **Step 4: Run parser tests and verify pass**
+- [x] **Step 4: Run parser tests and verify pass**
 
 Run: `go test ./internal/intent -count=1`
 
 Expected: PASS.
 
-- [ ] **Step 5: Commit intent parser**
+- [x] **Step 5: Commit intent parser**
 
 ```bash
 git add internal/intent

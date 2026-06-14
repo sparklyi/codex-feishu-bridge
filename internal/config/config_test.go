@@ -223,6 +223,18 @@ func TestExampleConfigParses(t *testing.T) {
 	if cfg.Feishu.Connection != "websocket" || cfg.Codex.Sandbox != "workspace-write" {
 		t.Fatalf("unexpected example config: %+v", cfg)
 	}
+	if !containsString(cfg.Codex.ExtraArgs, "--ignore-user-config") {
+		t.Fatalf("example config should isolate bridge runs from stale user Codex project config: %+v", cfg.Codex.ExtraArgs)
+	}
+}
+
+func containsString(values []string, want string) bool {
+	for _, value := range values {
+		if value == want {
+			return true
+		}
+	}
+	return false
 }
 
 func hasError(diags []Diagnostic) bool {

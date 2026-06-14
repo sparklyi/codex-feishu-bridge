@@ -5,6 +5,7 @@ import (
 	"errors"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/sparklyi/codex-feishu-bridge/internal/contracts"
 )
@@ -101,6 +102,63 @@ func TestTaskCardsUseCompactChineseLayout(t *testing.T) {
 	}
 	if len(msg.Actions) != 1 || msg.Actions[0].ID != "continue_submit" || msg.Actions[0].Label != "继续跟进" {
 		t.Fatalf("task card should only expose the continue action: %+v", msg.Actions)
+	}
+}
+
+func TestFollowUpAcceptedUpdatesOriginalCardWithoutForm(t *testing.T) {
+	sender := &fakeSender{messageID: "msg_result"}
+	n := New(sender)
+	sent, err := n.FollowUpAccepted(context.Background(), FollowUpAcceptedInput{
+		ChatID:          "chat_1",
+		UpdateMessageID: "msg_result",
+		TaskID:          "cx_8ae94f",
+		ProjectAlias:    "default",
+		CWDLabel:        "/Users/sihuo/GoProject/codex-feishu-bridge",
+		Prompt:          "测试继续处理并检查状态",
+		SubmittedAt:     time.Date(2026, 6, 14, 20, 55, 0, 0, time.FixedZone("CST", 8*60*60)),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if sent.MessageID != "msg_result" {
+		t.Fatalf("updated card should preserve original message id: %+v", sent)
+	}
+	msg := sender.messages[0]
+	if msg.UpdateMessageID != "msg_result" {
+		t.Fatalf("expected original card update target: %+v", msg)
+	}
+	if msg.Title != "继续处理中 · cx_8ae94f" || msg.Status != "running" {
+		t.Fatalf("unexpected follow-up accepted title/status: %+v", msg)
+	}
+	for _, want := range []string{"已收到继续跟进", "2026-06-14 20:55:00 CST", "测试继续处理并检查状态"} {
+		if !strings.Contains(msg.BodyMarkdown, want) {
+			t.Fatalf("accepted card missing %q: %q", want, msg.BodyMarkdown)
+		}
+	}
+	if len(msg.Actions) != 0 {
+		t.Fatalf("running accepted card must not expose another follow-up form: %+v", msg.Actions)
+	}
+}
+
+func TestFollowUpAcceptedCanSendFallbackAcknowledgement(t *testing.T) {
+	sender := &fakeSender{messageID: "msg_ack"}
+	n := New(sender)
+	sent, err := n.FollowUpAccepted(context.Background(), FollowUpAcceptedInput{
+		ChatID:      "chat_1",
+		TaskID:      "cx_8ae94f",
+		Status:      "running",
+		Prompt:      "fallback ack",
+		SubmittedAt: time.Date(2026, 6, 14, 20, 55, 0, 0, time.UTC),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if sent.MessageID != "msg_ack" {
+		t.Fatalf("unexpected fallback ack message id: %+v", sent)
+	}
+	msg := sender.messages[0]
+	if msg.UpdateMessageID != "" || msg.CardKind != contracts.CardStart || len(msg.Actions) != 0 {
+		t.Fatalf("fallback acknowledgement should be a new no-form running card: %+v", msg)
 	}
 }
 

@@ -2,6 +2,7 @@ package app
 
 import (
 	"context"
+	"errors"
 	"os"
 	"path/filepath"
 	"testing"
@@ -95,7 +96,9 @@ func TestIntegration(t *testing.T) {
 	t.Run("result card failure", func(t *testing.T) {
 		env := newIntegrationEnv(t, []contracts.InboundEvent{{Kind: contracts.InboundNewTask, DedupKey: "evt_1", ChatType: "private", ChatID: "chat", SenderOpenID: "ou_owner", MessageID: "msg_user", Text: "hello"}})
 		env.sender.failAfter = 2
-		env.run(t)
+		if err := env.runErr(); !errors.Is(err, os.ErrPermission) {
+			t.Fatalf("expected result send failure, got %v", err)
+		}
 		st := env.openStore(t)
 		defer st.Close()
 		tasks, err := st.ListTasks(context.Background(), 10)
@@ -158,7 +161,13 @@ func newIntegrationEnv(t *testing.T, events []contracts.InboundEvent) *integrati
 
 func (e *integrationEnv) run(t *testing.T) {
 	t.Helper()
-	err := Serve(context.Background(), ServeOptions{
+	if err := e.runErr(); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func (e *integrationEnv) runErr() error {
+	return Serve(context.Background(), ServeOptions{
 		ConfigPath: e.configPath,
 		Getenv: func(key string) string {
 			if key == "FEISHU_APP_SECRET" {
@@ -174,9 +183,6 @@ func (e *integrationEnv) run(t *testing.T) {
 		Runner:   e.runner,
 		Now:      func() time.Time { return time.Date(2026, 6, 14, 12, 0, 0, 0, time.UTC) },
 	})
-	if err != nil {
-		t.Fatal(err)
-	}
 }
 
 func (e *integrationEnv) openStore(t *testing.T) *store.Store {

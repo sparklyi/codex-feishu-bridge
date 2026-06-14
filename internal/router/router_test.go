@@ -96,6 +96,124 @@ func TestRouterReplyResumesCreatorOnlyAndRejectsRouteMiss(t *testing.T) {
 	}
 }
 
+func TestRouterCardActionFallsBackToExplicitTaskIDWhenRouteMissing(t *testing.T) {
+	ctx := context.Background()
+	rt, _, runner, notes := newTestRouter(t, []string{"ou_owner"})
+	if err := rt.Handle(ctx, contracts.InboundEvent{Kind: contracts.InboundNewTask, DedupKey: "evt_1", ChatType: "private", ChatID: "chat", SenderOpenID: "ou_owner", MessageID: "msg_user", Text: "hello"}); err != nil {
+		t.Fatal(err)
+	}
+	err := rt.Handle(ctx, contracts.InboundEvent{
+		Kind:          contracts.InboundCardAction,
+		DedupKey:      "evt_2",
+		ChatType:      "private",
+		ChatID:        "chat",
+		SenderOpenID:  "ou_owner",
+		MessageID:     "card_cb",
+		RootMessageID: "unrouted_card",
+		ActionID:      "continue_submit",
+		ActionValue:   map[string]string{"action": "continue", "task_id": "cx_1"},
+		Text:          "continue from form",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if runner.resumeCalls != 1 || len(notes.routingErrors) != 0 {
+		t.Fatalf("explicit task_id fallback should resume without routing error, resumes=%d routing=%+v", runner.resumeCalls, notes.routingErrors)
+	}
+}
+
+func TestRouterCardSubmitAcknowledgesBeforeResume(t *testing.T) {
+	ctx := context.Background()
+	rt, _, runner, notes := newTestRouter(t, []string{"ou_owner"})
+	if err := rt.Handle(ctx, contracts.InboundEvent{Kind: contracts.InboundNewTask, DedupKey: "evt_1", ChatType: "private", ChatID: "chat", SenderOpenID: "ou_owner", MessageID: "msg_user", Text: "hello"}); err != nil {
+		t.Fatal(err)
+	}
+	runner.onResume = func() {
+		if len(notes.followUps) != 1 {
+			t.Fatalf("follow-up acknowledgement must be sent before resume, got %+v", notes.followUps)
+		}
+		if notes.followUps[0].UpdateMessageID != "msg_result" || notes.followUps[0].Prompt != "continue from form" {
+			t.Fatalf("unexpected follow-up acknowledgement: %+v", notes.followUps[0])
+		}
+	}
+	err := rt.Handle(ctx, contracts.InboundEvent{
+		Kind:          contracts.InboundCardAction,
+		DedupKey:      "evt_2",
+		ChatType:      "private",
+		ChatID:        "chat",
+		SenderOpenID:  "ou_owner",
+		MessageID:     "card_cb",
+		RootMessageID: "msg_result",
+		ActionID:      "continue_submit",
+		ActionValue:   map[string]string{"action": "continue", "task_id": "cx_1"},
+		Text:          "continue from form",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if runner.resumeCalls != 1 || len(notes.followUps) != 1 {
+		t.Fatalf("unexpected resume acknowledgement state: resumes=%d followUps=%+v", runner.resumeCalls, notes.followUps)
+	}
+}
+
+func TestRouterCardSubmitFallsBackWhenCardUpdateFails(t *testing.T) {
+	ctx := context.Background()
+	rt, _, runner, notes := newTestRouter(t, []string{"ou_owner"})
+	if err := rt.Handle(ctx, contracts.InboundEvent{Kind: contracts.InboundNewTask, DedupKey: "evt_1", ChatType: "private", ChatID: "chat", SenderOpenID: "ou_owner", MessageID: "msg_user", Text: "hello"}); err != nil {
+		t.Fatal(err)
+	}
+	notes.followUpErrs = []error{errors.New("patch failed"), nil}
+	err := rt.Handle(ctx, contracts.InboundEvent{
+		Kind:          contracts.InboundCardAction,
+		DedupKey:      "evt_2",
+		ChatType:      "private",
+		ChatID:        "chat",
+		SenderOpenID:  "ou_owner",
+		MessageID:     "card_cb",
+		RootMessageID: "msg_result",
+		ActionID:      "continue_submit",
+		ActionValue:   map[string]string{"action": "continue", "task_id": "cx_1"},
+		Text:          "continue from form",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if runner.resumeCalls != 1 || len(notes.followUps) != 2 {
+		t.Fatalf("resume should run after fallback acknowledgement, resumes=%d followUps=%+v", runner.resumeCalls, notes.followUps)
+	}
+	if notes.followUps[0].UpdateMessageID != "msg_result" || notes.followUps[1].UpdateMessageID != "" {
+		t.Fatalf("expected update attempt then fallback send: %+v", notes.followUps)
+	}
+}
+
+func TestRouterCardSubmitStillResumesWhenFeedbackFails(t *testing.T) {
+	ctx := context.Background()
+	rt, _, runner, notes := newTestRouter(t, []string{"ou_owner"})
+	if err := rt.Handle(ctx, contracts.InboundEvent{Kind: contracts.InboundNewTask, DedupKey: "evt_1", ChatType: "private", ChatID: "chat", SenderOpenID: "ou_owner", MessageID: "msg_user", Text: "hello"}); err != nil {
+		t.Fatal(err)
+	}
+	want := errors.New("ack failed")
+	notes.followUpErrs = []error{errors.New("patch failed"), want}
+	err := rt.Handle(ctx, contracts.InboundEvent{
+		Kind:          contracts.InboundCardAction,
+		DedupKey:      "evt_2",
+		ChatType:      "private",
+		ChatID:        "chat",
+		SenderOpenID:  "ou_owner",
+		MessageID:     "card_cb",
+		RootMessageID: "msg_result",
+		ActionID:      "continue_submit",
+		ActionValue:   map[string]string{"action": "continue", "task_id": "cx_1"},
+		Text:          "continue from form",
+	})
+	if !errors.Is(err, want) {
+		t.Fatalf("expected preserved acknowledgement failure, got %v", err)
+	}
+	if runner.resumeCalls != 1 || len(notes.successes) != 2 {
+		t.Fatalf("feedback failure must not block resume/result, resumes=%d successes=%+v", runner.resumeCalls, notes.successes)
+	}
+}
+
 func TestRouterAuthorizationDuplicateAndStartFailure(t *testing.T) {
 	ctx := context.Background()
 	rt, st, runner, notes := newTestRouter(t, []string{"ou_owner"})
@@ -138,6 +256,28 @@ func TestRouterAuthorizationDuplicateAndStartFailure(t *testing.T) {
 		t.Fatalf("start failure should fail task/run: task=%+v runs=%+v", task, runs)
 	}
 	_ = st
+}
+
+func TestRouterReturnsResultCardSendFailure(t *testing.T) {
+	ctx := context.Background()
+	rt, st, runner, notes := newTestRouter(t, []string{"ou_owner"})
+	want := errors.New("result send failed")
+	notes.resultErr = want
+
+	err := rt.Handle(ctx, contracts.InboundEvent{Kind: contracts.InboundNewTask, DedupKey: "evt_result_fail", ChatType: "private", ChatID: "chat", SenderOpenID: "ou_owner", MessageID: "msg", Text: "hello"})
+	if !errors.Is(err, want) {
+		t.Fatalf("expected result card send error, got %v", err)
+	}
+	if runner.execCalls != 1 {
+		t.Fatalf("result send failure should happen after codex runs, exec=%d", runner.execCalls)
+	}
+	task, runs, err := st.GetTask(ctx, "cx_1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if task.Status != "succeeded" || len(runs) == 0 || runs[0].Status != "succeeded" {
+		t.Fatalf("result send failure should preserve run result: task=%+v runs=%+v", task, runs)
+	}
 }
 
 func TestRouterCardActionEmptyContinueClickIsIgnoredBeforeRun(t *testing.T) {
@@ -317,6 +457,7 @@ type fakeRunner struct {
 	execCalls       int
 	resumeCalls     int
 	onSession       func()
+	onResume        func()
 	lastResumeReply string
 }
 
@@ -336,6 +477,9 @@ func (f *fakeRunner) Exec(ctx context.Context, in codexrunner.ExecInput) (contra
 func (f *fakeRunner) Resume(ctx context.Context, in codexrunner.ResumeInput) (contracts.RunResult, error) {
 	f.resumeCalls++
 	f.lastResumeReply = in.Reply
+	if f.onResume != nil {
+		f.onResume()
+	}
 	if in.SessionID == "" {
 		return contracts.RunResult{}, errors.New("missing session")
 	}
@@ -349,9 +493,12 @@ type fakeNotifier struct {
 	startIDs          []string
 	resultIDs         []string
 	startErr          error
+	resultErr         error
 	starts            []notifier.TaskCardInput
 	successes         []notifier.TaskCardInput
 	failures          []notifier.TaskCardInput
+	followUps         []notifier.FollowUpAcceptedInput
+	followUpErrs      []error
 	rejections        []string
 	routingErrors     []string
 	migrationHints    []string
@@ -370,12 +517,33 @@ func (f *fakeNotifier) Start(ctx context.Context, in notifier.TaskCardInput) (co
 
 func (f *fakeNotifier) Success(ctx context.Context, in notifier.TaskCardInput) (contracts.SentMessage, error) {
 	f.successes = append(f.successes, in)
+	if f.resultErr != nil {
+		return contracts.SentMessage{}, f.resultErr
+	}
 	return contracts.SentMessage{MessageID: popID(&f.resultIDs)}, nil
 }
 
 func (f *fakeNotifier) Failure(ctx context.Context, in notifier.TaskCardInput) (contracts.SentMessage, error) {
 	f.failures = append(f.failures, in)
+	if f.resultErr != nil {
+		return contracts.SentMessage{}, f.resultErr
+	}
 	return contracts.SentMessage{MessageID: popID(&f.resultIDs)}, nil
+}
+
+func (f *fakeNotifier) FollowUpAccepted(ctx context.Context, in notifier.FollowUpAcceptedInput) (contracts.SentMessage, error) {
+	f.followUps = append(f.followUps, in)
+	if len(f.followUpErrs) > 0 {
+		err := f.followUpErrs[0]
+		f.followUpErrs = f.followUpErrs[1:]
+		if err != nil {
+			return contracts.SentMessage{}, err
+		}
+	}
+	if in.UpdateMessageID != "" {
+		return contracts.SentMessage{MessageID: in.UpdateMessageID}, nil
+	}
+	return contracts.SentMessage{MessageID: "msg_followup"}, nil
 }
 
 func (f *fakeNotifier) RoutingError(ctx context.Context, chatID, replyToMessageID string) (contracts.SentMessage, error) {

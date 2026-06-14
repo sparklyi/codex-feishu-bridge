@@ -113,6 +113,9 @@ func TestInitConfig(t *testing.T) {
 	if !strings.Contains(string(data), "feishu:") || !strings.Contains(string(data), "FEISHU_APP_SECRET") {
 		t.Fatalf("unexpected config:\n%s", string(data))
 	}
+	if !strings.Contains(string(data), "--ignore-user-config") {
+		t.Fatalf("generated config should isolate bridge runs from stale user Codex project config:\n%s", string(data))
+	}
 	if err := InitConfig(path, false); err == nil {
 		t.Fatal("expected no-overwrite error")
 	}

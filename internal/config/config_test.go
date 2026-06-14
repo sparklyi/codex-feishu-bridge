@@ -9,7 +9,7 @@ import (
 
 func TestResolveProjectDefaults(t *testing.T) {
 	cfg := Config{
-		Codex: CodexConfig{Command: "codex", DefaultModel: "gpt-5.5", Sandbox: "workspace-write", Approval: "never", ExtraArgs: []string{"--skip-git-repo-check"}},
+		Codex:     CodexConfig{Command: "codex", DefaultModel: "gpt-5.5", Sandbox: "workspace-write", Approval: "never", ExtraArgs: []string{"--skip-git-repo-check"}},
 		Workspace: WorkspaceConfig{Default: "/repo/default"},
 		Projects: map[string]ProjectConfig{
 			"backend": {CWD: "/repo/backend", Model: "gpt-5.5", Sandbox: "read-only"},

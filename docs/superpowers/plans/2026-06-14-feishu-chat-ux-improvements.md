@@ -1106,7 +1106,7 @@ git commit -m "feat(feishu): render compact action cards"
 - Modify: `internal/app/app_test.go`
 - Modify: `internal/router/router_test.go`
 
-- [ ] **Step 1: Update failing integration tests first**
+- [x] **Step 1: Update failing integration tests first**
 
 Change existing integration new-task inputs from `/codex hello` to `hello`. Add new integration cases:
 
@@ -1117,23 +1117,23 @@ t.Run("task card reply resume still routes by message id", ...)
 t.Run("route miss never falls back to latest task", ...)
 ```
 
-- [ ] **Step 2: Run integration tests and verify any remaining failures**
+- [x] **Step 2: Run integration tests and verify any remaining failures**
 
 Run: `go test ./internal/app ./internal/router -count=1`
 
 Expected: FAIL only where implementation gaps remain from previous chunks; after prior chunks are complete it should PASS.
 
-- [ ] **Step 3: Fix integration wiring**
+- [x] **Step 3: Fix integration wiring**
 
 Wire the new config `BotOpenID`, parser, notifier methods, and store methods through `app.Serve` and test fakes. Keep fake senders/receivers simple and deterministic.
 
-- [ ] **Step 4: Run integration tests**
+- [x] **Step 4: Run integration tests**
 
 Run: `go test ./internal/app ./internal/router -count=1`
 
 Expected: PASS.
 
-- [ ] **Step 5: Commit integration updates**
+- [x] **Step 5: Commit integration updates**
 
 ```bash
 git add internal/app/integration_test.go internal/app/app_test.go internal/router/router_test.go

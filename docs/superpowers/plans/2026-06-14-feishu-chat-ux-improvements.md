@@ -618,7 +618,7 @@ git commit -m "feat(store): persist pending project selections"
 - Modify: `internal/router/router_test.go`
 - Modify: `internal/router/command.go`
 
-- [ ] **Step 1: Write failing router tests**
+- [x] **Step 1: Write failing router tests**
 
 Add tests:
 
@@ -646,13 +646,13 @@ func TestRouterCodexCommandSendsMigrationHint(t *testing.T) {
 }
 ```
 
-- [ ] **Step 2: Run router tests and verify failure**
+- [x] **Step 2: Run router tests and verify failure**
 
 Run: `go test ./internal/router -run 'TestRouterPrivatePlainTextStartsTask|TestRouterCodexCommandSendsMigrationHint' -count=1`
 
 Expected: FAIL because router still requires `/codex`.
 
-- [ ] **Step 3: Implement intent-driven new task path**
+- [x] **Step 3: Implement intent-driven new task path**
 
 Update router to call `intent.ParseStart(...)` for `InboundNewTask`.
 
@@ -668,13 +668,13 @@ For migration hints, send the hint and return without touching store.
 
 Retire or narrow `ParseCommand`; if kept, tests should reflect that it is no longer the router entry point.
 
-- [ ] **Step 4: Run router tests**
+- [x] **Step 4: Run router tests**
 
 Run: `go test ./internal/router -count=1`
 
 Expected: PASS.
 
-- [ ] **Step 5: Commit private entry behavior**
+- [x] **Step 5: Commit private entry behavior**
 
 ```bash
 git add internal/router/router.go internal/router/router_test.go internal/router/command.go

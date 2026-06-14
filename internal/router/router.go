@@ -12,6 +12,7 @@ import (
 	"github.com/sparklyi/codex-feishu-bridge/internal/codexrunner"
 	"github.com/sparklyi/codex-feishu-bridge/internal/config"
 	"github.com/sparklyi/codex-feishu-bridge/internal/contracts"
+	"github.com/sparklyi/codex-feishu-bridge/internal/intent"
 	notify "github.com/sparklyi/codex-feishu-bridge/internal/notifier"
 	"github.com/sparklyi/codex-feishu-bridge/internal/store"
 )
@@ -38,6 +39,7 @@ type Notifier interface {
 	Failure(ctx context.Context, in notify.TaskCardInput) (contracts.SentMessage, error)
 	RoutingError(ctx context.Context, chatID, replyToMessageID string) (contracts.SentMessage, error)
 	Rejection(ctx context.Context, chatID, replyToMessageID, body string) error
+	MigrationHint(ctx context.Context, chatID, replyToMessageID string) error
 }
 
 type RouterOptions struct {
@@ -94,10 +96,22 @@ func (r *Router) Handle(ctx context.Context, ev contracts.InboundEvent) error {
 }
 
 func (r *Router) handleNewTask(ctx context.Context, ev contracts.InboundEvent) error {
-	alias, prompt, ok := ParseCommand(ev.Text)
-	if !ok {
-		return r.notifier.Rejection(ctx, ev.ChatID, ev.MessageID, "Use `/codex <prompt>` to start a task.")
+	parsed := intent.ParseStart(intent.ParseInput{Event: ev, ProjectAliases: r.cfg.ProjectAliases()})
+	switch parsed.Kind {
+	case intent.KindIgnored:
+		return nil
+	case intent.KindMigrationHint:
+		return r.notifier.MigrationHint(ctx, ev.ChatID, ev.MessageID)
+	case intent.KindUnknownProject:
+		return r.notifier.Rejection(ctx, ev.ChatID, ev.MessageID, "Project configuration error: unknown project alias "+parsed.ProjectAlias)
+	case intent.KindProjectSelection:
+		return r.notifier.Rejection(ctx, ev.ChatID, ev.MessageID, "Choose a project before starting this task.")
+	case intent.KindStartTask:
+	default:
+		return nil
 	}
+	alias := parsed.ProjectAlias
+	prompt := parsed.Prompt
 	project, err := r.cfg.ResolveProject(alias)
 	if err != nil {
 		return r.notifier.Rejection(ctx, ev.ChatID, ev.MessageID, "Project configuration error: "+err.Error())

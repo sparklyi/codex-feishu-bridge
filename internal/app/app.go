@@ -166,7 +166,8 @@ codex:
   default_model: ""
   sandbox: workspace-write
   approval: never
-  extra_args: []
+  extra_args:
+    - --ignore-user-config
   log_retention_days: 14
 workspace:
   default: /path/to/default/repo

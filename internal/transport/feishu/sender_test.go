@@ -68,7 +68,10 @@ func TestBuildInteractiveCardUsesCompactTaskInfoSection(t *testing.T) {
 			{Title: "项目", Value: "default"},
 			{Title: "工作区", Value: "[local-path]"},
 		},
-		Actions: []contracts.Action{{ID: "continue_submit", Label: "继续跟进"}},
+		Actions: []contracts.Action{
+			{ID: "continue_submit", Label: "继续跟进", Value: map[string]string{"action": "continue", "task_id": "cx_123"}},
+			{ID: "shortcut", Label: "总结", Value: map[string]string{"action": "shortcut", "shortcut": "summarize"}},
+		},
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -79,10 +82,86 @@ func TestBuildInteractiveCardUsesCompactTaskInfoSection(t *testing.T) {
 			t.Fatalf("card missing compact layout content %q: %s", want, body)
 		}
 	}
-	for _, banned := range []string{"Status:", "Project:", "Workspace:", "Follow up"} {
+	for _, banned := range []string{"Status:", "Project:", "Workspace:", "Follow up", "总结", "summarize"} {
 		if jsonContains(body, banned) {
 			t.Fatalf("card retained old layout text %q: %s", banned, body)
 		}
+	}
+}
+
+func TestBuildInteractiveCardRendersContinueForm(t *testing.T) {
+	card, err := BuildInteractiveCard(contracts.OutboundMessage{
+		CardKind:     contracts.CardSuccess,
+		Title:        "任务已完成 · cx_123",
+		BodyMarkdown: "**结果**\nHello",
+		Actions: []contracts.Action{
+			{ID: "continue_submit", Label: "继续跟进", Value: map[string]string{"action": "continue", "task_id": "cx_123"}},
+			{ID: "shortcut", Label: "总结", Value: map[string]string{"action": "shortcut", "shortcut": "summarize", "task_id": "cx_123"}},
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var decoded struct {
+		Elements []map[string]any `json:"elements"`
+	}
+	if err := json.Unmarshal(card, &decoded); err != nil {
+		t.Fatalf("invalid card json: %v\n%s", err, string(card))
+	}
+	var followUpInput map[string]any
+	var submitButton map[string]any
+	for _, element := range decoded.Elements {
+		if element["tag"] == "input" {
+			t.Fatalf("continue input should be inside a Feishu form container: %s", string(card))
+		}
+		if element["tag"] == "form" {
+			formElements, ok := element["elements"].([]any)
+			if !ok {
+				t.Fatalf("form elements missing: %s", string(card))
+			}
+			for _, rawFormElement := range formElements {
+				formElement, ok := rawFormElement.(map[string]any)
+				if !ok {
+					continue
+				}
+				switch formElement["tag"] {
+				case "input":
+					followUpInput = formElement
+				case "button":
+					submitButton = formElement
+				}
+			}
+		}
+		actions, ok := element["actions"].([]any)
+		if !ok {
+			continue
+		}
+		for _, rawAction := range actions {
+			action, ok := rawAction.(map[string]any)
+			if !ok {
+				continue
+			}
+			value, _ := action["value"].(map[string]any)
+			switch value["action_id"] {
+			case "continue_submit":
+				t.Fatalf("continue action should be rendered as a form submit button, not an action-row button: %s", string(card))
+			case "shortcut":
+				t.Fatalf("task card should not render shortcut action buttons: %s", string(card))
+			}
+		}
+	}
+	if followUpInput == nil || followUpInput["name"] != "text" || followUpInput["input_type"] != "multiline_text" || followUpInput["required"] != true {
+		t.Fatalf("continue form input malformed: %s", string(card))
+	}
+	if followUpInput["max_length"] != float64(1000) {
+		t.Fatalf("continue form max_length should not exceed Feishu default maximum: %s", string(card))
+	}
+	if submitButton == nil || submitButton["name"] != "continue_submit" || submitButton["action_type"] != "form_submit" {
+		t.Fatalf("continue submit button malformed: %s", string(card))
+	}
+	submitValue, _ := submitButton["value"].(map[string]any)
+	if submitValue["action_id"] != "continue_submit" || submitValue["action"] != "continue" {
+		t.Fatalf("continue submit value malformed: %s", string(card))
 	}
 }
 

@@ -147,28 +147,85 @@ func BuildInteractiveCard(msg contracts.OutboundMessage) ([]byte, error) {
 	}
 	if len(msg.Actions) > 0 {
 		elements := card["elements"].([]any)
-		if needsFollowUpInput(msg.Actions) {
-			elements = append(elements, map[string]any{"tag": "hr"})
-			elements = append(elements, map[string]any{
-				"tag":         "input",
-				"name":        "text",
-				"multiline":   true,
-				"placeholder": map[string]any{"tag": "plain_text", "content": "继续补充需求或问题"},
-			})
-		}
-		actions := make([]any, 0, len(msg.Actions))
+		var followUpAction *contracts.Action
+		buttonActions := make([]contracts.Action, 0, len(msg.Actions))
 		for _, action := range msg.Actions {
-			actions = append(actions, map[string]any{
-				"tag":   "button",
-				"type":  buttonType(action.Style),
-				"text":  map[string]any{"tag": "plain_text", "content": action.Label},
-				"value": actionValue(action),
-			})
+			if action.ID == "continue_submit" {
+				actionCopy := action
+				followUpAction = &actionCopy
+				continue
+			}
+			if isTaskCard(msg.CardKind) {
+				continue
+			}
+			buttonActions = append(buttonActions, action)
 		}
-		elements = append(elements, map[string]any{"tag": "action", "actions": actions})
+		if len(buttonActions) > 0 {
+			actions := make([]any, 0, len(buttonActions))
+			for _, action := range buttonActions {
+				actions = append(actions, map[string]any{
+					"tag":   "button",
+					"type":  buttonType(action.Style),
+					"text":  map[string]any{"tag": "plain_text", "content": action.Label},
+					"value": actionValue(action),
+				})
+			}
+			elements = append(elements, map[string]any{"tag": "action", "layout": "flow", "actions": actions})
+		}
+		if followUpAction != nil {
+			elements = append(elements, followUpForm(*followUpAction))
+		}
 		card["elements"] = elements
 	}
 	return json.Marshal(card)
+}
+
+func isTaskCard(kind contracts.CardKind) bool {
+	return kind == contracts.CardStart || kind == contracts.CardSuccess || kind == contracts.CardFailure
+}
+
+func followUpForm(action contracts.Action) map[string]any {
+	return map[string]any{
+		"tag":  "form",
+		"name": "codex_followup_form",
+		"elements": []any{
+			map[string]any{
+				"tag":         "input",
+				"name":        "text",
+				"required":    true,
+				"input_type":  "multiline_text",
+				"rows":        2,
+				"auto_resize": true,
+				"max_rows":    6,
+				"max_length":  1000,
+				"width":       "fill",
+				"label":       map[string]any{"tag": "plain_text", "content": "继续跟进"},
+				"placeholder": map[string]any{"tag": "plain_text", "content": "继续补充需求或问题"},
+				"fallback": map[string]any{
+					"tag": "fallback_text",
+					"text": map[string]any{
+						"tag":     "plain_text",
+						"content": "当前飞书客户端不支持卡片输入框，请直接回复任务卡片。",
+					},
+				},
+			},
+			map[string]any{
+				"tag":         "button",
+				"name":        action.ID,
+				"action_type": "form_submit",
+				"type":        buttonType(action.Style),
+				"text":        map[string]any{"tag": "plain_text", "content": action.Label},
+				"value":       actionValue(action),
+			},
+		},
+		"fallback": map[string]any{
+			"tag": "fallback_text",
+			"text": map[string]any{
+				"tag":     "plain_text",
+				"content": "当前飞书客户端不支持卡片表单，请直接回复任务卡片。",
+			},
+		},
+	}
 }
 
 func templateFor(msg contracts.OutboundMessage) string {
@@ -196,15 +253,6 @@ func fieldMarkdown(fields []contracts.Field) string {
 		lines = append(lines, field.Title+"：`"+field.Value+"`")
 	}
 	return strings.Join(lines, "\n")
-}
-
-func needsFollowUpInput(actions []contracts.Action) bool {
-	for _, action := range actions {
-		if action.ID == "continue_submit" {
-			return true
-		}
-	}
-	return false
 }
 
 func actionValue(action contracts.Action) map[string]string {

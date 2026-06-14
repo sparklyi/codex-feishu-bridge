@@ -48,11 +48,8 @@ func TestTaskCardsAreRedactedAndRouteable(t *testing.T) {
 			t.Fatalf("card leaked %q in %+v", banned, msg)
 		}
 	}
-	if len(msg.Actions) < 5 || msg.Actions[0].ID != "continue_submit" {
-		t.Fatalf("missing continue action: %+v", msg.Actions)
-	}
-	if msg.Actions[1].Value["shortcut"] != "summarize" {
-		t.Fatalf("missing shortcut action payloads: %+v", msg.Actions)
+	if len(msg.Actions) != 1 || msg.Actions[0].ID != "continue_submit" || msg.Actions[0].Label != "继续跟进" {
+		t.Fatalf("task card should only expose the continue action: %+v", msg.Actions)
 	}
 	if len(msg.Fields) == 0 {
 		t.Fatalf("missing compact metadata fields: %+v", msg)
@@ -86,6 +83,9 @@ func TestTaskCardsUseCompactChineseLayout(t *testing.T) {
 	if !strings.Contains(msg.BodyMarkdown, "Hello，我在。") || !strings.Contains(msg.BodyMarkdown, "**结果**") {
 		t.Fatalf("body should focus on the codex result: %q", msg.BodyMarkdown)
 	}
+	if !strings.Contains(msg.BodyMarkdown, "直接回复这张任务卡片") {
+		t.Fatalf("body should include reply fallback for continuing the task: %q", msg.BodyMarkdown)
+	}
 	wantFields := []contracts.Field{
 		{Title: "状态", Value: "已完成"},
 		{Title: "项目", Value: "default"},
@@ -99,17 +99,8 @@ func TestTaskCardsUseCompactChineseLayout(t *testing.T) {
 			t.Fatalf("field %d mismatch: got %+v want %+v", i, msg.Fields[i], want)
 		}
 	}
-	for _, want := range []string{"继续跟进", "总结", "解释错误", "运行测试", "生成 MR 描述"} {
-		found := false
-		for _, action := range msg.Actions {
-			if action.Label == want {
-				found = true
-				break
-			}
-		}
-		if !found {
-			t.Fatalf("missing localized action %q in %+v", want, msg.Actions)
-		}
+	if len(msg.Actions) != 1 || msg.Actions[0].ID != "continue_submit" || msg.Actions[0].Label != "继续跟进" {
+		t.Fatalf("task card should only expose the continue action: %+v", msg.Actions)
 	}
 }
 

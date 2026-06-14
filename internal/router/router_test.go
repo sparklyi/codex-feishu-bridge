@@ -140,7 +140,7 @@ func TestRouterAuthorizationDuplicateAndStartFailure(t *testing.T) {
 	_ = st
 }
 
-func TestRouterCardActionEmptyTextRejectedBeforeRun(t *testing.T) {
+func TestRouterCardActionEmptyContinueClickIsIgnoredBeforeRun(t *testing.T) {
 	ctx := context.Background()
 	rt, _, runner, notes := newTestRouter(t, []string{"ou_owner"})
 	if err := rt.Handle(ctx, contracts.InboundEvent{Kind: contracts.InboundNewTask, DedupKey: "evt_1", ChatType: "private", ChatID: "chat", SenderOpenID: "ou_owner", MessageID: "msg", Text: "hello"}); err != nil {
@@ -149,8 +149,8 @@ func TestRouterCardActionEmptyTextRejectedBeforeRun(t *testing.T) {
 	if err := rt.Handle(ctx, contracts.InboundEvent{Kind: contracts.InboundCardAction, DedupKey: "evt_2", ChatType: "private", ChatID: "chat", SenderOpenID: "ou_owner", MessageID: "card_cb", RootMessageID: "msg_result", ActionID: "continue_submit", Text: "   "}); err != nil {
 		t.Fatal(err)
 	}
-	if runner.resumeCalls != 0 || len(notes.rejections) == 0 {
-		t.Fatalf("empty action should reject before resume, resumes=%d notes=%+v", runner.resumeCalls, notes)
+	if runner.resumeCalls != 0 || len(notes.rejections) != 0 {
+		t.Fatalf("empty legacy continue click should be ignored before resume, resumes=%d notes=%+v", runner.resumeCalls, notes)
 	}
 }
 

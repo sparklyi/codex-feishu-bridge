@@ -208,24 +208,10 @@ func taskFields(in TaskCardInput) []contracts.Field {
 	}
 }
 
-func taskActions(kind contracts.CardKind, taskID string) []contracts.Action {
-	actions := []contracts.Action{
+func taskActions(_ contracts.CardKind, taskID string) []contracts.Action {
+	return []contracts.Action{
 		{ID: continueActionID, Label: "继续跟进", Style: "primary", Value: map[string]string{"action": "continue", "task_id": taskID}},
 	}
-	if kind == contracts.CardFailure {
-		return append(actions,
-			contracts.Action{ID: "shortcut", Label: "解释错误", Value: map[string]string{"action": "shortcut", "shortcut": "explain_error", "task_id": taskID}},
-			contracts.Action{ID: "shortcut", Label: "运行测试", Value: map[string]string{"action": "shortcut", "shortcut": "run_tests", "task_id": taskID}},
-			contracts.Action{ID: "shortcut", Label: "总结", Value: map[string]string{"action": "shortcut", "shortcut": "summarize", "task_id": taskID}},
-			contracts.Action{ID: "shortcut", Label: "生成 MR 描述", Value: map[string]string{"action": "shortcut", "shortcut": "mr_description", "task_id": taskID}},
-		)
-	}
-	return append(actions,
-		contracts.Action{ID: "shortcut", Label: "总结", Value: map[string]string{"action": "shortcut", "shortcut": "summarize", "task_id": taskID}},
-		contracts.Action{ID: "shortcut", Label: "解释错误", Value: map[string]string{"action": "shortcut", "shortcut": "explain_error", "task_id": taskID}},
-		contracts.Action{ID: "shortcut", Label: "运行测试", Value: map[string]string{"action": "shortcut", "shortcut": "run_tests", "task_id": taskID}},
-		contracts.Action{ID: "shortcut", Label: "生成 MR 描述", Value: map[string]string{"action": "shortcut", "shortcut": "mr_description", "task_id": taskID}},
-	)
 }
 
 func buildTaskBody(kind contracts.CardKind, in TaskCardInput, limit int) string {
@@ -238,6 +224,9 @@ func buildTaskBody(kind contracts.CardKind, in TaskCardInput, limit int) string 
 		body = "已接收，Codex 正在处理。"
 	}
 	text := "**" + bodyHeading(kind) + "**\n" + body
+	if kind != contracts.CardStart {
+		text += "\n\n继续处理请直接回复这张任务卡片。"
+	}
 	return redact.FeishuText(text, limit)
 }
 

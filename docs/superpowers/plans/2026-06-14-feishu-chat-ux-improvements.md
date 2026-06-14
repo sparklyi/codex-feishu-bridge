@@ -1032,7 +1032,7 @@ git commit -m "feat(notifier): add compact task cards"
 - Modify: `internal/transport/feishu/sender.go`
 - Modify: `internal/transport/feishu/sender_test.go`
 
-- [ ] **Step 1: Write failing card renderer tests**
+- [x] **Step 1: Write failing card renderer tests**
 
 Add tests that unmarshal card JSON and assert:
 
@@ -1067,13 +1067,13 @@ func TestBuildInteractiveCardWithActionValues(t *testing.T) {
 }
 ```
 
-- [ ] **Step 2: Run sender tests and verify failure**
+- [x] **Step 2: Run sender tests and verify failure**
 
 Run: `go test ./internal/transport/feishu -run TestBuildInteractiveCardWithActionValues -count=1`
 
 Expected: FAIL because action values and richer card blocks are not rendered.
 
-- [ ] **Step 3: Implement renderer support**
+- [x] **Step 3: Implement renderer support**
 
 Update `BuildInteractiveCard` to:
 
@@ -1084,13 +1084,13 @@ Update `BuildInteractiveCard` to:
 - preserve the existing multiline input for continuation cards;
 - avoid nested, large, or decorative card structures.
 
-- [ ] **Step 4: Run Feishu transport tests**
+- [x] **Step 4: Run Feishu transport tests**
 
 Run: `go test ./internal/transport/feishu -count=1`
 
 Expected: PASS.
 
-- [ ] **Step 5: Commit card renderer**
+- [x] **Step 5: Commit card renderer**
 
 ```bash
 git add internal/transport/feishu/sender.go internal/transport/feishu/sender_test.go

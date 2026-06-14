@@ -1198,25 +1198,25 @@ git commit -m "docs: update Feishu chat usage"
 **Files:**
 - All changed files
 
-- [ ] **Step 1: Run formatting**
+- [x] **Step 1: Run formatting**
 
 Run: `gofmt -w internal/intent/*.go internal/contracts/contracts.go internal/config/config.go internal/transport/feishu/*.go internal/store/*.go internal/router/*.go internal/notifier/*.go internal/app/*.go`
 
 Expected: command exits 0 and only intended Go files are formatted.
 
-- [ ] **Step 2: Run full test suite**
+- [x] **Step 2: Run full test suite**
 
 Run: `make test`
 
 Expected: all packages PASS and `scripts/test-init-local-config.sh` PASS.
 
-- [ ] **Step 3: Run vet**
+- [x] **Step 3: Run vet**
 
 Run: `go vet ./...`
 
 Expected: no output, exit 0.
 
-- [ ] **Step 4: Inspect diff**
+- [x] **Step 4: Inspect diff**
 
 Run: `git status --short && git diff --stat origin/dev...HEAD`
 

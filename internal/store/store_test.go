@@ -16,17 +16,18 @@ func TestMigrationsCreateSpecSchema(t *testing.T) {
 	s := openTestStore(t)
 	defer s.Close()
 
-	for _, table := range []string{"schema_migrations", "tasks", "message_routes", "runs", "event_dedup", "users"} {
+	for _, table := range []string{"schema_migrations", "tasks", "message_routes", "runs", "event_dedup", "users", "pending_intents"} {
 		if !tableExists(t, s.db, table) {
 			t.Fatalf("missing table %s", table)
 		}
 	}
 	for table, cols := range map[string][]string{
-		"tasks":          {"id", "codex_session_id", "status", "project_alias", "cwd", "created_by", "chat_id", "root_message_id", "effective_codex_command", "effective_sandbox", "effective_model", "effective_approval", "effective_approval_flag_supported", "effective_extra_args_json", "created_at", "updated_at"},
-		"message_routes": {"feishu_message_id", "task_id", "route_type", "created_at"},
-		"runs":           {"id", "task_id", "kind", "status", "prompt", "codex_session_id", "exit_code", "started_at", "finished_at", "log_path", "final_text"},
-		"event_dedup":    {"dedup_key", "received_at", "source", "state", "task_id", "run_id", "completed_at", "last_error"},
-		"users":          {"feishu_open_id", "role", "enabled"},
+		"tasks":           {"id", "codex_session_id", "status", "project_alias", "cwd", "created_by", "chat_id", "root_message_id", "effective_codex_command", "effective_sandbox", "effective_model", "effective_approval", "effective_approval_flag_supported", "effective_extra_args_json", "created_at", "updated_at"},
+		"message_routes":  {"feishu_message_id", "task_id", "route_type", "created_at"},
+		"runs":            {"id", "task_id", "kind", "status", "prompt", "codex_session_id", "exit_code", "started_at", "finished_at", "log_path", "final_text"},
+		"event_dedup":     {"dedup_key", "received_at", "source", "state", "task_id", "run_id", "completed_at", "last_error"},
+		"users":           {"feishu_open_id", "role", "enabled"},
+		"pending_intents": {"id", "chat_id", "created_by", "prompt", "project_aliases_json", "status", "created_at", "expires_at", "consumed_at"},
 	} {
 		for _, col := range cols {
 			if !columnExists(t, s.db, table, col) {
@@ -34,7 +35,7 @@ func TestMigrationsCreateSpecSchema(t *testing.T) {
 			}
 		}
 	}
-	for _, index := range []string{"idx_tasks_codex_session_id", "idx_runs_task_id", "idx_runs_status", "idx_message_routes_task_id", "runs_one_active_per_task"} {
+	for _, index := range []string{"idx_tasks_codex_session_id", "idx_runs_task_id", "idx_runs_status", "idx_message_routes_task_id", "runs_one_active_per_task", "idx_pending_intents_chat_creator"} {
 		if !indexExists(t, s.db, index) {
 			t.Fatalf("missing index %s", index)
 		}
@@ -110,6 +111,33 @@ func TestFindRunningTaskByChatAndCreator(t *testing.T) {
 	}
 	if _, ok, err := s.FindRunningTask(ctx, "chat", "ou_other"); err != nil || ok {
 		t.Fatalf("other user should not be blocked ok=%v err=%v", ok, err)
+	}
+}
+
+func TestPendingIntentCreateConsumeAndExpire(t *testing.T) {
+	ctx := context.Background()
+	st := openTestStore(t)
+	defer st.Close()
+	now := time.Date(2026, 6, 14, 12, 0, 0, 0, time.UTC)
+	pending, err := st.CreatePendingIntent(ctx, CreatePendingIntentInput{
+		ID: "pi_1", ChatID: "chat", CreatedBy: "ou_owner", Prompt: "fix tests",
+		ProjectAliases: []string{"backend", "frontend"}, Now: now, ExpiresAt: now.Add(10 * time.Minute),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if pending.ID != "pi_1" {
+		t.Fatalf("unexpected pending intent: %+v", pending)
+	}
+	consumed, err := st.ConsumePendingIntent(ctx, "pi_1", "ou_owner", now.Add(time.Minute))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if consumed.Prompt != "fix tests" {
+		t.Fatalf("unexpected consumed intent: %+v", consumed)
+	}
+	if _, err := st.ConsumePendingIntent(ctx, "pi_1", "ou_owner", now.Add(2*time.Minute)); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("expected consumed intent to be unavailable, got %v", err)
 	}
 }
 

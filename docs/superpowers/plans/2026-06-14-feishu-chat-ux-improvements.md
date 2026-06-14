@@ -514,7 +514,7 @@ git commit -m "feat(store): find active chat tasks"
 - Modify: `internal/store/store.go`
 - Modify: `internal/store/store_test.go`
 
-- [ ] **Step 1: Write failing pending-intent tests**
+- [x] **Step 1: Write failing pending-intent tests**
 
 Add:
 
@@ -546,13 +546,13 @@ func TestPendingIntentCreateConsumeAndExpire(t *testing.T) {
 }
 ```
 
-- [ ] **Step 2: Run pending-intent test and verify failure**
+- [x] **Step 2: Run pending-intent test and verify failure**
 
 Run: `go test ./internal/store -run TestPendingIntentCreateConsumeAndExpire -count=1`
 
 Expected: FAIL because the table and APIs do not exist.
 
-- [ ] **Step 3: Add migration v2 and store APIs**
+- [x] **Step 3: Add migration v2 and store APIs**
 
 Increment `migrationVersion` by appending a second migration:
 
@@ -596,13 +596,13 @@ type PendingIntent struct {
 
 Implement create and consume in transactions. `ConsumePendingIntent` must verify creator, status `pending`, and `expires_at > now`; then set status `consumed`.
 
-- [ ] **Step 4: Run store tests**
+- [x] **Step 4: Run store tests**
 
 Run: `go test ./internal/store -count=1`
 
 Expected: PASS.
 
-- [ ] **Step 5: Commit pending intents**
+- [x] **Step 5: Commit pending intents**
 
 ```bash
 git add internal/store/schema.go internal/store/store.go internal/store/store_test.go

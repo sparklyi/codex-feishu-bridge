@@ -28,10 +28,14 @@ type InboundEvent struct {
 type CardKind string
 
 const (
-	CardStart        CardKind = "start"
-	CardSuccess      CardKind = "success"
-	CardFailure      CardKind = "failure"
-	CardRoutingError CardKind = "routing_error"
+	CardStart            CardKind = "start"
+	CardSuccess          CardKind = "success"
+	CardFailure          CardKind = "failure"
+	CardRoutingError     CardKind = "routing_error"
+	CardProjectSelection CardKind = "project_selection"
+	CardRunningConflict  CardKind = "running_conflict"
+	CardMigrationHint    CardKind = "migration_hint"
+	CardShortcutConfirm  CardKind = "shortcut_confirm"
 )
 
 type OutboundMessage struct {
@@ -42,12 +46,20 @@ type OutboundMessage struct {
 	Status           string
 	Title            string
 	BodyMarkdown     string
+	Fields           []Field
 	Actions          []Action
+}
+
+type Field struct {
+	Title string
+	Value string
 }
 
 type Action struct {
 	ID    string
 	Label string
+	Style string
+	Value map[string]string
 }
 
 type SentMessage struct {

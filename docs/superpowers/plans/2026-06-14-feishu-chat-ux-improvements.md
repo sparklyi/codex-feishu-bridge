@@ -42,7 +42,7 @@
 - Modify: `internal/config/config_test.go`
 - Modify: `config.example.yaml`
 
-- [ ] **Step 1: Write failing config tests**
+- [x] **Step 1: Write failing config tests**
 
 Add tests in `internal/config/config_test.go`:
 
@@ -94,13 +94,13 @@ func TestProjectAliasesSorted(t *testing.T) {
 }
 ```
 
-- [ ] **Step 2: Run config tests and verify failure**
+- [x] **Step 2: Run config tests and verify failure**
 
 Run: `go test ./internal/config -run 'TestLoadFeishuBotOpenID|TestProjectAliasesSorted' -count=1`
 
 Expected: FAIL because `FeishuConfig.BotOpenID` and `ProjectAliases` do not exist.
 
-- [ ] **Step 3: Implement config additions**
+- [x] **Step 3: Implement config additions**
 
 Add to `internal/config/config.go`:
 
@@ -134,13 +134,13 @@ feishu:
   connection: websocket
 ```
 
-- [ ] **Step 4: Run config tests and verify pass**
+- [x] **Step 4: Run config tests and verify pass**
 
 Run: `go test ./internal/config -count=1`
 
 Expected: PASS.
 
-- [ ] **Step 5: Commit config support**
+- [x] **Step 5: Commit config support**
 
 ```bash
 git add internal/config/config.go internal/config/config_test.go config.example.yaml

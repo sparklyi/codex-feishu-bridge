@@ -49,6 +49,14 @@ type RunningConflictInput struct {
 	ProjectAlias     string
 }
 
+type ShortcutConfirmationInput struct {
+	ChatID           string
+	ReplyToMessageID string
+	RootMessageID    string
+	Shortcut         string
+	Prompt           string
+}
+
 func New(sender transport.Sender) *Notifier {
 	return &Notifier{sender: sender}
 }
@@ -123,6 +131,18 @@ func (n *Notifier) RunningConflict(ctx context.Context, in RunningConflictInput)
 		BodyMarkdown:     "Task: " + in.TaskID + "\nStatus: " + in.Status + "\nProject: " + project,
 	})
 	return err
+}
+
+func (n *Notifier) ShortcutConfirmation(ctx context.Context, in ShortcutConfirmationInput) (contracts.SentMessage, error) {
+	return n.sender.Send(ctx, contracts.OutboundMessage{
+		ChatID:           in.ChatID,
+		ReplyToMessageID: in.ReplyToMessageID,
+		CardKind:         contracts.CardRoutingError,
+		Status:           "shortcut_confirmation",
+		Title:            "Confirm shortcut",
+		BodyMarkdown:     redact.FeishuText(in.Prompt, failureBodyLimit),
+		Actions:          []contracts.Action{{ID: "confirm_shortcut:" + in.Shortcut, Label: "Run"}},
+	})
 }
 
 func (n *Notifier) Rejection(ctx context.Context, chatID, replyToMessageID, body string) error {

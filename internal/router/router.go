@@ -45,6 +45,7 @@ type Notifier interface {
 	MigrationHint(ctx context.Context, chatID, replyToMessageID string) error
 	ProjectSelection(ctx context.Context, in notify.ProjectSelectionInput) (contracts.SentMessage, error)
 	RunningConflict(ctx context.Context, in notify.RunningConflictInput) error
+	ShortcutConfirmation(ctx context.Context, in notify.ShortcutConfirmationInput) (contracts.SentMessage, error)
 }
 
 type RouterOptions struct {
@@ -100,8 +101,13 @@ func (r *Router) Handle(ctx context.Context, ev contracts.InboundEvent) error {
 	case contracts.InboundNewTask:
 		return r.handleNewTask(ctx, ev)
 	case contracts.InboundCardAction:
-		if ev.ActionValue["action"] == "select_project" {
+		switch {
+		case ev.ActionValue["action"] == "select_project":
 			return r.handleProjectSelection(ctx, ev)
+		case ev.ActionValue["action"] == "confirm_shortcut":
+			return r.handleShortcutConfirmation(ctx, ev)
+		case ev.ActionID == "shortcut" || ev.ActionValue["action"] == "shortcut":
+			return r.handleShortcut(ctx, ev)
 		}
 		return r.handleContinuation(ctx, ev)
 	case contracts.InboundReply:
@@ -242,6 +248,38 @@ func (r *Router) handleContinuation(ctx context.Context, ev contracts.InboundEve
 	if ev.Kind == contracts.InboundCardAction && text == "" {
 		return r.notifier.Rejection(ctx, ev.ChatID, ev.MessageID, "Follow-up text is required.")
 	}
+	return r.resumeTask(ctx, ev, text)
+}
+
+func (r *Router) handleShortcut(ctx context.Context, ev contracts.InboundEvent) error {
+	shortcutName := ev.ActionValue["shortcut"]
+	shortcut, ok := intent.LookupShortcut(shortcutName)
+	if !ok {
+		return r.notifier.Rejection(ctx, ev.ChatID, ev.MessageID, "Unknown shortcut.")
+	}
+	if shortcut.Immediate {
+		return r.resumeTask(ctx, ev, shortcut.Prompt)
+	}
+	_, err := r.notifier.ShortcutConfirmation(ctx, notify.ShortcutConfirmationInput{
+		ChatID:           ev.ChatID,
+		ReplyToMessageID: ev.MessageID,
+		RootMessageID:    ev.RootMessageID,
+		Shortcut:         shortcutName,
+		Prompt:           shortcut.Prompt,
+	})
+	return err
+}
+
+func (r *Router) handleShortcutConfirmation(ctx context.Context, ev contracts.InboundEvent) error {
+	shortcutName := ev.ActionValue["shortcut"]
+	shortcut, ok := intent.LookupShortcut(shortcutName)
+	if !ok {
+		return r.notifier.Rejection(ctx, ev.ChatID, ev.MessageID, "Unknown shortcut.")
+	}
+	return r.resumeTask(ctx, ev, shortcut.Prompt)
+}
+
+func (r *Router) resumeTask(ctx context.Context, ev contracts.InboundEvent, text string) error {
 	task, err := r.store.ResolveMessageRoute(ctx, ev.RootMessageID)
 	if errors.Is(err, store.ErrRouteMiss) {
 		_, sendErr := r.notifier.RoutingError(ctx, ev.ChatID, ev.MessageID)

@@ -5,6 +5,7 @@ import (
 	"errors"
 	"path/filepath"
 	"strconv"
+	"strings"
 	"testing"
 	"time"
 
@@ -230,6 +231,42 @@ func TestRouterRunningConflictDoesNotStartSecondTask(t *testing.T) {
 	}
 }
 
+func TestRouterShortcutSummarizeResumesImmediately(t *testing.T) {
+	ctx := context.Background()
+	rt, _, runner, _ := newTestRouter(t, []string{"ou_owner"})
+	startTaskForShortcutTest(t, ctx, rt)
+	err := rt.Handle(ctx, contracts.InboundEvent{
+		Kind: contracts.InboundCardAction, DedupKey: "shortcut_1", ChatType: "private",
+		ChatID: "chat", SenderOpenID: "ou_owner", MessageID: "card_cb",
+		RootMessageID: "msg_result", ActionID: "shortcut",
+		ActionValue: map[string]string{"shortcut": "summarize"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if runner.resumeCalls != 1 || !strings.Contains(runner.lastResumeReply, "Summarize") {
+		t.Fatalf("unexpected shortcut resume calls=%d reply=%q", runner.resumeCalls, runner.lastResumeReply)
+	}
+}
+
+func TestRouterShortcutRunTestsRequiresConfirmation(t *testing.T) {
+	ctx := context.Background()
+	rt, _, runner, notes := newTestRouter(t, []string{"ou_owner"})
+	startTaskForShortcutTest(t, ctx, rt)
+	err := rt.Handle(ctx, contracts.InboundEvent{
+		Kind: contracts.InboundCardAction, DedupKey: "shortcut_1", ChatType: "private",
+		ChatID: "chat", SenderOpenID: "ou_owner", MessageID: "card_cb",
+		RootMessageID: "msg_result", ActionID: "shortcut",
+		ActionValue: map[string]string{"shortcut": "run_tests"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if runner.resumeCalls != 0 || len(notes.confirmations) != 1 {
+		t.Fatalf("run tests should require confirmation resumes=%d notes=%+v", runner.resumeCalls, notes)
+	}
+}
+
 func newTestRouter(t *testing.T, allowed []string) (*Router, *store.Store, *fakeRunner, *fakeNotifier) {
 	t.Helper()
 	return newTestRouterWithProjects(t, allowed, nil)
@@ -276,10 +313,11 @@ func newTestRouterWithProjects(t *testing.T, allowed []string, projects map[stri
 }
 
 type fakeRunner struct {
-	result      contracts.RunResult
-	execCalls   int
-	resumeCalls int
-	onSession   func()
+	result          contracts.RunResult
+	execCalls       int
+	resumeCalls     int
+	onSession       func()
+	lastResumeReply string
 }
 
 func (f *fakeRunner) Exec(ctx context.Context, in codexrunner.ExecInput) (contracts.RunResult, error) {
@@ -297,6 +335,7 @@ func (f *fakeRunner) Exec(ctx context.Context, in codexrunner.ExecInput) (contra
 
 func (f *fakeRunner) Resume(ctx context.Context, in codexrunner.ResumeInput) (contracts.RunResult, error) {
 	f.resumeCalls++
+	f.lastResumeReply = in.Reply
 	if in.SessionID == "" {
 		return contracts.RunResult{}, errors.New("missing session")
 	}
@@ -318,6 +357,7 @@ type fakeNotifier struct {
 	migrationHints    []string
 	projectSelections []notifier.ProjectSelectionInput
 	runningConflicts  []notifier.RunningConflictInput
+	confirmations     []notifier.ShortcutConfirmationInput
 }
 
 func (f *fakeNotifier) Start(ctx context.Context, in notifier.TaskCardInput) (contracts.SentMessage, error) {
@@ -361,6 +401,18 @@ func (f *fakeNotifier) ProjectSelection(ctx context.Context, in notifier.Project
 func (f *fakeNotifier) RunningConflict(ctx context.Context, in notifier.RunningConflictInput) error {
 	f.runningConflicts = append(f.runningConflicts, in)
 	return nil
+}
+
+func (f *fakeNotifier) ShortcutConfirmation(ctx context.Context, in notifier.ShortcutConfirmationInput) (contracts.SentMessage, error) {
+	f.confirmations = append(f.confirmations, in)
+	return contracts.SentMessage{MessageID: "msg_confirm"}, nil
+}
+
+func startTaskForShortcutTest(t *testing.T, ctx context.Context, rt *Router) {
+	t.Helper()
+	if err := rt.Handle(ctx, contracts.InboundEvent{Kind: contracts.InboundNewTask, DedupKey: "evt_start", ChatType: "private", ChatID: "chat", SenderOpenID: "ou_owner", MessageID: "msg_user", Text: "hello"}); err != nil {
+		t.Fatal(err)
+	}
 }
 
 func popID(ids *[]string) string {

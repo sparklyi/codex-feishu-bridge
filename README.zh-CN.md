@@ -24,11 +24,27 @@ codex-feishu-bridge serve
 发起一个新任务：
 
 ```text
-/codex explain this repository
-/codex @backend fix the failing test
+explain this repository
+@backend fix the failing test
 ```
 
-守护进程会发送开始卡片，运行 `codex exec --json`，在本地保存 Codex thread id，然后发送结果卡片。回复开始卡片或结果卡片，或者提交卡片表单，可以通过 `codex exec --json resume` 继续同一个 Codex 会话。
+群聊中需要 @ 机器人并指定项目：
+
+```text
+@Codex @backend fix the failing test
+```
+
+如果群聊里只发送 `@Codex fix the failing test`，桥接服务会返回项目选择卡片。`/codex` 不再作为任务入口，会返回迁移提示。
+
+守护进程会发送紧凑开始卡片，运行 `codex exec --json`，在本地保存 Codex thread id，然后发送结果卡片。回复开始卡片或结果卡片，或者提交卡片表单，可以通过 `codex exec --json resume` 继续同一个 Codex 会话。
+
+任务卡片包含快捷按钮：
+
+- Continue：自由输入 follow-up。
+- Summarize：立即续写，让 Codex 总结当前结果。
+- Explain error：立即续写，让 Codex 解释最新错误。
+- Run tests：需要二次确认。
+- MR description：需要二次确认。
 
 ## 常用命令
 

@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"strings"
 	"time"
 
 	lark "github.com/larksuite/oapi-sdk-go/v3"
@@ -129,38 +130,145 @@ func BuildInteractiveCard(msg contracts.OutboundMessage) ([]byte, error) {
 	card := map[string]any{
 		"config": map[string]any{"wide_screen_mode": true},
 		"header": map[string]any{
-			"title": map[string]any{"tag": "plain_text", "content": msg.Title},
+			"template": templateFor(msg),
+			"title":    map[string]any{"tag": "plain_text", "content": msg.Title},
 		},
 		"elements": []any{
 			map[string]any{"tag": "markdown", "content": msg.BodyMarkdown},
 		},
 	}
-	if len(msg.Actions) > 0 {
+	if len(msg.Fields) > 0 {
 		elements := card["elements"].([]any)
 		elements = append(elements,
-			map[string]any{
-				"tag":         "input",
-				"name":        "text",
-				"multiline":   true,
-				"placeholder": map[string]any{"tag": "plain_text", "content": "Follow up"},
-			},
-			map[string]any{
-				"tag": "action",
-				"actions": []any{
-					map[string]any{
-						"tag":  "button",
-						"type": "primary",
-						"text": map[string]any{"tag": "plain_text", "content": msg.Actions[0].Label},
-						"value": map[string]any{
-							"action_id": msg.Actions[0].ID,
-						},
-					},
-				},
-			},
+			map[string]any{"tag": "hr"},
+			map[string]any{"tag": "markdown", "content": fieldMarkdown(msg.Fields)},
 		)
 		card["elements"] = elements
 	}
+	if len(msg.Actions) > 0 {
+		elements := card["elements"].([]any)
+		var followUpAction *contracts.Action
+		buttonActions := make([]contracts.Action, 0, len(msg.Actions))
+		for _, action := range msg.Actions {
+			if action.ID == "continue_submit" {
+				actionCopy := action
+				followUpAction = &actionCopy
+				continue
+			}
+			if isTaskCard(msg.CardKind) {
+				continue
+			}
+			buttonActions = append(buttonActions, action)
+		}
+		if len(buttonActions) > 0 {
+			actions := make([]any, 0, len(buttonActions))
+			for _, action := range buttonActions {
+				actions = append(actions, map[string]any{
+					"tag":   "button",
+					"type":  buttonType(action.Style),
+					"text":  map[string]any{"tag": "plain_text", "content": action.Label},
+					"value": actionValue(action),
+				})
+			}
+			elements = append(elements, map[string]any{"tag": "action", "layout": "flow", "actions": actions})
+		}
+		if followUpAction != nil {
+			elements = append(elements, followUpForm(*followUpAction))
+		}
+		card["elements"] = elements
+	}
 	return json.Marshal(card)
+}
+
+func isTaskCard(kind contracts.CardKind) bool {
+	return kind == contracts.CardStart || kind == contracts.CardSuccess || kind == contracts.CardFailure
+}
+
+func followUpForm(action contracts.Action) map[string]any {
+	return map[string]any{
+		"tag":  "form",
+		"name": "codex_followup_form",
+		"elements": []any{
+			map[string]any{
+				"tag":         "input",
+				"name":        "text",
+				"required":    true,
+				"input_type":  "multiline_text",
+				"rows":        2,
+				"auto_resize": true,
+				"max_rows":    6,
+				"max_length":  1000,
+				"width":       "fill",
+				"label":       map[string]any{"tag": "plain_text", "content": "继续跟进"},
+				"placeholder": map[string]any{"tag": "plain_text", "content": "继续补充需求或问题"},
+				"fallback": map[string]any{
+					"tag": "fallback_text",
+					"text": map[string]any{
+						"tag":     "plain_text",
+						"content": "当前飞书客户端不支持卡片输入框，请直接回复任务卡片。",
+					},
+				},
+			},
+			map[string]any{
+				"tag":         "button",
+				"name":        action.ID,
+				"action_type": "form_submit",
+				"type":        buttonType(action.Style),
+				"text":        map[string]any{"tag": "plain_text", "content": action.Label},
+				"value":       actionValue(action),
+			},
+		},
+		"fallback": map[string]any{
+			"tag": "fallback_text",
+			"text": map[string]any{
+				"tag":     "plain_text",
+				"content": "当前飞书客户端不支持卡片表单，请直接回复任务卡片。",
+			},
+		},
+	}
+}
+
+func templateFor(msg contracts.OutboundMessage) string {
+	switch msg.CardKind {
+	case contracts.CardSuccess:
+		return "green"
+	case contracts.CardFailure, contracts.CardRoutingError:
+		return "red"
+	case contracts.CardRunningConflict, contracts.CardShortcutConfirm:
+		return "orange"
+	case contracts.CardProjectSelection, contracts.CardMigrationHint:
+		return "blue"
+	default:
+		if msg.Status == "failed" {
+			return "red"
+		}
+		return "wathet"
+	}
+}
+
+func fieldMarkdown(fields []contracts.Field) string {
+	lines := make([]string, 0, len(fields)+1)
+	lines = append(lines, "**任务信息**")
+	for _, field := range fields {
+		lines = append(lines, field.Title+"：`"+field.Value+"`")
+	}
+	return strings.Join(lines, "\n")
+}
+
+func actionValue(action contracts.Action) map[string]string {
+	value := make(map[string]string, len(action.Value)+1)
+	for key, val := range action.Value {
+		value[key] = val
+	}
+	value["action_id"] = action.ID
+	return value
+}
+
+func buttonType(style string) string {
+	if style == "" {
+		return "default"
+	}
+	return style
 }
 
 func (s *Sender) sleep(ctx context.Context, d time.Duration) error {

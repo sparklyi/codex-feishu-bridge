@@ -22,6 +22,17 @@ func TestNormalizeMessageNewTask(t *testing.T) {
 	}
 }
 
+func TestNormalizeMessagePlainRootTextReachesRouter(t *testing.T) {
+	raw := messageJSON(t, map[string]any{"text": "hello"}, "")
+	ev, err := NormalizeMessageJSON(raw, VerifyOptions{AppID: "cli_test", VerificationToken: "verify"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if ev.Kind != contracts.InboundNewTask || ev.Text != "hello" {
+		t.Fatalf("unexpected event: %+v", ev)
+	}
+}
+
 func TestNormalizeMessageReplyUsesRootMessageID(t *testing.T) {
 	raw := messageJSON(t, map[string]any{"text": "continue"}, "card_msg_1")
 	ev, err := NormalizeMessageJSON(raw, VerifyOptions{AppID: "cli_test", VerificationToken: "verify"})
@@ -42,6 +53,31 @@ func TestNormalizeMessageFallbackDedup(t *testing.T) {
 	}
 	if ev.DedupKey != "message:msg_1" || ev.Text != "/codex @backend fix bug" {
 		t.Fatalf("unexpected fallback dedup: %+v", ev)
+	}
+}
+
+func TestNormalizeMessageBotMention(t *testing.T) {
+	raw := messageJSONWithMentions(t, map[string]any{"text": "@_user_1 @backend fix tests"}, []string{"ou_bot"})
+	ev, err := NormalizeMessageJSON(raw, VerifyOptions{AppID: "cli_test", VerificationToken: "verify", BotOpenID: "ou_bot"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !ev.BotMentioned {
+		t.Fatalf("bot mention not detected: %+v", ev)
+	}
+	if ev.Text != "@backend fix tests" {
+		t.Fatalf("bot mention should be stripped, text=%q", ev.Text)
+	}
+}
+
+func TestNormalizeMessageNonBotMentionIsNotStripped(t *testing.T) {
+	raw := messageJSONWithMentions(t, map[string]any{"text": "@someone @backend fix tests"}, []string{"ou_other"})
+	ev, err := NormalizeMessageJSON(raw, VerifyOptions{AppID: "cli_test", VerificationToken: "verify", BotOpenID: "ou_bot"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if ev.BotMentioned || ev.Text != "@someone @backend fix tests" {
+		t.Fatalf("unexpected mention handling: %+v", ev)
 	}
 }
 
@@ -74,6 +110,22 @@ func TestNormalizeCardFallbackDedupAndEmptyText(t *testing.T) {
 	}
 }
 
+func TestNormalizeCardActionValues(t *testing.T) {
+	raw := cardJSONWithValue(t, map[string]any{
+		"text":     "continue",
+		"action":   "shortcut",
+		"shortcut": "summarize",
+		"task_id":  "cx_1",
+	}, "token_1")
+	ev, err := NormalizeCardActionJSON(raw, VerifyOptions{AppID: "cli_test", VerificationToken: "verify"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if ev.ActionValue["action"] != "shortcut" || ev.ActionValue["shortcut"] != "summarize" || ev.Text != "continue" {
+		t.Fatalf("unexpected callback values: %+v", ev)
+	}
+}
+
 func TestNormalizeRejectsWrongAppTokenAndMalformedPayload(t *testing.T) {
 	if _, err := NormalizeMessageJSON(messageJSON(t, map[string]any{"text": "/codex hello"}, ""), VerifyOptions{AppID: "wrong", VerificationToken: "verify"}); err == nil {
 		t.Fatal("expected wrong app id rejection")
@@ -103,6 +155,61 @@ func messageJSON(t *testing.T, content map[string]any, root string) []byte {
 		"event":{
 			"sender":{"sender_id":{"open_id":"ou_owner"}},
 			"message":{"message_id":"msg_1","chat_id":"chat_1","chat_type":"private","content":` + string(contentJSON) + rootField + `}
+		}
+	}`
+	return []byte(raw)
+}
+
+func messageJSONWithMentions(t *testing.T, content map[string]any, openIDs []string) []byte {
+	t.Helper()
+	contentJSON, err := json.Marshal(content)
+	if err != nil {
+		t.Fatal(err)
+	}
+	text, _ := content["text"].(string)
+	tokens := strings.Fields(text)
+	mentions := make([]map[string]any, 0, len(openIDs))
+	for i, openID := range openIDs {
+		key := "@_user_1"
+		if i < len(tokens) && strings.HasPrefix(tokens[i], "@") {
+			key = tokens[i]
+		}
+		mentions = append(mentions, map[string]any{
+			"key": key,
+			"id":  map[string]any{"open_id": openID},
+		})
+	}
+	mentionsJSON, err := json.Marshal(mentions)
+	if err != nil {
+		t.Fatal(err)
+	}
+	raw := `{
+		"header":{"event_id":"evt_1","app_id":"cli_test","token":"verify","create_time":"1760000000000"},
+		"event":{
+			"sender":{"sender_id":{"open_id":"ou_owner"}},
+			"message":{"message_id":"msg_1","chat_id":"chat_1","chat_type":"group","content":` + string(contentJSON) + `,"mentions":` + string(mentionsJSON) + `}
+		}
+	}`
+	return []byte(raw)
+}
+
+func cardJSONWithValue(t *testing.T, value map[string]any, token string) []byte {
+	t.Helper()
+	valueJSON, err := json.Marshal(value)
+	if err != nil {
+		t.Fatal(err)
+	}
+	tokenField := ""
+	if token != "" {
+		tokenField = `"event_id":"` + token + `",`
+	}
+	raw := `{
+		"header":{` + tokenField + `"app_id":"cli_test","token":"verify","create_time":"1760000000000"},
+		"event":{
+			"operator":{"open_id":"ou_owner"},
+			"context":{"open_message_id":"card_msg_1"},
+			"message":{"message_id":"callback_msg_1","chat_id":"chat_1","chat_type":"private"},
+			"action":{"action_id":"continue_submit","value":` + string(valueJSON) + `}
 		}
 	}`
 	return []byte(raw)

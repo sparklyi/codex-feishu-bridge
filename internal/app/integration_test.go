@@ -13,16 +13,24 @@ import (
 
 func TestIntegration(t *testing.T) {
 	t.Run("new task", func(t *testing.T) {
-		env := newIntegrationEnv(t, []contracts.InboundEvent{{Kind: contracts.InboundNewTask, DedupKey: "evt_1", ChatType: "private", ChatID: "chat", SenderOpenID: "ou_owner", MessageID: "msg_user", Text: "/codex hello"}})
+		env := newIntegrationEnv(t, []contracts.InboundEvent{{Kind: contracts.InboundNewTask, DedupKey: "evt_1", ChatType: "private", ChatID: "chat", SenderOpenID: "ou_owner", MessageID: "msg_user", Text: "hello"}})
 		env.run(t)
 		if env.runner.execCalls != 1 || len(env.sender.messages) != 2 {
 			t.Fatalf("unexpected flow exec=%d messages=%d", env.runner.execCalls, len(env.sender.messages))
 		}
 	})
 
+	t.Run("private plain task", func(t *testing.T) {
+		env := newIntegrationEnv(t, []contracts.InboundEvent{{Kind: contracts.InboundNewTask, DedupKey: "plain_1", ChatType: "private", ChatID: "chat", SenderOpenID: "ou_owner", MessageID: "msg_user", Text: "fix the failing router test"}})
+		env.run(t)
+		if env.runner.execCalls != 1 || env.sender.messages[0].CardKind != contracts.CardStart {
+			t.Fatalf("private plain task did not start exec=%d messages=%+v", env.runner.execCalls, env.sender.messages)
+		}
+	})
+
 	t.Run("card reply resume", func(t *testing.T) {
 		env := newIntegrationEnv(t, []contracts.InboundEvent{
-			{Kind: contracts.InboundNewTask, DedupKey: "evt_1", ChatType: "private", ChatID: "chat", SenderOpenID: "ou_owner", MessageID: "msg_user", Text: "/codex hello"},
+			{Kind: contracts.InboundNewTask, DedupKey: "evt_1", ChatType: "private", ChatID: "chat", SenderOpenID: "ou_owner", MessageID: "msg_user", Text: "hello"},
 			{Kind: contracts.InboundCardAction, DedupKey: "evt_2", ChatType: "private", ChatID: "chat", SenderOpenID: "ou_owner", MessageID: "card_cb", RootMessageID: "msg_result", ActionID: "continue_submit", Text: "continue"},
 		})
 		env.run(t)
@@ -31,8 +39,42 @@ func TestIntegration(t *testing.T) {
 		}
 	})
 
+	t.Run("group mention project selection then task", func(t *testing.T) {
+		env := newIntegrationEnv(t, []contracts.InboundEvent{{
+			Kind: contracts.InboundNewTask, DedupKey: "group_1", ChatType: "group",
+			ChatID: "chat", SenderOpenID: "ou_owner", MessageID: "msg_user",
+			Text: "fix tests", BotMentioned: true,
+		}})
+		env.run(t)
+		if env.runner.execCalls != 0 || len(env.sender.messages) != 1 || env.sender.messages[0].CardKind != contracts.CardProjectSelection {
+			t.Fatalf("expected project selection exec=%d messages=%+v", env.runner.execCalls, env.sender.messages)
+		}
+		pendingID := env.sender.messages[0].Actions[0].Value["pending_id"]
+		env.receiver.events = []contracts.InboundEvent{{
+			Kind: contracts.InboundCardAction, DedupKey: "group_2", ChatType: "group",
+			ChatID: "chat", SenderOpenID: "ou_owner", MessageID: "card_cb",
+			ActionID:    "project_select",
+			ActionValue: map[string]string{"action": "select_project", "pending_id": pendingID, "project": "backend"},
+		}}
+		env.run(t)
+		if env.runner.execCalls != 1 {
+			t.Fatalf("project selection did not start task, exec=%d messages=%+v", env.runner.execCalls, env.sender.messages)
+		}
+	})
+
+	t.Run("route miss never falls back to latest task", func(t *testing.T) {
+		env := newIntegrationEnv(t, []contracts.InboundEvent{
+			{Kind: contracts.InboundNewTask, DedupKey: "miss_1", ChatType: "private", ChatID: "chat", SenderOpenID: "ou_owner", MessageID: "msg_user", Text: "hello"},
+			{Kind: contracts.InboundReply, DedupKey: "miss_2", ChatType: "private", ChatID: "chat", SenderOpenID: "ou_owner", MessageID: "msg_reply", RootMessageID: "missing", Text: "continue"},
+		})
+		env.run(t)
+		if env.runner.resumeCalls != 0 || env.sender.messages[len(env.sender.messages)-1].CardKind != contracts.CardRoutingError {
+			t.Fatalf("route miss should not resume latest task resumes=%d messages=%+v", env.runner.resumeCalls, env.sender.messages)
+		}
+	})
+
 	t.Run("unauthorized", func(t *testing.T) {
-		env := newIntegrationEnv(t, []contracts.InboundEvent{{Kind: contracts.InboundNewTask, DedupKey: "evt_bad", ChatType: "private", ChatID: "chat", SenderOpenID: "ou_bad", MessageID: "msg_user", Text: "/codex hello"}})
+		env := newIntegrationEnv(t, []contracts.InboundEvent{{Kind: contracts.InboundNewTask, DedupKey: "evt_bad", ChatType: "private", ChatID: "chat", SenderOpenID: "ou_bad", MessageID: "msg_user", Text: "hello"}})
 		env.run(t)
 		if env.runner.execCalls != 0 || len(env.sender.messages) != 1 {
 			t.Fatalf("unauthorized should reject without runner, exec=%d messages=%d", env.runner.execCalls, len(env.sender.messages))
@@ -41,8 +83,8 @@ func TestIntegration(t *testing.T) {
 
 	t.Run("duplicate event", func(t *testing.T) {
 		env := newIntegrationEnv(t, []contracts.InboundEvent{
-			{Kind: contracts.InboundNewTask, DedupKey: "evt_dup", ChatType: "private", ChatID: "chat", SenderOpenID: "ou_owner", MessageID: "msg_user", Text: "/codex hello"},
-			{Kind: contracts.InboundNewTask, DedupKey: "evt_dup", ChatType: "private", ChatID: "chat", SenderOpenID: "ou_owner", MessageID: "msg_user2", Text: "/codex hello again"},
+			{Kind: contracts.InboundNewTask, DedupKey: "evt_dup", ChatType: "private", ChatID: "chat", SenderOpenID: "ou_owner", MessageID: "msg_user", Text: "hello"},
+			{Kind: contracts.InboundNewTask, DedupKey: "evt_dup", ChatType: "private", ChatID: "chat", SenderOpenID: "ou_owner", MessageID: "msg_user2", Text: "hello again"},
 		})
 		env.run(t)
 		if env.runner.execCalls != 1 {
@@ -51,7 +93,7 @@ func TestIntegration(t *testing.T) {
 	})
 
 	t.Run("result card failure", func(t *testing.T) {
-		env := newIntegrationEnv(t, []contracts.InboundEvent{{Kind: contracts.InboundNewTask, DedupKey: "evt_1", ChatType: "private", ChatID: "chat", SenderOpenID: "ou_owner", MessageID: "msg_user", Text: "/codex hello"}})
+		env := newIntegrationEnv(t, []contracts.InboundEvent{{Kind: contracts.InboundNewTask, DedupKey: "evt_1", ChatType: "private", ChatID: "chat", SenderOpenID: "ou_owner", MessageID: "msg_user", Text: "hello"}})
 		env.sender.failAfter = 2
 		env.run(t)
 		st := env.openStore(t)

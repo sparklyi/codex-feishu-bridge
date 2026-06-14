@@ -4,10 +4,8 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
-	"errors"
 	"fmt"
 	"strconv"
-	"strings"
 	"time"
 
 	"github.com/sparklyi/codex-feishu-bridge/internal/contracts"
@@ -36,9 +34,6 @@ func NormalizeMessageJSON(raw []byte, opts VerifyOptions) (contracts.InboundEven
 	}
 	kind := contracts.InboundReply
 	if rootID == "" {
-		if !strings.HasPrefix(strings.TrimSpace(text), "/codex") {
-			return contracts.InboundEvent{}, errors.New("message is not a codex command or reply")
-		}
 		kind = contracts.InboundNewTask
 	}
 	dedup := msg.Header.EventID

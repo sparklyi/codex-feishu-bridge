@@ -22,6 +22,17 @@ func TestNormalizeMessageNewTask(t *testing.T) {
 	}
 }
 
+func TestNormalizeMessagePlainRootTextReachesRouter(t *testing.T) {
+	raw := messageJSON(t, map[string]any{"text": "hello"}, "")
+	ev, err := NormalizeMessageJSON(raw, VerifyOptions{AppID: "cli_test", VerificationToken: "verify"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if ev.Kind != contracts.InboundNewTask || ev.Text != "hello" {
+		t.Fatalf("unexpected event: %+v", ev)
+	}
+}
+
 func TestNormalizeMessageReplyUsesRootMessageID(t *testing.T) {
 	raw := messageJSON(t, map[string]any{"text": "continue"}, "card_msg_1")
 	ev, err := NormalizeMessageJSON(raw, VerifyOptions{AppID: "cli_test", VerificationToken: "verify"})

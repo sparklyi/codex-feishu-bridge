@@ -2,6 +2,7 @@
 
 test:
 	go test ./...
+	scripts/test-init-local-config.sh
 
 build:
 	go build -o bin/codex-feishu-bridge ./cmd/codex-feishu-bridge

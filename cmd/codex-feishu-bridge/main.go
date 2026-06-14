@@ -7,8 +7,8 @@ import (
 	"io"
 	"os"
 
-	"github.com/sihuo/codex-feishu-bridge/internal/app"
-	"github.com/sihuo/codex-feishu-bridge/internal/doctor"
+	"github.com/sparklyi/codex-feishu-bridge/internal/app"
+	"github.com/sparklyi/codex-feishu-bridge/internal/doctor"
 )
 
 func main() {

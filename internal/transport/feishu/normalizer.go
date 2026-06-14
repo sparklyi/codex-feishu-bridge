@@ -10,7 +10,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/sihuo/codex-feishu-bridge/internal/contracts"
+	"github.com/sparklyi/codex-feishu-bridge/internal/contracts"
 )
 
 type VerifyOptions struct {

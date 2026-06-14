@@ -7,11 +7,11 @@ import (
 	"testing"
 	"time"
 
-	"github.com/sihuo/codex-feishu-bridge/internal/codexrunner"
-	"github.com/sihuo/codex-feishu-bridge/internal/config"
-	"github.com/sihuo/codex-feishu-bridge/internal/contracts"
-	"github.com/sihuo/codex-feishu-bridge/internal/notifier"
-	"github.com/sihuo/codex-feishu-bridge/internal/store"
+	"github.com/sparklyi/codex-feishu-bridge/internal/codexrunner"
+	"github.com/sparklyi/codex-feishu-bridge/internal/config"
+	"github.com/sparklyi/codex-feishu-bridge/internal/contracts"
+	"github.com/sparklyi/codex-feishu-bridge/internal/notifier"
+	"github.com/sparklyi/codex-feishu-bridge/internal/store"
 )
 
 func TestRouterNewTaskRecordsRoutesAndSessionBeforeFinish(t *testing.T) {

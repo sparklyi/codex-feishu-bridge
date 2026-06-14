@@ -5,9 +5,9 @@ import (
 	"errors"
 	"strings"
 
-	"github.com/sihuo/codex-feishu-bridge/internal/contracts"
-	"github.com/sihuo/codex-feishu-bridge/internal/redact"
-	"github.com/sihuo/codex-feishu-bridge/internal/transport"
+	"github.com/sparklyi/codex-feishu-bridge/internal/contracts"
+	"github.com/sparklyi/codex-feishu-bridge/internal/redact"
+	"github.com/sparklyi/codex-feishu-bridge/internal/transport"
 )
 
 const (

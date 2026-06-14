@@ -9,7 +9,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/sihuo/codex-feishu-bridge/internal/config"
+	"github.com/sparklyi/codex-feishu-bridge/internal/config"
 )
 
 func TestCheckDetectsCapabilitiesAndWarnsApprovalOptional(t *testing.T) {

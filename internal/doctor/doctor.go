@@ -8,8 +8,8 @@ import (
 	"os/exec"
 	"strings"
 
-	"github.com/sihuo/codex-feishu-bridge/internal/config"
-	"github.com/sihuo/codex-feishu-bridge/internal/store"
+	"github.com/sparklyi/codex-feishu-bridge/internal/config"
+	"github.com/sparklyi/codex-feishu-bridge/internal/store"
 )
 
 type Level = config.DiagnosticLevel

@@ -1,4 +1,4 @@
-module github.com/sihuo/codex-feishu-bridge
+module github.com/sparklyi/codex-feishu-bridge
 
 go 1.22
 

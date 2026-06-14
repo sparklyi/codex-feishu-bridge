@@ -6,7 +6,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/sihuo/codex-feishu-bridge/internal/contracts"
+	"github.com/sparklyi/codex-feishu-bridge/internal/contracts"
 )
 
 func TestTaskCardsAreRedactedAndRouteable(t *testing.T) {

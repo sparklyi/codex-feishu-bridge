@@ -5,7 +5,7 @@
 ## Quick Start
 
 ```bash
-go install github.com/sihuo/codex-feishu-bridge/cmd/codex-feishu-bridge@latest
+go install github.com/sparklyi/codex-feishu-bridge/cmd/codex-feishu-bridge@latest
 codex-feishu-bridge init-config
 ```
 

@@ -9,8 +9,8 @@ import (
 	"os/exec"
 	"time"
 
-	"github.com/sihuo/codex-feishu-bridge/internal/contracts"
-	"github.com/sihuo/codex-feishu-bridge/internal/logs"
+	"github.com/sparklyi/codex-feishu-bridge/internal/contracts"
+	"github.com/sparklyi/codex-feishu-bridge/internal/logs"
 )
 
 const defaultStderrLimit = 8 * 1024

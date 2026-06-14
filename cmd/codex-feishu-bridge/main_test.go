@@ -9,8 +9,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/sihuo/codex-feishu-bridge/internal/contracts"
-	"github.com/sihuo/codex-feishu-bridge/internal/store"
+	"github.com/sparklyi/codex-feishu-bridge/internal/contracts"
+	"github.com/sparklyi/codex-feishu-bridge/internal/store"
 )
 
 func TestDoctorCommandRendersReport(t *testing.T) {

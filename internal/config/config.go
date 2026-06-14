@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"sort"
 
 	"gopkg.in/yaml.v3"
 )
@@ -30,6 +31,7 @@ type FeishuConfig struct {
 	AppID        string `yaml:"app_id"`
 	AppSecretEnv string `yaml:"app_secret_env"`
 	Connection   string `yaml:"connection"`
+	BotOpenID    string `yaml:"bot_open_id"`
 }
 
 type SecurityConfig struct {
@@ -184,6 +186,17 @@ func (cfg Config) ResolveProject(alias string) (ResolvedProject, error) {
 		resolved.Approval = project.Approval
 	}
 	return resolved, nil
+}
+
+func (cfg Config) ProjectAliases() []string {
+	aliases := make([]string, 0, len(cfg.Projects))
+	for alias := range cfg.Projects {
+		if alias != "" {
+			aliases = append(aliases, alias)
+		}
+	}
+	sort.Strings(aliases)
+	return aliases
 }
 
 func (cfg *Config) applyDefaults(home string) {

@@ -21,6 +21,8 @@ codex-feishu-bridge serve
 
 ## Feishu Workflow
 
+For a screenshot-based setup guide, see [Feishu Bot Quickstart (Chinese)](docs/feishu-quickstart.zh-CN.md).
+
 Start a task:
 
 ```text

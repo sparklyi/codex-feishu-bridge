@@ -62,6 +62,7 @@ Codex 在本机执行，使用配置中的 workspace、sandbox、model 和 extra
 
 ## 更多文档
 
+- [飞书机器人接入教程](docs/feishu-quickstart.zh-CN.md)
 - [飞书配置](docs/feishu-setup.md)
 - [安全模型](docs/security.md)
 - [本地开发](docs/development.md)

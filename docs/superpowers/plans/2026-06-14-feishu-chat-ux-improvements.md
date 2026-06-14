@@ -1149,7 +1149,7 @@ git commit -m "test(app): cover improved Feishu UX flows"
 - Modify: `docs/feishu-setup.md`
 - Modify: `docs/troubleshooting.md`
 
-- [ ] **Step 1: Update docs examples**
+- [x] **Step 1: Update docs examples**
 
 Replace `/codex` examples with:
 
@@ -1166,11 +1166,11 @@ For group chat, document:
 
 Document that `@Codex fix the failing router test` returns a project selection card.
 
-- [ ] **Step 2: Document old command behavior**
+- [x] **Step 2: Document old command behavior**
 
 State that `/codex` is no longer the task entry point and will return a migration hint.
 
-- [ ] **Step 3: Document shortcut buttons**
+- [x] **Step 3: Document shortcut buttons**
 
 List:
 
@@ -1180,13 +1180,13 @@ List:
 - Run tests: confirmation required.
 - MR description: confirmation required.
 
-- [ ] **Step 4: Run docs-sensitive tests**
+- [x] **Step 4: Run docs-sensitive tests**
 
 Run: `make test`
 
 Expected: PASS, including `scripts/test-init-local-config.sh`.
 
-- [ ] **Step 5: Commit documentation**
+- [x] **Step 5: Commit documentation**
 
 ```bash
 git add README.md README.zh-CN.md docs/feishu-quickstart.zh-CN.md docs/feishu-setup.md docs/troubleshooting.md

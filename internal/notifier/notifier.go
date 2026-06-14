@@ -33,6 +33,14 @@ type TaskCardInput struct {
 	CodexSessionID   string
 }
 
+type ProjectSelectionInput struct {
+	ChatID           string
+	ReplyToMessageID string
+	PendingID        string
+	Prompt           string
+	ProjectAliases   []string
+}
+
 func New(sender transport.Sender) *Notifier {
 	return &Notifier{sender: sender}
 }
@@ -70,6 +78,26 @@ func (n *Notifier) MigrationHint(ctx context.Context, chatID, replyToMessageID s
 		BodyMarkdown:     "Send plain text in a private chat to start a Codex task. Use `@project prompt` when you need a configured project.",
 	})
 	return err
+}
+
+func (n *Notifier) ProjectSelection(ctx context.Context, in ProjectSelectionInput) (contracts.SentMessage, error) {
+	body := "Prompt: " + redact.FeishuText(in.Prompt, 500)
+	if len(in.ProjectAliases) > 0 {
+		body += "\nProjects: " + strings.Join(in.ProjectAliases, ", ")
+	}
+	actions := make([]contracts.Action, 0, len(in.ProjectAliases))
+	for _, alias := range in.ProjectAliases {
+		actions = append(actions, contracts.Action{ID: "project_select:" + alias, Label: alias})
+	}
+	return n.sender.Send(ctx, contracts.OutboundMessage{
+		ChatID:           in.ChatID,
+		ReplyToMessageID: in.ReplyToMessageID,
+		CardKind:         contracts.CardRoutingError,
+		Status:           "project_selection",
+		Title:            "Choose project",
+		BodyMarkdown:     body,
+		Actions:          actions,
+	})
 }
 
 func (n *Notifier) Rejection(ctx context.Context, chatID, replyToMessageID, body string) error {

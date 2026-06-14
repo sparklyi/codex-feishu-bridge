@@ -688,7 +688,7 @@ git commit -m "feat(router): start private tasks from plain text"
 - Modify: `internal/router/router_test.go`
 - Modify: `internal/notifier/notifier.go`
 
-- [ ] **Step 1: Write failing group project tests**
+- [x] **Step 1: Write failing group project tests**
 
 Add tests:
 
@@ -750,13 +750,13 @@ func TestRouterProjectSelectionStartsPendingTaskOnce(t *testing.T) {
 }
 ```
 
-- [ ] **Step 2: Run group tests and verify failure**
+- [x] **Step 2: Run group tests and verify failure**
 
 Run: `go test ./internal/router -run 'TestRouterGroupMentionWithoutProjectSendsProjectSelection|TestRouterProjectSelectionStartsPendingTaskOnce' -count=1`
 
 Expected: FAIL because router does not create pending intents or project selection cards.
 
-- [ ] **Step 3: Implement group mention and project selection routing**
+- [x] **Step 3: Implement group mention and project selection routing**
 
 Extend `TaskStore` interface with pending APIs from Task 6.
 
@@ -772,13 +772,13 @@ Handle:
 - `ActionValue["action"] == "select_project"`: consume pending intent, resolve selected project, create task.
 - Unknown project: send project selection card with a short message and do not run.
 
-- [ ] **Step 4: Run router tests**
+- [x] **Step 4: Run router tests**
 
 Run: `go test ./internal/router -count=1`
 
 Expected: PASS.
 
-- [ ] **Step 5: Commit project selection routing**
+- [x] **Step 5: Commit project selection routing**
 
 ```bash
 git add internal/router/router.go internal/router/router_test.go internal/notifier/notifier.go

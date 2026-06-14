@@ -152,7 +152,68 @@ func TestRouterCardActionEmptyTextRejectedBeforeRun(t *testing.T) {
 	}
 }
 
+func TestRouterGroupMentionWithoutProjectSendsProjectSelection(t *testing.T) {
+	ctx := context.Background()
+	rt, _, runner, notes := newTestRouterWithProjects(t, []string{"ou_owner"}, map[string]config.ProjectConfig{
+		"backend": {CWD: t.TempDir()},
+	})
+	if err := rt.Handle(ctx, contracts.InboundEvent{Kind: contracts.InboundNewTask, DedupKey: "evt_1", ChatType: "group", ChatID: "chat", SenderOpenID: "ou_owner", MessageID: "msg_user", Text: "fix tests", BotMentioned: true}); err != nil {
+		t.Fatal(err)
+	}
+	if runner.execCalls != 0 || len(notes.projectSelections) != 1 {
+		t.Fatalf("expected project selection exec=%d notes=%+v", runner.execCalls, notes)
+	}
+}
+
+func TestRouterProjectSelectionStartsPendingTaskOnce(t *testing.T) {
+	ctx := context.Background()
+	rt, _, runner, notes := newTestRouterWithProjects(t, []string{"ou_owner"}, map[string]config.ProjectConfig{
+		"backend": {CWD: t.TempDir()},
+	})
+	err := rt.Handle(ctx, contracts.InboundEvent{
+		Kind: contracts.InboundNewTask, DedupKey: "evt_1", ChatType: "group",
+		ChatID: "chat", SenderOpenID: "ou_owner", MessageID: "msg_user",
+		Text: "fix tests", BotMentioned: true,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(notes.projectSelections) != 1 {
+		t.Fatalf("expected project selection: %+v", notes)
+	}
+	pendingID := notes.projectSelections[0].PendingID
+	err = rt.Handle(ctx, contracts.InboundEvent{
+		Kind: contracts.InboundCardAction, DedupKey: "evt_2", ChatType: "group",
+		ChatID: "chat", SenderOpenID: "ou_owner", MessageID: "card_cb",
+		ActionID:    "project_select",
+		ActionValue: map[string]string{"action": "select_project", "pending_id": pendingID, "project": "backend"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if runner.execCalls != 1 {
+		t.Fatalf("project selection should start one task, exec=%d", runner.execCalls)
+	}
+	err = rt.Handle(ctx, contracts.InboundEvent{
+		Kind: contracts.InboundCardAction, DedupKey: "evt_3", ChatType: "group",
+		ChatID: "chat", SenderOpenID: "ou_owner", MessageID: "card_cb2",
+		ActionID:    "project_select",
+		ActionValue: map[string]string{"action": "select_project", "pending_id": pendingID, "project": "backend"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if runner.execCalls != 1 {
+		t.Fatalf("consumed pending intent should not run twice, exec=%d", runner.execCalls)
+	}
+}
+
 func newTestRouter(t *testing.T, allowed []string) (*Router, *store.Store, *fakeRunner, *fakeNotifier) {
+	t.Helper()
+	return newTestRouterWithProjects(t, allowed, nil)
+}
+
+func newTestRouterWithProjects(t *testing.T, allowed []string, projects map[string]config.ProjectConfig) (*Router, *store.Store, *fakeRunner, *fakeNotifier) {
 	t.Helper()
 	ctx := context.Background()
 	st, err := store.Open(ctx, filepath.Join(t.TempDir(), "state.db"))
@@ -172,6 +233,7 @@ func newTestRouter(t *testing.T, allowed []string) (*Router, *store.Store, *fake
 		Security:  config.SecurityConfig{AllowedOpenIDs: allowed},
 		Codex:     config.CodexConfig{Command: "codex", Sandbox: "workspace-write", Approval: "never"},
 		Workspace: config.WorkspaceConfig{Default: t.TempDir()},
+		Projects:  projects,
 	}
 	rt := New(RouterOptions{
 		Config:   cfg,
@@ -221,15 +283,16 @@ func (f *fakeRunner) Resume(ctx context.Context, in codexrunner.ResumeInput) (co
 }
 
 type fakeNotifier struct {
-	startIDs       []string
-	resultIDs      []string
-	startErr       error
-	starts         []notifier.TaskCardInput
-	successes      []notifier.TaskCardInput
-	failures       []notifier.TaskCardInput
-	rejections     []string
-	routingErrors  []string
-	migrationHints []string
+	startIDs          []string
+	resultIDs         []string
+	startErr          error
+	starts            []notifier.TaskCardInput
+	successes         []notifier.TaskCardInput
+	failures          []notifier.TaskCardInput
+	rejections        []string
+	routingErrors     []string
+	migrationHints    []string
+	projectSelections []notifier.ProjectSelectionInput
 }
 
 func (f *fakeNotifier) Start(ctx context.Context, in notifier.TaskCardInput) (contracts.SentMessage, error) {
@@ -263,6 +326,11 @@ func (f *fakeNotifier) Rejection(ctx context.Context, chatID, replyToMessageID, 
 func (f *fakeNotifier) MigrationHint(ctx context.Context, chatID, replyToMessageID string) error {
 	f.migrationHints = append(f.migrationHints, replyToMessageID)
 	return nil
+}
+
+func (f *fakeNotifier) ProjectSelection(ctx context.Context, in notifier.ProjectSelectionInput) (contracts.SentMessage, error) {
+	f.projectSelections = append(f.projectSelections, in)
+	return contracts.SentMessage{MessageID: "msg_project"}, nil
 }
 
 func popID(ids *[]string) string {

@@ -26,6 +26,8 @@ type TaskStore interface {
 	UserEnabled(ctx context.Context, openID string) (bool, error)
 	InsertMessageRoute(ctx context.Context, messageID, taskID, routeType string) error
 	ResolveMessageRoute(ctx context.Context, messageID string) (store.Task, error)
+	CreatePendingIntent(ctx context.Context, in store.CreatePendingIntentInput) (store.PendingIntent, error)
+	ConsumePendingIntent(ctx context.Context, id, createdBy string, now time.Time) (store.PendingIntent, error)
 }
 
 type Runner interface {
@@ -40,26 +42,29 @@ type Notifier interface {
 	RoutingError(ctx context.Context, chatID, replyToMessageID string) (contracts.SentMessage, error)
 	Rejection(ctx context.Context, chatID, replyToMessageID, body string) error
 	MigrationHint(ctx context.Context, chatID, replyToMessageID string) error
+	ProjectSelection(ctx context.Context, in notify.ProjectSelectionInput) (contracts.SentMessage, error)
 }
 
 type RouterOptions struct {
-	Config    config.Config
-	Store     TaskStore
-	Runner    Runner
-	Notifier  Notifier
-	Now       func() time.Time
-	NewTaskID func() string
-	NewRunID  func() string
+	Config       config.Config
+	Store        TaskStore
+	Runner       Runner
+	Notifier     Notifier
+	Now          func() time.Time
+	NewTaskID    func() string
+	NewRunID     func() string
+	NewPendingID func() string
 }
 
 type Router struct {
-	cfg       config.Config
-	store     TaskStore
-	runner    Runner
-	notifier  Notifier
-	now       func() time.Time
-	newTaskID func() string
-	newRunID  func() string
+	cfg          config.Config
+	store        TaskStore
+	runner       Runner
+	notifier     Notifier
+	now          func() time.Time
+	newTaskID    func() string
+	newRunID     func() string
+	newPendingID func() string
 }
 
 func New(opts RouterOptions) *Router {
@@ -75,7 +80,11 @@ func New(opts RouterOptions) *Router {
 	if newRunID == nil {
 		newRunID = func() string { return "run_" + time.Now().UTC().Format("20060102150405.000000000") }
 	}
-	return &Router{cfg: opts.Config, store: opts.Store, runner: opts.Runner, notifier: opts.Notifier, now: now, newTaskID: newTaskID, newRunID: newRunID}
+	newPendingID := opts.NewPendingID
+	if newPendingID == nil {
+		newPendingID = randomPendingID
+	}
+	return &Router{cfg: opts.Config, store: opts.Store, runner: opts.Runner, notifier: opts.Notifier, now: now, newTaskID: newTaskID, newRunID: newRunID, newPendingID: newPendingID}
 }
 
 func (r *Router) Handle(ctx context.Context, ev contracts.InboundEvent) error {
@@ -88,7 +97,12 @@ func (r *Router) Handle(ctx context.Context, ev contracts.InboundEvent) error {
 	switch ev.Kind {
 	case contracts.InboundNewTask:
 		return r.handleNewTask(ctx, ev)
-	case contracts.InboundReply, contracts.InboundCardAction:
+	case contracts.InboundCardAction:
+		if ev.ActionValue["action"] == "select_project" {
+			return r.handleProjectSelection(ctx, ev)
+		}
+		return r.handleContinuation(ctx, ev)
+	case contracts.InboundReply:
 		return r.handleContinuation(ctx, ev)
 	default:
 		return nil
@@ -105,13 +119,62 @@ func (r *Router) handleNewTask(ctx context.Context, ev contracts.InboundEvent) e
 	case intent.KindUnknownProject:
 		return r.notifier.Rejection(ctx, ev.ChatID, ev.MessageID, "Project configuration error: unknown project alias "+parsed.ProjectAlias)
 	case intent.KindProjectSelection:
-		return r.notifier.Rejection(ctx, ev.ChatID, ev.MessageID, "Choose a project before starting this task.")
+		return r.sendProjectSelection(ctx, ev, parsed.Prompt)
 	case intent.KindStartTask:
 	default:
 		return nil
 	}
-	alias := parsed.ProjectAlias
-	prompt := parsed.Prompt
+	return r.startTask(ctx, ev, parsed.ProjectAlias, parsed.Prompt)
+}
+
+func (r *Router) sendProjectSelection(ctx context.Context, ev contracts.InboundEvent, prompt string) error {
+	pendingID := r.newPendingID()
+	aliases := r.cfg.ProjectAliases()
+	pending, err := r.store.CreatePendingIntent(ctx, store.CreatePendingIntentInput{
+		ID:             pendingID,
+		ChatID:         ev.ChatID,
+		CreatedBy:      ev.SenderOpenID,
+		Prompt:         prompt,
+		ProjectAliases: aliases,
+		Now:            r.now(),
+		ExpiresAt:      r.now().Add(10 * time.Minute),
+	})
+	if err != nil {
+		return err
+	}
+	_, err = r.notifier.ProjectSelection(ctx, notify.ProjectSelectionInput{
+		ChatID:           ev.ChatID,
+		ReplyToMessageID: ev.MessageID,
+		PendingID:        pending.ID,
+		Prompt:           pending.Prompt,
+		ProjectAliases:   pending.ProjectAliases,
+	})
+	return err
+}
+
+func (r *Router) handleProjectSelection(ctx context.Context, ev contracts.InboundEvent) error {
+	pending, err := r.store.ConsumePendingIntent(ctx, ev.ActionValue["pending_id"], ev.SenderOpenID, r.now())
+	if errors.Is(err, store.ErrNotFound) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	alias := ev.ActionValue["project"]
+	if !containsProjectAlias(pending.ProjectAliases, alias) {
+		_, sendErr := r.notifier.ProjectSelection(ctx, notify.ProjectSelectionInput{
+			ChatID:           ev.ChatID,
+			ReplyToMessageID: ev.MessageID,
+			PendingID:        pending.ID,
+			Prompt:           pending.Prompt,
+			ProjectAliases:   pending.ProjectAliases,
+		})
+		return sendErr
+	}
+	return r.startTask(ctx, ev, alias, pending.Prompt)
+}
+
+func (r *Router) startTask(ctx context.Context, ev contracts.InboundEvent, alias, prompt string) error {
 	project, err := r.cfg.ResolveProject(alias)
 	if err != nil {
 		return r.notifier.Rejection(ctx, ev.ChatID, ev.MessageID, "Project configuration error: "+err.Error())
@@ -290,10 +353,27 @@ func sourceFor(ev contracts.InboundEvent) string {
 	return "message"
 }
 
+func containsProjectAlias(aliases []string, want string) bool {
+	for _, alias := range aliases {
+		if alias == want {
+			return true
+		}
+	}
+	return false
+}
+
 func randomTaskID() string {
 	var buf [3]byte
 	if _, err := rand.Read(buf[:]); err != nil {
 		return fmt.Sprintf("cx_%d", time.Now().UnixNano())
 	}
 	return "cx_" + hex.EncodeToString(buf[:])
+}
+
+func randomPendingID() string {
+	var buf [3]byte
+	if _, err := rand.Read(buf[:]); err != nil {
+		return fmt.Sprintf("pi_%d", time.Now().UnixNano())
+	}
+	return "pi_" + hex.EncodeToString(buf[:])
 }

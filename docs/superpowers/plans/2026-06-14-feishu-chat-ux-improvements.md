@@ -382,7 +382,7 @@ git commit -m "feat(feishu): normalize bot mentions"
 - Modify: `internal/transport/feishu/normalizer.go`
 - Modify: `internal/transport/feishu/normalizer_test.go`
 
-- [ ] **Step 1: Write failing callback value test**
+- [x] **Step 1: Write failing callback value test**
 
 Add:
 
@@ -404,13 +404,13 @@ func TestNormalizeCardActionValues(t *testing.T) {
 }
 ```
 
-- [ ] **Step 2: Run callback test and verify failure**
+- [x] **Step 2: Run callback test and verify failure**
 
 Run: `go test ./internal/transport/feishu -run TestNormalizeCardActionValues -count=1`
 
 Expected: FAIL because `ActionValue` does not exist.
 
-- [ ] **Step 3: Implement action value normalization**
+- [x] **Step 3: Implement action value normalization**
 
 Add to `contracts.InboundEvent`:
 
@@ -420,13 +420,13 @@ ActionValue map[string]string
 
 In `NormalizeCardActionJSON`, decode every string-valued callback value into `ActionValue`. Keep `Text` as the special `text` value for existing continuation behavior. Non-string values should continue to reject only for `text`; ignore non-string auxiliary values unless a test requires stricter validation.
 
-- [ ] **Step 4: Run transport tests**
+- [x] **Step 4: Run transport tests**
 
 Run: `go test ./internal/transport/feishu -count=1`
 
 Expected: PASS.
 
-- [ ] **Step 5: Commit action values**
+- [x] **Step 5: Commit action values**
 
 ```bash
 git add internal/contracts/contracts.go internal/transport/feishu/normalizer.go internal/transport/feishu/normalizer_test.go

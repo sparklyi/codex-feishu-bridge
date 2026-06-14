@@ -110,6 +110,22 @@ func TestNormalizeCardFallbackDedupAndEmptyText(t *testing.T) {
 	}
 }
 
+func TestNormalizeCardActionValues(t *testing.T) {
+	raw := cardJSONWithValue(t, map[string]any{
+		"text":     "continue",
+		"action":   "shortcut",
+		"shortcut": "summarize",
+		"task_id":  "cx_1",
+	}, "token_1")
+	ev, err := NormalizeCardActionJSON(raw, VerifyOptions{AppID: "cli_test", VerificationToken: "verify"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if ev.ActionValue["action"] != "shortcut" || ev.ActionValue["shortcut"] != "summarize" || ev.Text != "continue" {
+		t.Fatalf("unexpected callback values: %+v", ev)
+	}
+}
+
 func TestNormalizeRejectsWrongAppTokenAndMalformedPayload(t *testing.T) {
 	if _, err := NormalizeMessageJSON(messageJSON(t, map[string]any{"text": "/codex hello"}, ""), VerifyOptions{AppID: "wrong", VerificationToken: "verify"}); err == nil {
 		t.Fatal("expected wrong app id rejection")
@@ -172,6 +188,28 @@ func messageJSONWithMentions(t *testing.T, content map[string]any, openIDs []str
 		"event":{
 			"sender":{"sender_id":{"open_id":"ou_owner"}},
 			"message":{"message_id":"msg_1","chat_id":"chat_1","chat_type":"group","content":` + string(contentJSON) + `,"mentions":` + string(mentionsJSON) + `}
+		}
+	}`
+	return []byte(raw)
+}
+
+func cardJSONWithValue(t *testing.T, value map[string]any, token string) []byte {
+	t.Helper()
+	valueJSON, err := json.Marshal(value)
+	if err != nil {
+		t.Fatal(err)
+	}
+	tokenField := ""
+	if token != "" {
+		tokenField = `"event_id":"` + token + `",`
+	}
+	raw := `{
+		"header":{` + tokenField + `"app_id":"cli_test","token":"verify","create_time":"1760000000000"},
+		"event":{
+			"operator":{"open_id":"ou_owner"},
+			"context":{"open_message_id":"card_msg_1"},
+			"message":{"message_id":"callback_msg_1","chat_id":"chat_1","chat_type":"private"},
+			"action":{"action_id":"continue_submit","value":` + string(valueJSON) + `}
 		}
 	}`
 	return []byte(raw)

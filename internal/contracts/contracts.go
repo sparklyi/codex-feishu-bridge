@@ -20,6 +20,7 @@ type InboundEvent struct {
 	RootMessageID string
 	BotMentioned  bool
 	ActionID      string
+	ActionValue   map[string]string
 	Text          string
 	RawReceivedAt time.Time
 }

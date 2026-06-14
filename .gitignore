@@ -4,3 +4,6 @@ coverage.out
 *.test
 *.log
 .DS_Store
+.tmp/
+.env
+.env.*

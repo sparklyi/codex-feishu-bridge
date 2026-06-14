@@ -58,6 +58,34 @@ func TestBuildInteractiveCardWithActionValues(t *testing.T) {
 	}
 }
 
+func TestBuildInteractiveCardUsesCompactTaskInfoSection(t *testing.T) {
+	card, err := BuildInteractiveCard(contracts.OutboundMessage{
+		CardKind:     contracts.CardSuccess,
+		Title:        "任务已完成 · cx_123",
+		BodyMarkdown: "**结果**\nHello",
+		Fields: []contracts.Field{
+			{Title: "状态", Value: "已完成"},
+			{Title: "项目", Value: "default"},
+			{Title: "工作区", Value: "[local-path]"},
+		},
+		Actions: []contracts.Action{{ID: "continue_submit", Label: "继续跟进"}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	body := string(card)
+	for _, want := range []string{"任务信息", "状态：`已完成`", "项目：`default`", "继续补充需求或问题", "继续跟进"} {
+		if !jsonContains(body, want) {
+			t.Fatalf("card missing compact layout content %q: %s", want, body)
+		}
+	}
+	for _, banned := range []string{"Status:", "Project:", "Workspace:", "Follow up"} {
+		if jsonContains(body, banned) {
+			t.Fatalf("card retained old layout text %q: %s", banned, body)
+		}
+	}
+}
+
 func TestSenderRateLimitRetryAndMessageID(t *testing.T) {
 	api := &fakeCardAPI{
 		results: []sendResult{

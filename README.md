@@ -26,11 +26,27 @@ For a screenshot-based setup guide, see [Feishu Bot Quickstart (Chinese)](docs/f
 Start a task:
 
 ```text
-/codex explain this repository
-/codex @backend fix the failing test
+explain this repository
+@backend fix the failing test
 ```
 
-The daemon sends a start card, runs `codex exec --json`, stores the Codex thread id internally, and sends a result card. Reply to a start/result card, or submit the card form, to continue the same Codex session with `codex exec --json resume`.
+In group chats, mention the bot and include a project:
+
+```text
+@Codex @backend fix the failing test
+```
+
+If a group message mentions the bot without a project, the bridge returns a project selection card. `/codex` is no longer the task entry point; it returns a migration hint.
+
+The daemon sends a compact start card, runs `codex exec --json`, stores the Codex thread id internally, and sends a result card. Reply to a start/result card, or submit the card form, to continue the same Codex session with `codex exec --json resume`.
+
+Task cards include shortcuts:
+
+- Continue: free-form follow-up.
+- Summarize: immediate resume.
+- Explain error: immediate resume.
+- Run tests: confirmation required.
+- MR description: confirmation required.
 
 ## Commands
 

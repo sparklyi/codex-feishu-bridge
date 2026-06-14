@@ -441,7 +441,7 @@ git commit -m "feat(feishu): preserve card action values"
 - Modify: `internal/store/store.go`
 - Modify: `internal/store/store_test.go`
 
-- [ ] **Step 1: Write failing active-task tests**
+- [x] **Step 1: Write failing active-task tests**
 
 Add:
 
@@ -468,13 +468,13 @@ func TestFindRunningTaskByChatAndCreator(t *testing.T) {
 }
 ```
 
-- [ ] **Step 2: Run store test and verify failure**
+- [x] **Step 2: Run store test and verify failure**
 
 Run: `go test ./internal/store -run TestFindRunningTaskByChatAndCreator -count=1`
 
 Expected: FAIL because `FindRunningTask` does not exist.
 
-- [ ] **Step 3: Implement active lookup**
+- [x] **Step 3: Implement active lookup**
 
 Add:
 
@@ -494,13 +494,13 @@ func (s *Store) FindRunningTask(ctx context.Context, chatID, creatorOpenID strin
 
 If `scanTask` currently only accepts `*sql.Rows`, add a small `taskScanner` interface shared by `*sql.Row` and `*sql.Rows`.
 
-- [ ] **Step 4: Run store tests**
+- [x] **Step 4: Run store tests**
 
 Run: `go test ./internal/store -count=1`
 
 Expected: PASS.
 
-- [ ] **Step 5: Commit active lookup**
+- [x] **Step 5: Commit active lookup**
 
 ```bash
 git add internal/store/store.go internal/store/store_test.go

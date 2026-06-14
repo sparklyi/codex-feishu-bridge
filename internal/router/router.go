@@ -26,6 +26,7 @@ type TaskStore interface {
 	UserEnabled(ctx context.Context, openID string) (bool, error)
 	InsertMessageRoute(ctx context.Context, messageID, taskID, routeType string) error
 	ResolveMessageRoute(ctx context.Context, messageID string) (store.Task, error)
+	GetTask(ctx context.Context, taskID string) (store.Task, []store.Run, error)
 	CreatePendingIntent(ctx context.Context, in store.CreatePendingIntentInput) (store.PendingIntent, error)
 	ConsumePendingIntent(ctx context.Context, id, createdBy string, now time.Time) (store.PendingIntent, error)
 	FindRunningTask(ctx context.Context, chatID, creatorOpenID string) (store.Task, bool, error)
@@ -40,6 +41,7 @@ type Notifier interface {
 	Start(ctx context.Context, in notify.TaskCardInput) (contracts.SentMessage, error)
 	Success(ctx context.Context, in notify.TaskCardInput) (contracts.SentMessage, error)
 	Failure(ctx context.Context, in notify.TaskCardInput) (contracts.SentMessage, error)
+	FollowUpAccepted(ctx context.Context, in notify.FollowUpAcceptedInput) (contracts.SentMessage, error)
 	RoutingError(ctx context.Context, chatID, replyToMessageID string) (contracts.SentMessage, error)
 	Rejection(ctx context.Context, chatID, replyToMessageID, body string) error
 	MigrationHint(ctx context.Context, chatID, replyToMessageID string) error
@@ -283,8 +285,8 @@ func (r *Router) handleShortcutConfirmation(ctx context.Context, ev contracts.In
 }
 
 func (r *Router) resumeTask(ctx context.Context, ev contracts.InboundEvent, text string) error {
-	task, err := r.store.ResolveMessageRoute(ctx, ev.RootMessageID)
-	if errors.Is(err, store.ErrRouteMiss) {
+	task, err := r.resolveContinuationTask(ctx, ev)
+	if errors.Is(err, store.ErrRouteMiss) || errors.Is(err, store.ErrNotFound) {
 		_, sendErr := r.notifier.RoutingError(ctx, ev.ChatID, ev.MessageID)
 		return sendErr
 	}
@@ -307,6 +309,7 @@ func (r *Router) resumeTask(ctx context.Context, ev contracts.InboundEvent, text
 	default:
 		return r.notifier.Rejection(ctx, ev.ChatID, ev.MessageID, "This task cannot be resumed.")
 	}
+	feedbackErr := r.sendFollowUpAccepted(ctx, ev, admit.Task, text)
 	result, runErr := r.runner.Resume(ctx, codexrunner.ResumeInput{
 		ExecInput: execInput(admit.Task, admit.Run.ID, text, func(threadID string) error {
 			return r.store.RecordRunSession(ctx, admit.Run.ID, threadID)
@@ -318,7 +321,62 @@ func (r *Router) resumeTask(ctx context.Context, ev contracts.InboundEvent, text
 	if err := r.store.FinishRun(ctx, ev.DedupKey, admit.Run.ID, result, status); err != nil {
 		return err
 	}
-	return r.sendResult(ctx, admit.Task, status, result, runErr)
+	if err := r.sendResult(ctx, admit.Task, status, result, runErr); err != nil {
+		return err
+	}
+	return feedbackErr
+}
+
+func (r *Router) resolveContinuationTask(ctx context.Context, ev contracts.InboundEvent) (store.Task, error) {
+	task, err := r.store.ResolveMessageRoute(ctx, ev.RootMessageID)
+	if !errors.Is(err, store.ErrRouteMiss) {
+		return task, err
+	}
+	if ev.Kind != contracts.InboundCardAction {
+		return store.Task{}, err
+	}
+	taskID := ev.ActionValue["task_id"]
+	if taskID == "" {
+		return store.Task{}, err
+	}
+	task, _, getErr := r.store.GetTask(ctx, taskID)
+	if getErr != nil {
+		return store.Task{}, getErr
+	}
+	if task.ChatID != ev.ChatID {
+		return store.Task{}, store.ErrRouteMiss
+	}
+	return task, nil
+}
+
+func (r *Router) sendFollowUpAccepted(ctx context.Context, ev contracts.InboundEvent, task store.Task, text string) error {
+	if ev.Kind != contracts.InboundCardAction {
+		return nil
+	}
+	input := notify.FollowUpAcceptedInput{
+		ChatID:       task.ChatID,
+		TaskID:       task.ID,
+		Status:       "running",
+		ProjectAlias: task.ProjectAlias,
+		CWDLabel:     task.CWD,
+		Prompt:       text,
+		SubmittedAt:  r.now(),
+	}
+	if ev.RootMessageID != "" {
+		input.UpdateMessageID = ev.RootMessageID
+		if _, err := r.notifier.FollowUpAccepted(ctx, input); err == nil {
+			return nil
+		}
+		input.UpdateMessageID = ""
+	}
+	sent, err := r.notifier.FollowUpAccepted(ctx, input)
+	if err != nil {
+		return err
+	}
+	if sent.MessageID == "" {
+		return notify.ErrMissingMessageID
+	}
+	return r.insertRouteWithRetry(ctx, sent.MessageID, task.ID, "start_card")
 }
 
 func (r *Router) sendResult(ctx context.Context, task store.Task, status string, result contracts.RunResult, runErr error) error {
@@ -337,11 +395,13 @@ func (r *Router) sendResult(ctx context.Context, task store.Task, status string,
 	} else {
 		sent, err = r.notifier.Failure(ctx, input)
 	}
-	if err != nil || sent.MessageID == "" {
-		return nil
+	if err != nil {
+		return err
 	}
-	_ = r.insertRouteWithRetry(ctx, sent.MessageID, task.ID, "result_card")
-	return nil
+	if sent.MessageID == "" {
+		return notify.ErrMissingMessageID
+	}
+	return r.insertRouteWithRetry(ctx, sent.MessageID, task.ID, "result_card")
 }
 
 func (r *Router) insertRouteWithRetry(ctx context.Context, messageID, taskID, routeType string) error {

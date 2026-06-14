@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net"
 	"strings"
 	"time"
 
@@ -17,6 +18,7 @@ var ErrRateLimited = errors.New("feishu rate limited")
 
 type CardAPI interface {
 	SendCard(ctx context.Context, chatID, replyToMessageID string, cardJSON []byte) (messageID string, retryAfter time.Duration, err error)
+	PatchCard(ctx context.Context, messageID string, cardJSON []byte) (retryAfter time.Duration, err error)
 }
 
 type Sender struct {
@@ -91,6 +93,24 @@ func (api *SDKCardAPI) SendCard(ctx context.Context, chatID, replyToMessageID st
 	return *resp.Data.MessageId, 0, nil
 }
 
+func (api *SDKCardAPI) PatchCard(ctx context.Context, messageID string, cardJSON []byte) (time.Duration, error) {
+	body := larkim.NewPatchMessageReqBodyBuilder().
+		Content(string(cardJSON)).
+		Build()
+	req := larkim.NewPatchMessageReqBuilder().
+		MessageId(messageID).
+		Body(body).
+		Build()
+	resp, err := api.client.Im.Message.Patch(ctx, req)
+	if err != nil {
+		return 0, err
+	}
+	if !resp.Success() {
+		return 0, fmt.Errorf("feishu patch failed: code=%d msg=%s", resp.Code, resp.Msg)
+	}
+	return 0, nil
+}
+
 func (s *Sender) Send(ctx context.Context, msg contracts.OutboundMessage) (contracts.SentMessage, error) {
 	if s.API == nil {
 		return contracts.SentMessage{}, errors.New("feishu sender API is nil")
@@ -98,6 +118,12 @@ func (s *Sender) Send(ctx context.Context, msg contracts.OutboundMessage) (contr
 	card, err := BuildInteractiveCard(msg)
 	if err != nil {
 		return contracts.SentMessage{}, err
+	}
+	if msg.UpdateMessageID != "" {
+		if err := s.patchWithRetry(ctx, msg.UpdateMessageID, card); err != nil {
+			return contracts.SentMessage{}, err
+		}
+		return contracts.SentMessage{MessageID: msg.UpdateMessageID}, nil
 	}
 	maxRetries := s.MaxRetries
 	if maxRetries == 0 {
@@ -113,7 +139,7 @@ func (s *Sender) Send(ctx context.Context, msg contracts.OutboundMessage) (contr
 			return contracts.SentMessage{MessageID: messageID}, nil
 		}
 		lastErr = err
-		if !errors.Is(err, ErrRateLimited) || attempt == maxRetries {
+		if !shouldRetrySendError(err) || attempt == maxRetries {
 			return contracts.SentMessage{}, err
 		}
 		if retryAfter <= 0 {
@@ -126,9 +152,42 @@ func (s *Sender) Send(ctx context.Context, msg contracts.OutboundMessage) (contr
 	return contracts.SentMessage{}, lastErr
 }
 
+func (s *Sender) patchWithRetry(ctx context.Context, messageID string, card []byte) error {
+	maxRetries := s.MaxRetries
+	if maxRetries == 0 {
+		maxRetries = 2
+	}
+	var lastErr error
+	for attempt := 0; attempt <= maxRetries; attempt++ {
+		retryAfter, err := s.API.PatchCard(ctx, messageID, card)
+		if err == nil {
+			return nil
+		}
+		lastErr = err
+		if !shouldRetrySendError(err) || attempt == maxRetries {
+			return err
+		}
+		if retryAfter <= 0 {
+			retryAfter = time.Duration(attempt+1) * 100 * time.Millisecond
+		}
+		if err := s.sleep(ctx, retryAfter); err != nil {
+			return err
+		}
+	}
+	return lastErr
+}
+
+func shouldRetrySendError(err error) bool {
+	if errors.Is(err, ErrRateLimited) {
+		return true
+	}
+	var netErr net.Error
+	return errors.As(err, &netErr) && (netErr.Timeout() || netErr.Temporary())
+}
+
 func BuildInteractiveCard(msg contracts.OutboundMessage) ([]byte, error) {
 	card := map[string]any{
-		"config": map[string]any{"wide_screen_mode": true},
+		"config": map[string]any{"wide_screen_mode": true, "update_multi": true},
 		"header": map[string]any{
 			"template": templateFor(msg),
 			"title":    map[string]any{"tag": "plain_text", "content": msg.Title},

@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"strings"
+	"time"
 
 	"github.com/sparklyi/codex-feishu-bridge/internal/contracts"
 	"github.com/sparklyi/codex-feishu-bridge/internal/redact"
@@ -31,6 +32,17 @@ type TaskCardInput struct {
 	CWDLabel         string
 	Body             string
 	CodexSessionID   string
+}
+
+type FollowUpAcceptedInput struct {
+	ChatID          string
+	UpdateMessageID string
+	TaskID          string
+	Status          string
+	ProjectAlias    string
+	CWDLabel        string
+	Prompt          string
+	SubmittedAt     time.Time
 }
 
 type ProjectSelectionInput struct {
@@ -71,6 +83,37 @@ func (n *Notifier) Success(ctx context.Context, in TaskCardInput) (contracts.Sen
 
 func (n *Notifier) Failure(ctx context.Context, in TaskCardInput) (contracts.SentMessage, error) {
 	return n.sendTask(ctx, contracts.CardFailure, in, failureBodyLimit)
+}
+
+func (n *Notifier) FollowUpAccepted(ctx context.Context, in FollowUpAcceptedInput) (contracts.SentMessage, error) {
+	status := in.Status
+	if status == "" {
+		status = "running"
+	}
+	body := buildFollowUpAcceptedBody(in)
+	msg := contracts.OutboundMessage{
+		ChatID:          in.ChatID,
+		UpdateMessageID: in.UpdateMessageID,
+		CardKind:        contracts.CardStart,
+		TaskID:          in.TaskID,
+		Status:          status,
+		Title:           redact.FeishuText("继续处理中 · "+in.TaskID, 120),
+		BodyMarkdown:    body,
+		Fields: taskFields(TaskCardInput{
+			TaskID:       in.TaskID,
+			Status:       status,
+			ProjectAlias: in.ProjectAlias,
+			CWDLabel:     in.CWDLabel,
+		}),
+	}
+	sent, err := n.sender.Send(ctx, msg)
+	if err != nil {
+		return contracts.SentMessage{}, err
+	}
+	if sent.MessageID == "" {
+		return contracts.SentMessage{}, ErrMissingMessageID
+	}
+	return sent, nil
 }
 
 func (n *Notifier) RoutingError(ctx context.Context, chatID, replyToMessageID string) (contracts.SentMessage, error) {
@@ -228,6 +271,21 @@ func buildTaskBody(kind contracts.CardKind, in TaskCardInput, limit int) string 
 		text += "\n\n继续处理请直接回复这张任务卡片。"
 	}
 	return redact.FeishuText(text, limit)
+}
+
+func buildFollowUpAcceptedBody(in FollowUpAcceptedInput) string {
+	lines := []string{
+		"**进度**",
+		"已收到继续跟进，Codex 正在处理。",
+	}
+	if !in.SubmittedAt.IsZero() {
+		lines = append(lines, "提交时间：`"+in.SubmittedAt.Format("2006-01-02 15:04:05 MST")+"`")
+	}
+	prompt := strings.TrimSpace(redact.FeishuText(in.Prompt, 500))
+	if prompt != "" {
+		lines = append(lines, "本次输入：\n"+prompt)
+	}
+	return redact.FeishuText(strings.Join(lines, "\n"), successBodyLimit)
 }
 
 func taskTitle(kind contracts.CardKind, taskID string) string {

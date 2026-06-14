@@ -41,6 +41,7 @@ const (
 type OutboundMessage struct {
 	ChatID           string
 	ReplyToMessageID string
+	UpdateMessageID  string
 	CardKind         CardKind
 	TaskID           string
 	Status           string

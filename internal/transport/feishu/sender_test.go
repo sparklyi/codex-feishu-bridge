@@ -165,6 +165,25 @@ func TestBuildInteractiveCardRendersContinueForm(t *testing.T) {
 	}
 }
 
+func TestBuildInteractiveCardAllowsPatchUpdates(t *testing.T) {
+	card, err := BuildInteractiveCard(contracts.OutboundMessage{
+		CardKind:     contracts.CardSuccess,
+		Title:        "任务已完成 · cx_123",
+		BodyMarkdown: "**结果**\nHello",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var decoded map[string]any
+	if err := json.Unmarshal(card, &decoded); err != nil {
+		t.Fatalf("invalid card json: %v\n%s", err, string(card))
+	}
+	config, ok := decoded["config"].(map[string]any)
+	if !ok || config["update_multi"] != true {
+		t.Fatalf("task cards must set update_multi for Feishu patch support: %s", string(card))
+	}
+}
+
 func TestSenderRateLimitRetryAndMessageID(t *testing.T) {
 	api := &fakeCardAPI{
 		results: []sendResult{
@@ -179,6 +198,44 @@ func TestSenderRateLimitRetryAndMessageID(t *testing.T) {
 	}
 	if sent.MessageID != "msg_1" || api.calls != 2 {
 		t.Fatalf("unexpected send result: sent=%+v calls=%d", sent, api.calls)
+	}
+}
+
+func TestSenderRetriesTemporaryNetworkErrors(t *testing.T) {
+	api := &fakeCardAPI{
+		results: []sendResult{
+			{err: temporarySendError{}},
+			{messageID: "msg_1"},
+		},
+	}
+	s := &Sender{API: api, MaxRetries: 1, Sleep: func(ctx context.Context, d time.Duration) error { return nil }}
+	sent, err := s.Send(context.Background(), contracts.OutboundMessage{ChatID: "chat", CardKind: contracts.CardStart, TaskID: "cx", Title: "title", BodyMarkdown: "body"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if sent.MessageID != "msg_1" || api.calls != 2 {
+		t.Fatalf("unexpected send result: sent=%+v calls=%d", sent, api.calls)
+	}
+}
+
+func TestSenderPatchesUpdateTarget(t *testing.T) {
+	api := &fakeCardAPI{}
+	s := &Sender{API: api, MaxRetries: 1, Sleep: func(ctx context.Context, d time.Duration) error { return nil }}
+	sent, err := s.Send(context.Background(), contracts.OutboundMessage{
+		UpdateMessageID: "msg_original",
+		CardKind:        contracts.CardStart,
+		TaskID:          "cx",
+		Title:           "title",
+		BodyMarkdown:    "body",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if sent.MessageID != "msg_original" {
+		t.Fatalf("patch should preserve updated message id, got %+v", sent)
+	}
+	if api.calls != 0 || api.patchCalls != 1 || api.lastPatchMessageID != "msg_original" {
+		t.Fatalf("expected patch without create/reply, calls=%d patchCalls=%d lastPatch=%q", api.calls, api.patchCalls, api.lastPatchMessageID)
 	}
 }
 
@@ -209,8 +266,10 @@ func TestNewSenderFromEnv(t *testing.T) {
 }
 
 type fakeCardAPI struct {
-	results []sendResult
-	calls   int
+	results            []sendResult
+	calls              int
+	patchCalls         int
+	lastPatchMessageID string
 }
 
 type sendResult struct {
@@ -218,6 +277,12 @@ type sendResult struct {
 	retryAfter time.Duration
 	err        error
 }
+
+type temporarySendError struct{}
+
+func (temporarySendError) Error() string   { return "temporary timeout" }
+func (temporarySendError) Timeout() bool   { return true }
+func (temporarySendError) Temporary() bool { return true }
 
 func (f *fakeCardAPI) SendCard(ctx context.Context, chatID, replyToMessageID string, cardJSON []byte) (string, time.Duration, error) {
 	f.calls++
@@ -227,6 +292,17 @@ func (f *fakeCardAPI) SendCard(ctx context.Context, chatID, replyToMessageID str
 	result := f.results[0]
 	f.results = f.results[1:]
 	return result.messageID, result.retryAfter, result.err
+}
+
+func (f *fakeCardAPI) PatchCard(ctx context.Context, messageID string, cardJSON []byte) (time.Duration, error) {
+	f.patchCalls++
+	f.lastPatchMessageID = messageID
+	if len(f.results) == 0 {
+		return 0, nil
+	}
+	result := f.results[0]
+	f.results = f.results[1:]
+	return result.retryAfter, result.err
 }
 
 func jsonContains(s, needle string) bool {

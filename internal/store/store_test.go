@@ -91,6 +91,28 @@ func TestAdmitNewTaskCreatesTaskRunAndDedupAtomically(t *testing.T) {
 	}
 }
 
+func TestFindRunningTaskByChatAndCreator(t *testing.T) {
+	ctx := context.Background()
+	s := openTestStore(t)
+	defer s.Close()
+	now := time.Date(2026, 6, 14, 12, 0, 0, 0, time.UTC)
+	_, err := s.AdmitNewTask(ctx, "evt_1", "message", CreateTaskInput{
+		TaskID: "cx_1", RunID: "run_1", CWD: "/repo", CreatedBy: "ou_owner", ChatID: "chat",
+		Prompt: "run", EffectiveCodexCommand: "codex", EffectiveSandbox: "workspace-write",
+		EffectiveApproval: "never", Now: now,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	task, ok, err := s.FindRunningTask(ctx, "chat", "ou_owner")
+	if err != nil || !ok || task.ID != "cx_1" {
+		t.Fatalf("running task not found task=%+v ok=%v err=%v", task, ok, err)
+	}
+	if _, ok, err := s.FindRunningTask(ctx, "chat", "ou_other"); err != nil || ok {
+		t.Fatalf("other user should not be blocked ok=%v err=%v", ok, err)
+	}
+}
+
 func TestAdmitResumeRunCreatorAndSessionGuards(t *testing.T) {
 	ctx := context.Background()
 	s := openTestStore(t)

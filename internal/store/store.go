@@ -386,6 +386,18 @@ func (s *Store) ResolveMessageRoute(ctx context.Context, messageID string) (Task
 	return s.getTask(ctx, taskID)
 }
 
+func (s *Store) FindRunningTask(ctx context.Context, chatID, creatorOpenID string) (Task, bool, error) {
+	row := s.db.QueryRowContext(ctx, `SELECT `+taskColumns+` FROM tasks WHERE chat_id=? AND created_by=? AND status='running' ORDER BY created_at DESC LIMIT 1`, chatID, creatorOpenID)
+	task, err := scanTask(row)
+	if errors.Is(err, sql.ErrNoRows) {
+		return Task{}, false, nil
+	}
+	if err != nil {
+		return Task{}, false, err
+	}
+	return task, true, nil
+}
+
 func (s *Store) ListTasks(ctx context.Context, limit int) ([]Task, error) {
 	if limit <= 0 {
 		limit = 50

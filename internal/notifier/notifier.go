@@ -60,6 +60,18 @@ func (n *Notifier) RoutingError(ctx context.Context, chatID, replyToMessageID st
 	})
 }
 
+func (n *Notifier) MigrationHint(ctx context.Context, chatID, replyToMessageID string) error {
+	_, err := n.sender.Send(ctx, contracts.OutboundMessage{
+		ChatID:           chatID,
+		ReplyToMessageID: replyToMessageID,
+		CardKind:         contracts.CardRoutingError,
+		Status:           "migration_hint",
+		Title:            "Command updated",
+		BodyMarkdown:     "Send plain text in a private chat to start a Codex task. Use `@project prompt` when you need a configured project.",
+	})
+	return err
+}
+
 func (n *Notifier) Rejection(ctx context.Context, chatID, replyToMessageID, body string) error {
 	_, err := n.sender.Send(ctx, contracts.OutboundMessage{
 		ChatID:           chatID,

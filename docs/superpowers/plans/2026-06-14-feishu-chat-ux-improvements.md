@@ -294,7 +294,7 @@ git commit -m "feat(router): add Feishu intent parser"
 - Modify: `internal/transport/feishu/normalizer_test.go`
 - Modify: `internal/app/app.go`
 
-- [ ] **Step 1: Write failing normalizer tests**
+- [x] **Step 1: Write failing normalizer tests**
 
 Add tests in `internal/transport/feishu/normalizer_test.go`:
 
@@ -325,13 +325,13 @@ func TestNormalizeMessageNonBotMentionIsNotStripped(t *testing.T) {
 }
 ```
 
-- [ ] **Step 2: Run normalizer tests and verify failure**
+- [x] **Step 2: Run normalizer tests and verify failure**
 
 Run: `go test ./internal/transport/feishu -run 'TestNormalizeMessageBotMention|TestNormalizeMessageNonBotMentionIsNotStripped' -count=1`
 
 Expected: FAIL because `BotMentioned`, `BotOpenID`, and mention parsing do not exist.
 
-- [ ] **Step 3: Implement normalized mention support**
+- [x] **Step 3: Implement normalized mention support**
 
 Update `contracts.InboundEvent`:
 
@@ -362,13 +362,13 @@ When a mention id matches `opts.BotOpenID`, set `BotMentioned = true` and remove
 
 In `internal/app/app.go`, pass `BotOpenID` into the Feishu receiver verification options.
 
-- [ ] **Step 4: Run transport and app tests**
+- [x] **Step 4: Run transport and app tests**
 
 Run: `go test ./internal/transport/feishu ./internal/app -count=1`
 
 Expected: PASS.
 
-- [ ] **Step 5: Commit mention metadata**
+- [x] **Step 5: Commit mention metadata**
 
 ```bash
 git add internal/contracts/contracts.go internal/transport/feishu/normalizer.go internal/transport/feishu/normalizer_test.go internal/app/app.go

@@ -2,7 +2,7 @@
 
 [English](README.md) | 简体中文
 
-`codex-feishu-bridge` 是一个本地守护进程，让已授权的飞书用户可以通过飞书消息启动和继续 Codex 任务。它直接在用户自己的机器上运行 Codex，使用本机 Codex 登录态和本地文件系统权限，不依赖 Hermes 或 Codex Desktop。
+`codex-feishu-bridge` 是一个供个人远程开发使用的本地守护进程。它通过本机 Codex 的 `app-server` 标准输入输出协议与飞书连接，既能启动新任务，也能从飞书接管桌面 Codex 中已打开的会话。
 
 ## 快速开始
 
@@ -19,9 +19,13 @@ codex-feishu-bridge doctor
 codex-feishu-bridge serve
 ```
 
+`doctor` 会启动本机 app-server 进程，并验证能否列出桌面 Codex 会话。`serve` 也会在开始接收飞书事件前完成同一项探测。
+
+`app_server.command` 必须配置为通过官方安装器安装的独立 Codex CLI。不要填写 Codex Desktop 应用包内的可执行文件，独立 CLI 才提供本桥接所需的稳定 app-server 接口。
+
 ## 飞书使用流程
 
-发起一个新任务：
+发起新任务：
 
 ```text
 explain this repository
@@ -34,17 +38,9 @@ explain this repository
 @Codex @backend fix the failing test
 ```
 
-如果群聊里只发送 `@Codex fix the failing test`，桥接服务会返回项目选择卡片。`/codex` 不再作为任务入口，会返回迁移提示。
+在私聊中发送 `/sessions` 可以列出本机桌面 Codex 会话。选择一个会话后，桥接服务会创建绑定任务；在该任务卡片中继续输入内容，就会通过 app-server 恢复该会话。
 
-守护进程会发送紧凑开始卡片，运行 `codex exec --json`，在本地保存 Codex thread id，然后发送结果卡片。回复开始卡片或结果卡片，或者提交卡片表单，可以通过 `codex exec --json resume` 继续同一个 Codex 会话。
-
-任务卡片包含快捷按钮：
-
-- Continue：自由输入 follow-up。
-- Summarize：立即续写，让 Codex 总结当前结果。
-- Explain error：立即续写，让 Codex 解释最新错误。
-- Run tests：需要二次确认。
-- MR description：需要二次确认。
+运行中的任务卡片会流式更新进度，并提供停止按钮。卡片操作会立即确认，停止不会等待 app-server 的中断请求完成。
 
 ## 常用命令
 
@@ -68,13 +64,13 @@ codex-feishu-bridge tasks show [--config path] <task_id>
 
 ## 安全模型
 
-只有 `security.allowed_open_ids` 中的飞书用户可以运行 Codex。未授权用户在私聊中会收到拒绝提示，在群聊中会被静默忽略。任务续写必须由任务创建者本人触发。
+只有 `security.allowed_open_ids` 中的飞书用户可以使用桥接服务。未授权用户在私聊中会收到拒绝提示，在群聊中会被静默忽略。继续任务和停止任务都必须由任务创建者本人触发。
 
-飞书卡片会隐藏本地绝对路径、secret、代理凭据和完整 Codex session id。原始 Codex JSONL 日志只保存在本机，默认位于 `~/.codex-feishu-bridge/logs`，文件权限为 `0600`。
+飞书卡片会隐藏本地绝对路径、secret、代理凭据和完整 Codex thread id。本机 SQLite 会在 `~/.codex-feishu-bridge/state.db` 保存任务与 Codex thread/turn 的关联。
 
 ## 本地权限
 
-Codex 在本机执行，使用配置中的 workspace、sandbox、model 和 extra args。默认 sandbox 是 `workspace-write`；`danger-full-access` 不会由默认配置生成，必须显式配置。
+桥接服务只有一条执行链路：配置中的 `app_server` 命令和 app-server 协议。它只保存任务状态，不保存原始执行转录。每个 turn 都固定使用 `danger-full-access` 与 `approvalPolicy: never`，没有项目级权限覆盖，也不会再出现飞书审批卡。
 
 ## 更多文档
 

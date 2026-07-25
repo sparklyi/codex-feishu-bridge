@@ -6,130 +6,89 @@ import (
 	"reflect"
 	"strings"
 	"testing"
+	"time"
 )
 
-func TestResolveProjectDefaults(t *testing.T) {
+func TestResolveProjectDefaultsAndOverrides(t *testing.T) {
 	cfg := Config{
-		Codex:     CodexConfig{Command: "codex", DefaultModel: "gpt-5.5", Sandbox: "workspace-write", Approval: "never", ExtraArgs: []string{"--skip-git-repo-check"}},
+		AppServer: AppServerConfig{DefaultModel: "gpt-5"},
 		Workspace: WorkspaceConfig{Default: "/repo/default"},
 		Projects: map[string]ProjectConfig{
-			"backend": {CWD: "/repo/backend", Model: "gpt-5.5", Sandbox: "read-only"},
+			"backend": {CWD: "/repo/backend", Model: "gpt-5.1"},
 		},
 	}
 	got, err := cfg.ResolveProject("backend")
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got.CWD != "/repo/backend" || got.Model != "gpt-5.5" || got.Sandbox != "read-only" || got.Approval != "never" || len(got.ExtraArgs) != 1 {
+	if got.Alias != "backend" || got.CWD != "/repo/backend" || got.Model != "gpt-5.1" {
 		t.Fatalf("unexpected resolved project: %+v", got)
 	}
-	if got.Command != "codex" || got.LogRetentionDays != 14 {
-		t.Fatalf("missing runtime values: %+v", got)
-	}
-}
-
-func TestResolveUnknownProject(t *testing.T) {
-	cfg := Config{Workspace: WorkspaceConfig{Default: "/repo/default"}}
-	if _, err := cfg.ResolveProject("missing"); err == nil {
-		t.Fatal("expected unknown project error")
-	}
-}
-
-func TestResolveDefaultWorkspace(t *testing.T) {
-	cfg := Config{
-		Codex:     CodexConfig{DefaultModel: "gpt-5", Sandbox: "workspace-write", Approval: "never"},
-		Workspace: WorkspaceConfig{Default: "/repo/default"},
-	}
-	got, err := cfg.ResolveProject("")
+	defaultProject, err := cfg.ResolveProject("")
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got.Alias != "" || got.CWD != "/repo/default" || got.Model != "gpt-5" || got.Command != "codex" {
-		t.Fatalf("unexpected default resolution: %+v", got)
+	if defaultProject.CWD != "/repo/default" || defaultProject.Model != "gpt-5" {
+		t.Fatalf("unexpected default project: %+v", defaultProject)
 	}
 }
 
-func TestProjectApprovalFallbackAndOverride(t *testing.T) {
-	cfg := Config{
-		Codex:     CodexConfig{Approval: "never"},
-		Workspace: WorkspaceConfig{Default: "/repo/default"},
-		Projects: map[string]ProjectConfig{
-			"fallback": {CWD: "/repo/fallback"},
-			"override": {CWD: "/repo/override", Approval: "on-request"},
-		},
-	}
-	got, err := cfg.ResolveProject("fallback")
-	if err != nil {
+func TestLoadRejectsPermissionConfiguration(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config.yaml")
+	if err := os.WriteFile(path, []byte("app_server:\n  sandbox: workspace-write\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if got.Approval != "never" {
-		t.Fatalf("expected fallback approval, got %q", got.Approval)
-	}
-	got, err = cfg.ResolveProject("override")
-	if err != nil {
-		t.Fatal(err)
-	}
-	if got.Approval != "on-request" {
-		t.Fatalf("expected override approval, got %q", got.Approval)
+	if _, err := Load(path, func(string) string { return t.TempDir() }); err == nil || !strings.Contains(err.Error(), "sandbox") {
+		t.Fatalf("permission configuration must be rejected, got %v", err)
 	}
 }
 
-func TestLoadYAMLAndValidate(t *testing.T) {
+func TestLoadYAMLValidatesAppServerAndRejectsLegacyCodexConfig(t *testing.T) {
 	dir := t.TempDir()
 	workspace := filepath.Join(dir, "workspace")
 	project := filepath.Join(dir, "backend")
-	if err := os.MkdirAll(workspace, 0o755); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.MkdirAll(project, 0o755); err != nil {
-		t.Fatal(err)
+	for _, path := range []string{workspace, project} {
+		if err := os.MkdirAll(path, 0o755); err != nil {
+			t.Fatal(err)
+		}
 	}
 	path := filepath.Join(dir, "config.yaml")
 	yaml := `
 feishu:
   app_id: cli_test
   app_secret_env: FEISHU_APP_SECRET
-  connection: websocket
 security:
-  allowed_open_ids:
-    - ou_owner
-codex:
-  extra_args:
-    - --skip-git-repo-check
+  allowed_open_ids: [ou_owner]
+app_server:
+  command: /usr/local/bin/codex
+  startup_timeout_seconds: 9
 workspace:
-  default: "` + strings.ReplaceAll(workspace, `\`, `\\`) + `"
+  default: "` + workspace + `"
 projects:
   backend:
-    cwd: "` + strings.ReplaceAll(project, `\`, `\\`) + `"
-    sandbox: read-only
-    approval: on-request
+    cwd: "` + project + `"
+paths:
+  state_db: "` + filepath.Join(dir, "state.db") + `"
 `
 	if err := os.WriteFile(path, []byte(yaml), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	cfg, err := Load(path, func(key string) string {
-		if key == "FEISHU_APP_SECRET" {
-			return "secret"
-		}
-		if key == "HOME" {
+		switch key {
+		case "HOME":
 			return dir
+		case "FEISHU_APP_SECRET":
+			return "secret"
 		}
 		return ""
 	})
 	if err != nil {
 		t.Fatal(err)
 	}
-	got, err := cfg.ResolveProject("backend")
-	if err != nil {
-		t.Fatal(err)
+	if cfg.AppServer.Command != "/usr/local/bin/codex" || cfg.StartupTimeout() != 9*time.Second {
+		t.Fatalf("app-server config not loaded: %+v", cfg.AppServer)
 	}
-	if got.Command != "codex" || got.Sandbox != "read-only" || got.Approval != "on-request" || got.LogRetentionDays != 14 {
-		t.Fatalf("defaults not applied: %+v", got)
-	}
-	if cfg.Paths.StateDB != filepath.Join(dir, ".codex-feishu-bridge", "state.db") {
-		t.Fatalf("unexpected state path: %q", cfg.Paths.StateDB)
-	}
-	diags := cfg.Validate(func(key string) string {
+	if hasError(cfg.Validate(func(key string) string {
 		if key == "FEISHU_APP_SECRET" {
 			return "secret"
 		}
@@ -137,9 +96,38 @@ projects:
 	}, func(path string) error {
 		_, err := os.Stat(path)
 		return err
-	})
-	if hasError(diags) {
-		t.Fatalf("expected no validation errors, got %+v", diags)
+	})) {
+		t.Fatal("expected valid config")
+	}
+
+	legacy := filepath.Join(dir, "legacy.yaml")
+	if err := os.WriteFile(legacy, []byte("codex:\n  command: codex\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := Load(legacy, func(string) string { return dir }); err == nil || !strings.Contains(err.Error(), "codex") {
+		t.Fatalf("legacy codex config must fail, got %v", err)
+	}
+}
+
+func TestProjectAliasForCWDAndAliases(t *testing.T) {
+	cfg := Config{
+		Workspace: WorkspaceConfig{Default: "/repo/default"},
+		Projects: map[string]ProjectConfig{
+			"frontend": {CWD: "/repo/frontend"},
+			"backend":  {CWD: "/repo/backend"},
+		},
+	}
+	if got := cfg.ProjectAliasForCWD("/repo/default/"); got != "" {
+		t.Fatalf("default alias = %q", got)
+	}
+	if got := cfg.ProjectAliasForCWD("/repo/backend"); got != "backend" {
+		t.Fatalf("backend alias = %q", got)
+	}
+	if got := cfg.ProjectAliasForCWD("/outside"); got != "" {
+		t.Fatalf("unknown alias = %q", got)
+	}
+	if got, want := cfg.ProjectAliases(), []string{"backend", "frontend"}; !reflect.DeepEqual(got, want) {
+		t.Fatalf("ProjectAliases() = %v, want %v", got, want)
 	}
 }
 
@@ -190,8 +178,7 @@ func TestProjectAliasesSorted(t *testing.T) {
 }
 
 func TestValidateReportsMissingRequiredValues(t *testing.T) {
-	cfg := Config{}
-	diags := cfg.Validate(func(string) string { return "" }, func(path string) error { return os.ErrNotExist })
+	diags := (Config{}).Validate(func(string) string { return "" }, func(string) error { return os.ErrNotExist })
 	for _, code := range []string{"feishu.app_id", "feishu.app_secret", "workspace.default"} {
 		if !hasDiagnostic(diags, LevelError, code) {
 			t.Fatalf("missing diagnostic %s in %+v", code, diags)
@@ -199,15 +186,10 @@ func TestValidateReportsMissingRequiredValues(t *testing.T) {
 	}
 }
 
-func TestDefaultPath(t *testing.T) {
-	got := DefaultPath("/home/alice")
-	want := filepath.Join("/home/alice", ".codex-feishu-bridge", "config.yaml")
-	if got != want {
+func TestDefaultPathAndExampleConfig(t *testing.T) {
+	if got, want := DefaultPath("/home/alice"), filepath.Join("/home/alice", ".codex-feishu-bridge", "config.yaml"); got != want {
 		t.Fatalf("DefaultPath() = %q, want %q", got, want)
 	}
-}
-
-func TestExampleConfigParses(t *testing.T) {
 	cfg, err := Load(filepath.Join("..", "..", "config.example.yaml"), func(key string) string {
 		if key == "HOME" {
 			return t.TempDir()
@@ -220,8 +202,8 @@ func TestExampleConfigParses(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if cfg.Feishu.Connection != "websocket" || cfg.Codex.Sandbox != "workspace-write" {
-		t.Fatalf("unexpected example config: %+v", cfg)
+	if cfg.AppServer.Command != "codex" || cfg.StartupTimeout() != 15*time.Second {
+		t.Fatalf("unexpected example config: %+v", cfg.AppServer)
 	}
 }
 

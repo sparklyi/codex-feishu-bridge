@@ -3,13 +3,15 @@
 Prerequisites:
 
 - Go 1.26
-- Codex CLI available on `PATH`
-- A Feishu app for manual E2E testing
+- Standalone Codex CLI with `app-server` support on `PATH`; do not point `app_server.command` at the executable bundled inside Codex Desktop
+- A Feishu app for manual end-to-end testing
 
-Run tests:
+Run the test suite:
 
 ```bash
 go test ./...
+go vet ./...
+scripts/test-init-local-config.sh
 ```
 
 Build:
@@ -18,10 +20,10 @@ Build:
 go build -o bin/codex-feishu-bridge ./cmd/codex-feishu-bridge
 ```
 
-The test suite uses fake Feishu transports and fake Codex binaries for deterministic coverage. To refresh a Codex JSONL fixture manually:
+The test suite uses fake Feishu transports and a fake app-server API. For a real local protocol probe, configure an accessible workspace and run:
 
 ```bash
-codex exec --skip-git-repo-check -s read-only --json 'Reply with exactly OK.'
+codex-feishu-bridge doctor --config ~/.codex-feishu-bridge/config.yaml
 ```
 
-Keep stdout JSONL event lines only.
+The bridge starts its own local app-server process; do not start a second bridge instance for normal manual testing.

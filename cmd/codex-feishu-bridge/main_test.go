@@ -9,7 +9,6 @@ import (
 	"testing"
 	"time"
 
-	"github.com/sparklyi/codex-feishu-bridge/internal/contracts"
 	"github.com/sparklyi/codex-feishu-bridge/internal/store"
 )
 
@@ -66,7 +65,6 @@ workspace:
   default: "`+workspace+`"
 paths:
   state_db: "`+filepath.Join(dir, "state.db")+`"
-  log_dir: "`+filepath.Join(dir, "logs")+`"
 `), 0o600); err != nil {
 		t.Fatal(err)
 	}
@@ -75,11 +73,11 @@ paths:
 		t.Fatal(err)
 	}
 	now := time.Date(2026, 6, 14, 12, 0, 0, 0, time.UTC)
-	admit, err := st.AdmitNewTask(ctx, "evt", "message", store.CreateTaskInput{TaskID: "cx_123", RunID: "run_1", CWD: workspace, CreatedBy: "ou", ChatID: "chat", Prompt: "hello", EffectiveCodexCommand: "codex", EffectiveSandbox: "workspace-write", EffectiveApproval: "never", Now: now})
+	admit, err := st.AdmitNewTask(ctx, "evt", "message", store.CreateTaskInput{TaskID: "cx_123", RunID: "run_1", CWD: workspace, CreatedBy: "ou", ChatID: "chat", Prompt: "hello", Now: now})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := st.FinishRun(ctx, "evt", admit.Run.ID, contracts.RunResult{CodexSessionID: "thread", FinalText: "done", FinishedAt: now}, "succeeded"); err != nil {
+	if err := st.FinishRun(ctx, "evt", store.FinishRunInput{RunID: admit.Run.ID, ThreadID: "thread", Status: "succeeded", FinalText: "done", FinishedAt: now}); err != nil {
 		t.Fatal(err)
 	}
 	if err := st.Close(); err != nil {

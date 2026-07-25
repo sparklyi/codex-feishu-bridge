@@ -12,7 +12,7 @@ Common failures:
 - `workspace.default`: create the directory or fix the path.
 - `app_server.command`: install a Codex CLI with app-server support or set `app_server.command` to its executable path.
 - `app_server.probe`: ensure `app_server.command` points to the standalone Codex CLI installed by the official installer. The executable bundled inside Codex Desktop is not the supported app-server interface for this bridge.
-- macOS `LaunchAgent` cannot keep a Feishu WebSocket online: `launchd` does not inherit interactive-shell proxy variables. Export `HTTP_PROXY` and `HTTPS_PROXY` in the service wrapper, or have it read the active macOS system proxy before starting the bridge.
+- Feishu WebSocket reconnects: the bridge deliberately bypasses system proxy settings. Verify that this machine can access `open.feishu.cn` directly; transient disconnects reconnect automatically.
 - SQLite errors: check `~/.codex-feishu-bridge/state.db` and its parent directory permissions.
 - Missing continuation: confirm Feishu returned a task-card message id and reply to that card.
 - `/sessions` is empty: open or create a Codex Desktop thread first, then retry from a private chat.

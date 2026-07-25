@@ -33,9 +33,8 @@ const (
 	CardFailure          CardKind = "failure"
 	CardRoutingError     CardKind = "routing_error"
 	CardProjectSelection CardKind = "project_selection"
+	CardThreadSelection  CardKind = "thread_selection"
 	CardRunningConflict  CardKind = "running_conflict"
-	CardMigrationHint    CardKind = "migration_hint"
-	CardShortcutConfirm  CardKind = "shortcut_confirm"
 )
 
 type OutboundMessage struct {
@@ -65,14 +64,4 @@ type Action struct {
 
 type SentMessage struct {
 	MessageID string
-}
-
-type RunResult struct {
-	CodexSessionID string
-	FinalText      string
-	ExitCode       int
-	StderrTail     string
-	LogPath        string
-	StartedAt      time.Time
-	FinishedAt     time.Time
 }

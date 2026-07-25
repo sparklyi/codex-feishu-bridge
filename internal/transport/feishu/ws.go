@@ -1,9 +1,15 @@
 package feishu
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
+	"io"
+	"log/slog"
+	"net/http"
+	"strconv"
+	"sync"
 	"time"
 
 	"github.com/larksuite/oapi-sdk-go/v3/event/dispatcher"
@@ -18,7 +24,13 @@ var ErrDisconnected = errors.New("feishu websocket disconnected")
 const (
 	RawEventMessage    = "message"
 	RawEventCardAction = "card_action"
+	sdkHTTPTimeout     = 30 * time.Second
+	wsBootstrapTimeout = 8 * time.Second
+	sdkReconnectDelay  = 1
+	sdkReconnectNonce  = 0
 )
+
+var sdkHTTPTimeoutOnce sync.Once
 
 type RawEvent struct {
 	Kind string
@@ -32,8 +44,10 @@ type EventSource interface {
 }
 
 type SDKEventSource struct {
-	client *larkws.Client
-	events chan sourceEvent
+	client      *larkws.Client
+	events      chan sourceEvent
+	cardActions chan sourceEvent
+	startOnce   sync.Once
 }
 
 type sourceEvent struct {
@@ -42,39 +56,162 @@ type sourceEvent struct {
 }
 
 func NewSDKEventSource(appID, appSecret, verificationToken string) *SDKEventSource {
-	source := &SDKEventSource{events: make(chan sourceEvent, 64)}
+	configureSDKHTTPTimeout()
+	source := &SDKEventSource{
+		events:      make(chan sourceEvent, 64),
+		cardActions: make(chan sourceEvent, 64),
+	}
 	eventDispatcher := dispatcher.NewEventDispatcher(verificationToken, "")
 	eventDispatcher.OnP2MessageReceiveV1(func(ctx context.Context, event *larkim.P2MessageReceiveV1) error {
+		slog.Info("Feishu message received")
 		source.publish(ctx, RawEvent{Kind: RawEventMessage, Data: mustMarshal(event)})
 		return nil
 	})
 	eventDispatcher.OnP2CardActionTrigger(func(ctx context.Context, event *callback.CardActionTriggerEvent) (*callback.CardActionTriggerResponse, error) {
-		source.publish(ctx, RawEvent{Kind: RawEventCardAction, Data: mustMarshal(cardCallbackEnvelope(event))})
-		return &callback.CardActionTriggerResponse{}, nil
+		if !source.tryPublishCardAction(ctx, RawEvent{Kind: RawEventCardAction, Data: mustMarshal(cardCallbackEnvelope(event))}) {
+			slog.Warn("Feishu card action dropped because the callback queue is full")
+			return cardActionResponse("error", "服务繁忙，请稍后重试。"), nil
+		}
+		slog.Info("Feishu card action received")
+		return cardActionResponse("success", "操作已收到。"), nil
 	})
 	source.client = larkws.NewClient(appID, appSecret, larkws.WithEventHandler(eventDispatcher), larkws.WithAutoReconnect(true))
 	return source
 }
 
-func (s *SDKEventSource) Connect(ctx context.Context) error {
-	go func() {
-		if err := s.client.Start(ctx); err != nil {
-			s.publish(ctx, RawEvent{}, err)
+// The upstream WebSocket SDK uses http.DefaultClient to obtain a connection
+// endpoint but does not expose a retry policy. Bound endpoint requests and
+// tighten only that response's reconnect policy so transient network failures
+// do not leave the bridge offline for the SDK's 90-second backoff.
+func configureSDKHTTPTimeout() {
+	sdkHTTPTimeoutOnce.Do(func() {
+		applyHTTPTimeout(http.DefaultClient, sdkHTTPTimeout)
+		base := http.DefaultClient.Transport
+		if base == nil {
+			base = http.DefaultTransport
 		}
-	}()
+		http.DefaultClient.Transport = wsBootstrapTransport{base: base}
+	})
+}
+
+func applyHTTPTimeout(client *http.Client, timeout time.Duration) {
+	if client == nil || timeout <= 0 {
+		return
+	}
+	if client.Timeout == 0 || client.Timeout > timeout {
+		client.Timeout = timeout
+	}
+}
+
+type wsBootstrapTransport struct {
+	base http.RoundTripper
+}
+
+func (t wsBootstrapTransport) RoundTrip(req *http.Request) (*http.Response, error) {
+	if req.URL.Path != "/callback/ws/endpoint" {
+		return t.base.RoundTrip(req)
+	}
+
+	ctx, cancel := context.WithTimeout(req.Context(), wsBootstrapTimeout)
+	resp, err := t.base.RoundTrip(req.Clone(ctx))
+	if err != nil || resp == nil || resp.Body == nil {
+		cancel()
+		return resp, err
+	}
+	payload, readErr := io.ReadAll(resp.Body)
+	closeErr := resp.Body.Close()
+	cancel()
+	if readErr != nil {
+		return nil, readErr
+	}
+	if closeErr != nil {
+		return nil, closeErr
+	}
+	if tuned, ok := tuneWSBootstrapConfig(payload); ok {
+		payload = tuned
+	}
+	resp.Body = io.NopCloser(bytes.NewReader(payload))
+	resp.ContentLength = int64(len(payload))
+	resp.Header.Set("Content-Length", strconv.Itoa(len(payload)))
+	return resp, nil
+}
+
+func tuneWSBootstrapConfig(payload []byte) ([]byte, bool) {
+	var response map[string]json.RawMessage
+	if err := json.Unmarshal(payload, &response); err != nil {
+		return payload, false
+	}
+	dataRaw, ok := response["data"]
+	if !ok {
+		return payload, false
+	}
+	var data map[string]json.RawMessage
+	if err := json.Unmarshal(dataRaw, &data); err != nil {
+		return payload, false
+	}
+	configRaw, ok := data["ClientConfig"]
+	if !ok {
+		return payload, false
+	}
+	var config map[string]json.RawMessage
+	if err := json.Unmarshal(configRaw, &config); err != nil {
+		return payload, false
+	}
+	config["ReconnectInterval"] = json.RawMessage(strconv.Itoa(sdkReconnectDelay))
+	config["ReconnectNonce"] = json.RawMessage(strconv.Itoa(sdkReconnectNonce))
+	tunedConfig, err := json.Marshal(config)
+	if err != nil {
+		return payload, false
+	}
+	data["ClientConfig"] = tunedConfig
+	tunedData, err := json.Marshal(data)
+	if err != nil {
+		return payload, false
+	}
+	response["data"] = tunedData
+	tuned, err := json.Marshal(response)
+	if err != nil {
+		return payload, false
+	}
+	return tuned, true
+}
+
+func (s *SDKEventSource) Connect(ctx context.Context) error {
+	if s.client == nil {
+		return errors.New("feishu websocket client is nil")
+	}
+	s.startOnce.Do(func() {
+		go func() {
+			if err := s.client.Start(ctx); err != nil && !errors.Is(err, context.Canceled) {
+				s.publish(ctx, RawEvent{}, err)
+			}
+		}()
+	})
 	return nil
 }
 
 func (s *SDKEventSource) Receive(ctx context.Context) (RawEvent, error) {
+	if s.cardActions != nil {
+		select {
+		case ev := <-s.cardActions:
+			return ev.raw, ev.err
+		default:
+		}
+	}
 	select {
 	case <-ctx.Done():
 		return RawEvent{}, ctx.Err()
+	case ev := <-s.cardActions:
+		return ev.raw, ev.err
 	case ev := <-s.events:
 		return ev.raw, ev.err
 	}
 }
 
 func (s *SDKEventSource) Close() error {
+	if s.client != nil {
+		s.client.Close()
+	}
 	return nil
 }
 
@@ -89,17 +226,41 @@ func (s *SDKEventSource) publish(ctx context.Context, raw RawEvent, errs ...erro
 	}
 }
 
+func (s *SDKEventSource) tryPublishCardAction(ctx context.Context, raw RawEvent, errs ...error) bool {
+	if s.cardActions == nil {
+		return false
+	}
+	var err error
+	if len(errs) > 0 {
+		err = errs[0]
+	}
+	select {
+	case <-ctx.Done():
+		return false
+	case s.cardActions <- sourceEvent{raw: raw, err: err}:
+		return true
+	default:
+		return false
+	}
+}
+
+func cardActionResponse(kind, content string) *callback.CardActionTriggerResponse {
+	return &callback.CardActionTriggerResponse{Toast: &callback.Toast{Type: kind, Content: content}}
+}
+
 type Receiver struct {
-	Source  EventSource
-	Verify  VerifyOptions
-	Backoff time.Duration
-	Sleep   func(context.Context, time.Duration) error
+	Source        EventSource
+	Verify        VerifyOptions
+	Backoff       time.Duration
+	Sleep         func(context.Context, time.Duration) error
+	OnHandleError func(context.Context, contracts.InboundEvent, error)
 }
 
 func (r Receiver) Receive(ctx context.Context, handle func(context.Context, contracts.InboundEvent) error) error {
 	if r.Source == nil {
 		return errors.New("feishu event source is nil")
 	}
+	defer r.Source.Close()
 	backoff := r.Backoff
 	if backoff == 0 {
 		backoff = 500 * time.Millisecond
@@ -111,7 +272,6 @@ func (r Receiver) Receive(ctx context.Context, handle func(context.Context, cont
 		for {
 			raw, err := r.Source.Receive(ctx)
 			if err != nil {
-				_ = r.Source.Close()
 				if errors.Is(err, ErrDisconnected) {
 					if sleepErr := r.sleep(ctx, backoff); sleepErr != nil {
 						return sleepErr
@@ -122,10 +282,19 @@ func (r Receiver) Receive(ctx context.Context, handle func(context.Context, cont
 			}
 			ev, err := r.normalize(raw)
 			if err != nil {
+				if raw.Kind == RawEventCardAction {
+					slog.Warn("Feishu card action rejected", "error", err)
+				}
 				continue
 			}
+			slog.Info("Feishu inbound event dispatched", "kind", ev.Kind)
 			if err := handle(ctx, ev); err != nil {
-				return err
+				if errors.Is(err, context.Canceled) && ctx.Err() != nil {
+					return ctx.Err()
+				}
+				if r.OnHandleError != nil {
+					r.OnHandleError(ctx, ev, err)
+				}
 			}
 		}
 	}

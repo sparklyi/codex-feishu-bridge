@@ -7,13 +7,15 @@ func ParseStart(input ParseInput) Intent {
 	if text == "" {
 		return Intent{Kind: KindIgnored}
 	}
-	if strings.HasPrefix(text, "/codex") {
-		return Intent{Kind: KindMigrationHint}
-	}
 	if input.Event.ChatType == "group" && !input.Event.BotMentioned {
 		return Intent{Kind: KindIgnored}
 	}
-
+	if text == "/sessions" {
+		if input.Event.ChatType != "private" {
+			return Intent{Kind: KindIgnored}
+		}
+		return Intent{Kind: KindThreadSelection}
+	}
 	alias, prompt, hasAlias := leadingProjectAlias(text)
 	if hasAlias {
 		if !hasProjectAlias(input.ProjectAliases, alias) {

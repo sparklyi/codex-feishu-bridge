@@ -11,7 +11,6 @@ import (
 	"strings"
 	"time"
 
-	"github.com/sparklyi/codex-feishu-bridge/internal/contracts"
 	_ "modernc.org/sqlite"
 )
 
@@ -33,24 +32,28 @@ const (
 	RejectRouteMiss       RejectionReason = "route_miss"
 	RejectStatus          RejectionReason = "status_rejected"
 	RejectActiveRun       RejectionReason = "active_run"
-	RejectMissingSession  RejectionReason = "missing_session"
+	RejectMissingThread   RejectionReason = "missing_thread"
 )
 
 type CreateTaskInput struct {
-	TaskID                         string
-	RunID                          string
-	ProjectAlias                   string
-	CWD                            string
-	CreatedBy                      string
-	ChatID                         string
-	Prompt                         string
-	EffectiveCodexCommand          string
-	EffectiveSandbox               string
-	EffectiveModel                 string
-	EffectiveApproval              string
-	EffectiveApprovalFlagSupported bool
-	EffectiveExtraArgs             []string
-	Now                            time.Time
+	TaskID       string
+	RunID        string
+	ProjectAlias string
+	CWD          string
+	CreatedBy    string
+	ChatID       string
+	Prompt       string
+	Now          time.Time
+}
+
+type AttachThreadInput struct {
+	TaskID       string
+	ThreadID     string
+	ProjectAlias string
+	CWD          string
+	CreatedBy    string
+	ChatID       string
+	Now          time.Time
 }
 
 type ResumeRunInput struct {
@@ -59,6 +62,23 @@ type ResumeRunInput struct {
 	RequestedBy string
 	Prompt      string
 	Now         time.Time
+}
+
+type StartRunInput struct {
+	RunID    string
+	ThreadID string
+	TurnID   string
+	Now      time.Time
+}
+
+type FinishRunInput struct {
+	RunID      string
+	ThreadID   string
+	TurnID     string
+	Status     string
+	ExitCode   int
+	FinalText  string
+	FinishedAt time.Time
 }
 
 type CreatePendingIntentInput struct {
@@ -79,32 +99,26 @@ type AdmitResult struct {
 }
 
 type Task struct {
-	ID                             string
-	CodexSessionID                 string
-	Status                         string
-	ProjectAlias                   string
-	CWD                            string
-	CreatedBy                      string
-	ChatID                         string
-	RootMessageID                  string
-	EffectiveCodexCommand          string
-	EffectiveSandbox               string
-	EffectiveModel                 string
-	EffectiveApproval              string
-	EffectiveApprovalFlagSupported bool
-	EffectiveExtraArgs             []string
+	ID            string
+	CodexThreadID string
+	Status        string
+	ProjectAlias  string
+	CWD           string
+	CreatedBy     string
+	ChatID        string
+	RootMessageID string
 }
 
 type Run struct {
-	ID             string
-	TaskID         string
-	Kind           string
-	Status         string
-	Prompt         string
-	CodexSessionID string
-	ExitCode       int
-	LogPath        string
-	FinalText      string
+	ID            string
+	TaskID        string
+	Kind          string
+	Status        string
+	Prompt        string
+	CodexThreadID string
+	CodexTurnID   string
+	ExitCode      int
+	FinalText     string
 }
 
 type PendingIntent struct {
@@ -146,36 +160,67 @@ func (s *Store) Close() error {
 }
 
 func (s *Store) migrate(ctx context.Context) error {
-	if _, err := s.db.ExecContext(ctx, `CREATE TABLE IF NOT EXISTS schema_migrations (version INTEGER PRIMARY KEY, applied_at TEXT NOT NULL)`); err != nil {
+	hasMigrations, err := s.hasTable(ctx, "schema_migrations")
+	if err != nil {
 		return err
 	}
-	for i, migration := range migrations {
-		version := i + 1
-		var existing int
-		err := s.db.QueryRowContext(ctx, `SELECT version FROM schema_migrations WHERE version = ?`, version).Scan(&existing)
-		if err == nil {
-			continue
-		}
-		if !errors.Is(err, sql.ErrNoRows) {
+	if hasMigrations {
+		var count, version int
+		if err := s.db.QueryRowContext(ctx, `SELECT COUNT(*),COALESCE(MAX(version),0) FROM schema_migrations`).Scan(&count, &version); err != nil {
 			return err
 		}
-		tx, err := s.db.BeginTx(ctx, nil)
+		hasApprovals, err := s.hasTable(ctx, "approvals")
 		if err != nil {
 			return err
 		}
-		if _, err := tx.ExecContext(ctx, migration); err != nil {
-			_ = tx.Rollback()
-			return err
+		if count != 1 || version != migrationVersion || hasApprovals {
+			return errors.New("existing state database is not supported; remove it and start the bridge with a fresh state database")
 		}
-		if _, err := tx.ExecContext(ctx, `INSERT INTO schema_migrations(version, applied_at) VALUES(?, ?)`, version, formatTime(time.Now().UTC())); err != nil {
-			_ = tx.Rollback()
-			return err
-		}
-		if err := tx.Commit(); err != nil {
-			return err
-		}
+		return nil
 	}
-	return nil
+	hasLegacyState, err := s.hasState(ctx)
+	if err != nil {
+		return err
+	}
+	if hasLegacyState {
+		return errors.New("existing state database is not supported; remove it and start the bridge with a fresh state database")
+	}
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer rollback(tx)
+	if _, err := tx.ExecContext(ctx, schema); err != nil {
+		return err
+	}
+	if _, err := tx.ExecContext(ctx, `INSERT INTO schema_migrations(version,applied_at) VALUES(?,?)`, migrationVersion, formatTime(time.Now().UTC())); err != nil {
+		return err
+	}
+	return tx.Commit()
+}
+
+func (s *Store) hasState(ctx context.Context) (bool, error) {
+	var name string
+	err := s.db.QueryRowContext(ctx, `SELECT name FROM sqlite_master WHERE type='table' AND name IN ('tasks','runs','message_routes','event_dedup','users','pending_intents','approvals') LIMIT 1`).Scan(&name)
+	if errors.Is(err, sql.ErrNoRows) {
+		return false, nil
+	}
+	if err != nil {
+		return false, err
+	}
+	return true, nil
+}
+
+func (s *Store) hasTable(ctx context.Context, table string) (bool, error) {
+	var name string
+	err := s.db.QueryRowContext(ctx, `SELECT name FROM sqlite_master WHERE type='table' AND name=?`, table).Scan(&name)
+	if errors.Is(err, sql.ErrNoRows) {
+		return false, nil
+	}
+	if err != nil {
+		return false, err
+	}
+	return true, nil
 }
 
 func (s *Store) AdmitNewTask(ctx context.Context, dedupKey, source string, in CreateTaskInput) (AdmitResult, error) {
@@ -190,23 +235,18 @@ func (s *Store) AdmitNewTask(ctx context.Context, dedupKey, source string, in Cr
 	} else if !inserted {
 		return AdmitResult{Replay: true, Reason: RejectReplay}, tx.Commit()
 	}
-	argsJSON, err := json.Marshal(in.EffectiveExtraArgs)
-	if err != nil {
-		return AdmitResult{}, err
-	}
 	if _, err := tx.ExecContext(ctx, `
-INSERT INTO tasks(id,status,project_alias,cwd,created_by,chat_id,effective_codex_command,effective_sandbox,effective_model,effective_approval,effective_approval_flag_supported,effective_extra_args_json,created_at,updated_at)
-VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
-		in.TaskID, "running", in.ProjectAlias, in.CWD, in.CreatedBy, in.ChatID, in.EffectiveCodexCommand, in.EffectiveSandbox, nullString(in.EffectiveModel), in.EffectiveApproval, boolInt(in.EffectiveApprovalFlagSupported), string(argsJSON), formatTime(now), formatTime(now)); err != nil {
+INSERT INTO tasks(id,status,project_alias,cwd,created_by,chat_id,created_at,updated_at)
+VALUES(?,?,?,?,?,?,?,?)`,
+		in.TaskID, "queued", in.ProjectAlias, in.CWD, in.CreatedBy, in.ChatID, formatTime(now), formatTime(now)); err != nil {
 		return AdmitResult{}, err
 	}
 	if _, err := tx.ExecContext(ctx, `
 INSERT INTO runs(id,task_id,kind,status,prompt,started_at)
-VALUES(?,?,?,?,?,?)`,
-		in.RunID, in.TaskID, "exec", "running", in.Prompt, formatTime(now)); err != nil {
+VALUES(?,?,?,?,?,?)`, in.RunID, in.TaskID, "new", "queued", in.Prompt, formatTime(now)); err != nil {
 		return AdmitResult{}, err
 	}
-	if _, err := tx.ExecContext(ctx, `UPDATE event_dedup SET task_id=?, run_id=? WHERE dedup_key=?`, in.TaskID, in.RunID, dedupKey); err != nil {
+	if _, err := tx.ExecContext(ctx, `UPDATE event_dedup SET task_id=?,run_id=? WHERE dedup_key=?`, in.TaskID, in.RunID, dedupKey); err != nil {
 		return AdmitResult{}, err
 	}
 	task, err := getTaskTx(ctx, tx, in.TaskID)
@@ -218,6 +258,34 @@ VALUES(?,?,?,?,?,?)`,
 		return AdmitResult{}, err
 	}
 	return AdmitResult{Task: task, Run: run}, tx.Commit()
+}
+
+func (s *Store) AttachThread(ctx context.Context, dedupKey, source string, in AttachThreadInput) (Task, bool, error) {
+	now := normalizeTime(in.Now)
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return Task{}, false, err
+	}
+	defer rollback(tx)
+	if inserted, err := insertDedup(ctx, tx, dedupKey, source, now); err != nil {
+		return Task{}, false, err
+	} else if !inserted {
+		return Task{}, true, tx.Commit()
+	}
+	if _, err := tx.ExecContext(ctx, `
+INSERT INTO tasks(id,codex_thread_id,status,project_alias,cwd,created_by,chat_id,created_at,updated_at)
+VALUES(?,?, 'idle', ?,?,?,?,?,?)`,
+		in.TaskID, in.ThreadID, in.ProjectAlias, in.CWD, in.CreatedBy, in.ChatID, formatTime(now), formatTime(now)); err != nil {
+		return Task{}, false, err
+	}
+	if _, err := tx.ExecContext(ctx, `UPDATE event_dedup SET state='completed',task_id=?,completed_at=? WHERE dedup_key=?`, in.TaskID, formatTime(now), dedupKey); err != nil {
+		return Task{}, false, err
+	}
+	task, err := getTaskTx(ctx, tx, in.TaskID)
+	if err != nil {
+		return Task{}, false, err
+	}
+	return task, false, tx.Commit()
 }
 
 func (s *Store) AdmitResumeRun(ctx context.Context, dedupKey, source string, in ResumeRunInput) (AdmitResult, error) {
@@ -244,33 +312,27 @@ func (s *Store) AdmitResumeRun(ctx context.Context, dedupKey, source string, in 
 		_ = failDedupTx(ctx, tx, dedupKey, "creator mismatch")
 		return AdmitResult{Reason: RejectCreatorMismatch, Task: task}, tx.Commit()
 	}
-	if task.CodexSessionID == "" {
-		_ = failDedupTx(ctx, tx, dedupKey, "missing codex session id")
-		return AdmitResult{Reason: RejectMissingSession, Task: task}, tx.Commit()
+	if task.CodexThreadID == "" {
+		_ = failDedupTx(ctx, tx, dedupKey, "missing codex thread id")
+		return AdmitResult{Reason: RejectMissingThread, Task: task}, tx.Commit()
 	}
-	if task.Status == "running" {
+	if !taskCanStart(task.Status) {
 		_ = failDedupTx(ctx, tx, dedupKey, "active run")
 		return AdmitResult{Reason: RejectActiveRun, Task: task}, tx.Commit()
 	}
-	if task.Status != "succeeded" && task.Status != "failed" {
-		_ = failDedupTx(ctx, tx, dedupKey, "status rejected")
-		return AdmitResult{Reason: RejectStatus, Task: task}, tx.Commit()
-	}
-	_, err = tx.ExecContext(ctx, `
-INSERT INTO runs(id,task_id,kind,status,prompt,codex_session_id,started_at)
-VALUES(?,?,?,?,?,?,?)`,
-		in.RunID, in.TaskID, "resume", "running", in.Prompt, task.CodexSessionID, formatTime(now))
-	if err != nil {
+	if _, err := tx.ExecContext(ctx, `
+INSERT INTO runs(id,task_id,kind,status,prompt,codex_thread_id,started_at)
+VALUES(?,?,?,?,?,?,?)`, in.RunID, in.TaskID, "resume", "queued", in.Prompt, task.CodexThreadID, formatTime(now)); err != nil {
 		if isUniqueConstraint(err) {
 			_ = failDedupTx(ctx, tx, dedupKey, "active run")
 			return AdmitResult{Reason: RejectActiveRun, Task: task}, tx.Commit()
 		}
 		return AdmitResult{}, err
 	}
-	if _, err := tx.ExecContext(ctx, `UPDATE tasks SET status='running', updated_at=? WHERE id=?`, formatTime(now), in.TaskID); err != nil {
+	if _, err := tx.ExecContext(ctx, `UPDATE tasks SET status='queued',updated_at=? WHERE id=?`, formatTime(now), in.TaskID); err != nil {
 		return AdmitResult{}, err
 	}
-	if _, err := tx.ExecContext(ctx, `UPDATE event_dedup SET task_id=?, run_id=? WHERE dedup_key=?`, in.TaskID, in.RunID, dedupKey); err != nil {
+	if _, err := tx.ExecContext(ctx, `UPDATE event_dedup SET task_id=?,run_id=? WHERE dedup_key=?`, in.TaskID, in.RunID, dedupKey); err != nil {
 		return AdmitResult{}, err
 	}
 	task, err = getTaskTx(ctx, tx, in.TaskID)
@@ -284,55 +346,74 @@ VALUES(?,?,?,?,?,?,?)`,
 	return AdmitResult{Task: task, Run: run}, tx.Commit()
 }
 
-func (s *Store) RecordRunSession(ctx context.Context, runID, threadID string) error {
-	if threadID == "" {
-		return errors.New("thread id is required")
-	}
+func (s *Store) StartRun(ctx context.Context, in StartRunInput) (Task, Run, error) {
+	now := normalizeTime(in.Now)
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
-		return err
+		return Task{}, Run{}, err
 	}
 	defer rollback(tx)
 	var taskID string
-	var existing sql.NullString
-	if err := tx.QueryRowContext(ctx, `SELECT task_id, codex_session_id FROM runs WHERE id=?`, runID).Scan(&taskID, &existing); err != nil {
-		return err
+	if err := tx.QueryRowContext(ctx, `SELECT task_id FROM runs WHERE id=?`, in.RunID).Scan(&taskID); err != nil {
+		return Task{}, Run{}, err
 	}
-	if existing.Valid && existing.String != "" && existing.String != threadID {
-		return fmt.Errorf("run %s already recorded session %s", runID, existing.String)
+	result, err := tx.ExecContext(ctx, `
+UPDATE runs
+SET status=CASE WHEN status='queued' THEN 'running' ELSE status END,
+	codex_thread_id=COALESCE(NULLIF(?,''),codex_thread_id),
+	codex_turn_id=COALESCE(NULLIF(?,''),codex_turn_id)
+WHERE id=? AND status IN ('queued','running')`, in.ThreadID, in.TurnID, in.RunID)
+	if err != nil {
+		return Task{}, Run{}, err
 	}
-	if _, err := tx.ExecContext(ctx, `UPDATE runs SET codex_session_id=? WHERE id=?`, threadID, runID); err != nil {
-		return err
+	if changed, err := result.RowsAffected(); err != nil {
+		return Task{}, Run{}, err
+	} else if changed != 1 {
+		return Task{}, Run{}, ErrNotFound
 	}
-	if _, err := tx.ExecContext(ctx, `UPDATE tasks SET codex_session_id=?, updated_at=? WHERE id=?`, threadID, formatTime(time.Now().UTC()), taskID); err != nil {
-		return err
+	if _, err := tx.ExecContext(ctx, `
+UPDATE tasks
+SET status=CASE WHEN status='queued' THEN 'running' ELSE status END,
+	codex_thread_id=COALESCE(NULLIF(?,''),codex_thread_id),updated_at=?
+WHERE id=? AND status IN ('queued','running')`, in.ThreadID, formatTime(now), taskID); err != nil {
+		return Task{}, Run{}, err
 	}
-	return tx.Commit()
+	task, err := getTaskTx(ctx, tx, taskID)
+	if err != nil {
+		return Task{}, Run{}, err
+	}
+	run, err := getRunTx(ctx, tx, in.RunID)
+	if err != nil {
+		return Task{}, Run{}, err
+	}
+	return task, run, tx.Commit()
 }
 
-func (s *Store) FinishRun(ctx context.Context, dedupKey, runID string, result contracts.RunResult, status string) error {
-	now := normalizeTime(result.FinishedAt)
+func (s *Store) FinishRun(ctx context.Context, dedupKey string, in FinishRunInput) error {
+	if !terminalRunStatus(in.Status) {
+		return fmt.Errorf("invalid terminal run status %q", in.Status)
+	}
+	now := normalizeTime(in.FinishedAt)
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
 		return err
 	}
 	defer rollback(tx)
 	var taskID string
-	if err := tx.QueryRowContext(ctx, `SELECT task_id FROM runs WHERE id=?`, runID).Scan(&taskID); err != nil {
+	if err := tx.QueryRowContext(ctx, `SELECT task_id FROM runs WHERE id=?`, in.RunID).Scan(&taskID); err != nil {
 		return err
 	}
 	if _, err := tx.ExecContext(ctx, `
-UPDATE runs SET status=?, codex_session_id=COALESCE(NULLIF(?, ''), codex_session_id), exit_code=?, finished_at=?, log_path=?, final_text=? WHERE id=?`,
-		status, result.CodexSessionID, result.ExitCode, formatTime(now), result.LogPath, result.FinalText, runID); err != nil {
+UPDATE runs SET status=?,codex_thread_id=COALESCE(NULLIF(?,''),codex_thread_id),codex_turn_id=COALESCE(NULLIF(?,''),codex_turn_id),exit_code=?,finished_at=?,final_text=?
+WHERE id=?`, in.Status, in.ThreadID, in.TurnID, in.ExitCode, formatTime(now), nullString(in.FinalText), in.RunID); err != nil {
 		return err
 	}
 	if _, err := tx.ExecContext(ctx, `
-UPDATE tasks SET status=?, codex_session_id=COALESCE(NULLIF(?, ''), codex_session_id), updated_at=? WHERE id=?`,
-		status, result.CodexSessionID, formatTime(now), taskID); err != nil {
+UPDATE tasks SET status=?,codex_thread_id=COALESCE(NULLIF(?,''),codex_thread_id),updated_at=? WHERE id=?`, in.Status, in.ThreadID, formatTime(now), taskID); err != nil {
 		return err
 	}
 	if dedupKey != "" {
-		if _, err := tx.ExecContext(ctx, `UPDATE event_dedup SET state='completed', task_id=?, run_id=?, completed_at=?, last_error=NULL WHERE dedup_key=?`, taskID, runID, formatTime(now), dedupKey); err != nil {
+		if _, err := tx.ExecContext(ctx, `UPDATE event_dedup SET state='completed',task_id=?,run_id=?,completed_at=?,last_error=NULL WHERE dedup_key=?`, taskID, in.RunID, formatTime(now), dedupKey); err != nil {
 			return err
 		}
 	}
@@ -343,11 +424,11 @@ func (s *Store) FailDedup(ctx context.Context, dedupKey string, err error) error
 	if dedupKey == "" {
 		return nil
 	}
-	msg := ""
+	message := ""
 	if err != nil {
-		msg = err.Error()
+		message = err.Error()
 	}
-	_, execErr := s.db.ExecContext(ctx, `UPDATE event_dedup SET state='failed', completed_at=?, last_error=? WHERE dedup_key=?`, formatTime(time.Now().UTC()), msg, dedupKey)
+	_, execErr := s.db.ExecContext(ctx, `UPDATE event_dedup SET state='failed',completed_at=?,last_error=? WHERE dedup_key=?`, formatTime(time.Now().UTC()), message, dedupKey)
 	return execErr
 }
 
@@ -365,8 +446,8 @@ func (s *Store) RefreshUsers(ctx context.Context, allowedOpenIDs []string) error
 			continue
 		}
 		if _, err := tx.ExecContext(ctx, `
-INSERT INTO users(feishu_open_id, role, enabled) VALUES(?, 'owner', 1)
-ON CONFLICT(feishu_open_id) DO UPDATE SET role='owner', enabled=1`, openID); err != nil {
+INSERT INTO users(feishu_open_id,role,enabled) VALUES(?, 'owner', 1)
+ON CONFLICT(feishu_open_id) DO UPDATE SET role='owner',enabled=1`, openID); err != nil {
 			return err
 		}
 	}
@@ -387,9 +468,25 @@ func (s *Store) UserEnabled(ctx context.Context, openID string) (bool, error) {
 
 func (s *Store) InsertMessageRoute(ctx context.Context, messageID, taskID, routeType string) error {
 	_, err := s.db.ExecContext(ctx, `
-INSERT INTO message_routes(feishu_message_id, task_id, route_type, created_at)
+INSERT INTO message_routes(feishu_message_id,task_id,route_type,created_at)
 VALUES(?,?,?,?)`, messageID, taskID, routeType, formatTime(time.Now().UTC()))
 	return err
+}
+
+func (s *Store) SetTaskRootMessageID(ctx context.Context, taskID, messageID string, now time.Time) error {
+	if messageID == "" {
+		return errors.New("root message id is required")
+	}
+	result, err := s.db.ExecContext(ctx, `UPDATE tasks SET root_message_id=?,updated_at=? WHERE id=?`, messageID, formatTime(now), taskID)
+	if err != nil {
+		return err
+	}
+	if changed, err := result.RowsAffected(); err != nil {
+		return err
+	} else if changed != 1 {
+		return ErrNotFound
+	}
+	return nil
 }
 
 func (s *Store) ResolveMessageRoute(ctx context.Context, messageID string) (Task, error) {
@@ -404,46 +501,20 @@ func (s *Store) ResolveMessageRoute(ctx context.Context, messageID string) (Task
 	return s.getTask(ctx, taskID)
 }
 
-func (s *Store) FindRunningTask(ctx context.Context, chatID, creatorOpenID string) (Task, bool, error) {
-	row := s.db.QueryRowContext(ctx, `SELECT `+taskColumns+` FROM tasks WHERE chat_id=? AND created_by=? AND status='running' ORDER BY created_at DESC LIMIT 1`, chatID, creatorOpenID)
-	task, err := scanTask(row)
-	if errors.Is(err, sql.ErrNoRows) {
-		return Task{}, false, nil
-	}
-	if err != nil {
-		return Task{}, false, err
-	}
-	return task, true, nil
-}
-
 func (s *Store) CreatePendingIntent(ctx context.Context, in CreatePendingIntentInput) (PendingIntent, error) {
 	now := normalizeTime(in.Now)
 	expiresAt := normalizeTime(in.ExpiresAt)
-	aliasesJSON, err := json.Marshal(in.ProjectAliases)
+	aliases, err := json.Marshal(in.ProjectAliases)
 	if err != nil {
 		return PendingIntent{}, err
 	}
-	tx, err := s.db.BeginTx(ctx, nil)
-	if err != nil {
-		return PendingIntent{}, err
-	}
-	defer rollback(tx)
-	if _, err := tx.ExecContext(ctx, `
+	_, err = s.db.ExecContext(ctx, `
 INSERT INTO pending_intents(id,chat_id,created_by,prompt,project_aliases_json,status,created_at,expires_at)
-VALUES(?,?,?,?,?,'pending',?,?)`,
-		in.ID, in.ChatID, in.CreatedBy, in.Prompt, string(aliasesJSON), formatTime(now), formatTime(expiresAt)); err != nil {
+VALUES(?,?,?,?,?,'pending',?,?)`, in.ID, in.ChatID, in.CreatedBy, in.Prompt, string(aliases), formatTime(now), formatTime(expiresAt))
+	if err != nil {
 		return PendingIntent{}, err
 	}
-	if err := tx.Commit(); err != nil {
-		return PendingIntent{}, err
-	}
-	return PendingIntent{
-		ID:             in.ID,
-		ChatID:         in.ChatID,
-		CreatedBy:      in.CreatedBy,
-		Prompt:         in.Prompt,
-		ProjectAliases: append([]string(nil), in.ProjectAliases...),
-	}, nil
+	return PendingIntent{ID: in.ID, ChatID: in.ChatID, CreatedBy: in.CreatedBy, Prompt: in.Prompt, ProjectAliases: append([]string(nil), in.ProjectAliases...)}, nil
 }
 
 func (s *Store) ConsumePendingIntent(ctx context.Context, id, createdBy string, now time.Time) (PendingIntent, error) {
@@ -461,7 +532,7 @@ func (s *Store) ConsumePendingIntent(ctx context.Context, id, createdBy string, 
 		return PendingIntent{}, err
 	}
 	if !expiresAt.After(now) {
-		if _, err := tx.ExecContext(ctx, `UPDATE pending_intents SET status='expired' WHERE id=? AND status='pending'`, id); err != nil {
+		if _, err := tx.ExecContext(ctx, `UPDATE pending_intents SET status='expired' WHERE id=?`, id); err != nil {
 			return PendingIntent{}, err
 		}
 		if err := tx.Commit(); err != nil {
@@ -469,7 +540,7 @@ func (s *Store) ConsumePendingIntent(ctx context.Context, id, createdBy string, 
 		}
 		return PendingIntent{}, ErrNotFound
 	}
-	if _, err := tx.ExecContext(ctx, `UPDATE pending_intents SET status='consumed', consumed_at=? WHERE id=? AND status='pending'`, formatTime(now), id); err != nil {
+	if _, err := tx.ExecContext(ctx, `UPDATE pending_intents SET status='consumed',consumed_at=? WHERE id=? AND status='pending'`, formatTime(now), id); err != nil {
 		return PendingIntent{}, err
 	}
 	return pending, tx.Commit()
@@ -484,7 +555,7 @@ func (s *Store) ListTasks(ctx context.Context, limit int) ([]Task, error) {
 		return nil, err
 	}
 	defer rows.Close()
-	var tasks []Task
+	tasks := make([]Task, 0)
 	for rows.Next() {
 		task, err := scanTask(rows)
 		if err != nil {
@@ -500,12 +571,12 @@ func (s *Store) GetTask(ctx context.Context, taskID string) (Task, []Run, error)
 	if err != nil {
 		return Task{}, nil, err
 	}
-	rows, err := s.db.QueryContext(ctx, `SELECT id,task_id,kind,status,prompt,codex_session_id,exit_code,log_path,final_text FROM runs WHERE task_id=? ORDER BY started_at DESC`, taskID)
+	rows, err := s.db.QueryContext(ctx, `SELECT `+runColumns+` FROM runs WHERE task_id=? ORDER BY started_at DESC`, taskID)
 	if err != nil {
 		return Task{}, nil, err
 	}
 	defer rows.Close()
-	var runs []Run
+	runs := make([]Run, 0)
 	for rows.Next() {
 		run, err := scanRun(rows)
 		if err != nil {
@@ -513,47 +584,27 @@ func (s *Store) GetTask(ctx context.Context, taskID string) (Task, []Run, error)
 		}
 		runs = append(runs, run)
 	}
-	if err := rows.Err(); err != nil {
-		return Task{}, nil, err
-	}
-	return task, runs, nil
+	return task, runs, rows.Err()
 }
 
 func (s *Store) RecoverRunning(ctx context.Context, now time.Time) error {
+	now = normalizeTime(now)
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
 		return err
 	}
 	defer rollback(tx)
-	rows, err := tx.QueryContext(ctx, `SELECT id, task_id FROM runs WHERE status='running'`)
-	if err != nil {
+	if _, err := tx.ExecContext(ctx, `
+UPDATE runs SET status='failed',exit_code=-1,finished_at=?,final_text='interrupted after bridge restart'
+WHERE status IN ('queued','running')`, formatTime(now)); err != nil {
 		return err
 	}
-	defer rows.Close()
-	type runningRun struct {
-		runID  string
-		taskID string
-	}
-	var running []runningRun
-	for rows.Next() {
-		var rr runningRun
-		if err := rows.Scan(&rr.runID, &rr.taskID); err != nil {
-			return err
-		}
-		running = append(running, rr)
-	}
-	if err := rows.Err(); err != nil {
+	if _, err := tx.ExecContext(ctx, `
+UPDATE tasks SET status='failed',updated_at=?
+WHERE status IN ('queued','running')`, formatTime(now)); err != nil {
 		return err
 	}
-	for _, rr := range running {
-		if _, err := tx.ExecContext(ctx, `UPDATE runs SET status='failed', exit_code=-1, finished_at=?, final_text=? WHERE id=?`, formatTime(now), "failed after daemon restart", rr.runID); err != nil {
-			return err
-		}
-		if _, err := tx.ExecContext(ctx, `UPDATE tasks SET status='failed', updated_at=? WHERE id=? AND status='running'`, formatTime(now), rr.taskID); err != nil {
-			return err
-		}
-	}
-	if _, err := tx.ExecContext(ctx, `UPDATE event_dedup SET state='failed', completed_at=?, last_error='failed after daemon restart' WHERE state='processing'`, formatTime(now)); err != nil {
+	if _, err := tx.ExecContext(ctx, `UPDATE event_dedup SET state='failed',completed_at=?,last_error='interrupted after bridge restart' WHERE state='processing'`, formatTime(now)); err != nil {
 		return err
 	}
 	return tx.Commit()
@@ -571,20 +622,21 @@ func insertDedup(ctx context.Context, tx *sql.Tx, dedupKey, source string, now t
 	if dedupKey == "" {
 		return false, errors.New("dedup key is required")
 	}
-	res, err := tx.ExecContext(ctx, `INSERT OR IGNORE INTO event_dedup(dedup_key, received_at, source, state) VALUES(?,?,?,'processing')`, dedupKey, formatTime(now), source)
+	result, err := tx.ExecContext(ctx, `INSERT OR IGNORE INTO event_dedup(dedup_key,received_at,source,state) VALUES(?,?,?,'processing')`, dedupKey, formatTime(now), source)
 	if err != nil {
 		return false, err
 	}
-	rows, err := res.RowsAffected()
+	rows, err := result.RowsAffected()
 	return rows == 1, err
 }
 
 func failDedupTx(ctx context.Context, tx *sql.Tx, dedupKey, message string) error {
-	_, err := tx.ExecContext(ctx, `UPDATE event_dedup SET state='failed', completed_at=?, last_error=? WHERE dedup_key=?`, formatTime(time.Now().UTC()), message, dedupKey)
+	_, err := tx.ExecContext(ctx, `UPDATE event_dedup SET state='failed',completed_at=?,last_error=? WHERE dedup_key=?`, formatTime(time.Now().UTC()), message, dedupKey)
 	return err
 }
 
-const taskColumns = `id,codex_session_id,status,project_alias,cwd,created_by,chat_id,root_message_id,effective_codex_command,effective_sandbox,effective_model,effective_approval,effective_approval_flag_supported,effective_extra_args_json`
+const taskColumns = `id,codex_thread_id,status,project_alias,cwd,created_by,chat_id,root_message_id`
+const runColumns = `id,task_id,kind,status,prompt,codex_thread_id,codex_turn_id,exit_code,final_text`
 
 type taskScanner interface {
 	Scan(dest ...any) error
@@ -605,7 +657,7 @@ func getTaskQuery(ctx context.Context, q interface {
 }
 
 func getRunTx(ctx context.Context, tx *sql.Tx, runID string) (Run, error) {
-	return scanRun(tx.QueryRowContext(ctx, `SELECT id,task_id,kind,status,prompt,codex_session_id,exit_code,log_path,final_text FROM runs WHERE id=?`, runID))
+	return scanRun(tx.QueryRowContext(ctx, `SELECT `+runColumns+` FROM runs WHERE id=?`, runID))
 }
 
 func getPendingIntentTx(ctx context.Context, tx *sql.Tx, id, createdBy string) (PendingIntent, time.Time, error) {
@@ -613,8 +665,7 @@ func getPendingIntentTx(ctx context.Context, tx *sql.Tx, id, createdBy string) (
 	var aliasesJSON, expiresAtRaw string
 	err := tx.QueryRowContext(ctx, `
 SELECT id,chat_id,created_by,prompt,project_aliases_json,expires_at
-FROM pending_intents
-WHERE id=? AND created_by=? AND status='pending'`, id, createdBy).
+FROM pending_intents WHERE id=? AND created_by=? AND status='pending'`, id, createdBy).
 		Scan(&pending.ID, &pending.ChatID, &pending.CreatedBy, &pending.Prompt, &aliasesJSON, &expiresAtRaw)
 	if err != nil {
 		return PendingIntent{}, time.Time{}, err
@@ -634,39 +685,27 @@ WHERE id=? AND created_by=? AND status='pending'`, id, createdBy).
 
 func scanTask(scanner taskScanner) (Task, error) {
 	var task Task
-	var session, model sql.NullString
-	var extraJSON string
-	var approvalFlag int
-	if err := scanner.Scan(&task.ID, &session, &task.Status, &task.ProjectAlias, &task.CWD, &task.CreatedBy, &task.ChatID, &task.RootMessageID, &task.EffectiveCodexCommand, &task.EffectiveSandbox, &model, &task.EffectiveApproval, &approvalFlag, &extraJSON); err != nil {
+	var thread sql.NullString
+	if err := scanner.Scan(&task.ID, &thread, &task.Status, &task.ProjectAlias, &task.CWD, &task.CreatedBy, &task.ChatID, &task.RootMessageID); err != nil {
 		return Task{}, err
 	}
-	if session.Valid {
-		task.CodexSessionID = session.String
-	}
-	if model.Valid {
-		task.EffectiveModel = model.String
-	}
-	task.EffectiveApprovalFlagSupported = approvalFlag == 1
-	if extraJSON == "" {
-		extraJSON = "[]"
-	}
-	if err := json.Unmarshal([]byte(extraJSON), &task.EffectiveExtraArgs); err != nil {
-		return Task{}, err
+	if thread.Valid {
+		task.CodexThreadID = thread.String
 	}
 	return task, nil
 }
 
 func scanRun(scanner runScanner) (Run, error) {
 	var run Run
-	var session, logPath, finalText sql.NullString
-	if err := scanner.Scan(&run.ID, &run.TaskID, &run.Kind, &run.Status, &run.Prompt, &session, &run.ExitCode, &logPath, &finalText); err != nil {
+	var thread, turn, finalText sql.NullString
+	if err := scanner.Scan(&run.ID, &run.TaskID, &run.Kind, &run.Status, &run.Prompt, &thread, &turn, &run.ExitCode, &finalText); err != nil {
 		return Run{}, err
 	}
-	if session.Valid {
-		run.CodexSessionID = session.String
+	if thread.Valid {
+		run.CodexThreadID = thread.String
 	}
-	if logPath.Valid {
-		run.LogPath = logPath.String
+	if turn.Valid {
+		run.CodexTurnID = turn.String
 	}
 	if finalText.Valid {
 		run.FinalText = finalText.String
@@ -674,33 +713,34 @@ func scanRun(scanner runScanner) (Run, error) {
 	return run, nil
 }
 
+func taskCanStart(status string) bool {
+	return status == "idle" || status == "succeeded" || status == "failed" || status == "canceled"
+}
+
+func terminalRunStatus(status string) bool {
+	return status == "succeeded" || status == "failed" || status == "canceled"
+}
+
 func rollback(tx *sql.Tx) {
 	_ = tx.Rollback()
 }
 
-func normalizeTime(t time.Time) time.Time {
-	if t.IsZero() {
+func normalizeTime(value time.Time) time.Time {
+	if value.IsZero() {
 		return time.Now().UTC()
 	}
-	return t.UTC()
+	return value.UTC()
 }
 
-func formatTime(t time.Time) string {
-	return normalizeTime(t).Format(time.RFC3339Nano)
+func formatTime(value time.Time) string {
+	return normalizeTime(value).Format(time.RFC3339Nano)
 }
 
-func boolInt(v bool) int {
-	if v {
-		return 1
-	}
-	return 0
-}
-
-func nullString(v string) any {
-	if v == "" {
+func nullString(value string) any {
+	if value == "" {
 		return nil
 	}
-	return v
+	return value
 }
 
 func isUniqueConstraint(err error) bool {

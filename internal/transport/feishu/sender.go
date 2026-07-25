@@ -40,7 +40,7 @@ func NewSenderFromEnv(appID, secretEnv string, getenv func(string) string, api C
 }
 
 func NewSDKCardAPI(appID, appSecret string) *SDKCardAPI {
-	return &SDKCardAPI{client: lark.NewClient(appID, appSecret)}
+	return &SDKCardAPI{client: lark.NewClient(appID, appSecret, lark.WithHttpClient(newFeishuHTTPClient(feishuHTTPTimeout)))}
 }
 
 type SDKCardAPI struct {

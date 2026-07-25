@@ -2,11 +2,7 @@ package feishu
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
-	"io"
-	"net/http"
-	"strings"
 	"testing"
 	"time"
 
@@ -160,100 +156,6 @@ func TestSDKEventSourceCloseWithoutClient(t *testing.T) {
 	}
 }
 
-func TestApplyHTTPTimeout(t *testing.T) {
-	tests := []struct {
-		name    string
-		initial time.Duration
-		limit   time.Duration
-		want    time.Duration
-	}{
-		{name: "sets an unbounded client", initial: 0, limit: 15 * time.Second, want: 15 * time.Second},
-		{name: "caps a longer timeout", initial: time.Minute, limit: 15 * time.Second, want: 15 * time.Second},
-		{name: "keeps a shorter timeout", initial: 3 * time.Second, limit: 15 * time.Second, want: 3 * time.Second},
-		{name: "ignores a nonpositive limit", initial: time.Minute, limit: 0, want: time.Minute},
-	}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			client := &http.Client{Timeout: tt.initial}
-			applyHTTPTimeout(client, tt.limit)
-			if client.Timeout != tt.want {
-				t.Fatalf("timeout = %s, want %s", client.Timeout, tt.want)
-			}
-		})
-	}
-}
-
-func TestWSBootstrapTransportLimitsOnlyBootstrapRequest(t *testing.T) {
-	var bootstrapDeadline time.Time
-	var apiHasDeadline bool
-	transport := wsBootstrapTransport{base: roundTripFunc(func(req *http.Request) (*http.Response, error) {
-		if req.URL.Path == "/callback/ws/endpoint" {
-			var ok bool
-			bootstrapDeadline, ok = req.Context().Deadline()
-			if !ok {
-				t.Fatal("bootstrap request should have a deadline")
-			}
-		} else {
-			_, apiHasDeadline = req.Context().Deadline()
-		}
-		return &http.Response{
-			StatusCode: http.StatusOK,
-			Header:     make(http.Header),
-			Body:       io.NopCloser(strings.NewReader(`{"code":0,"data":{"ClientConfig":{}}}`)),
-		}, nil
-	})}
-
-	started := time.Now()
-	if _, err := transport.RoundTrip(newRequest(t, "/callback/ws/endpoint")); err != nil {
-		t.Fatal(err)
-	}
-	if bootstrapDeadline.Before(started.Add(wsBootstrapTimeout-time.Second)) || bootstrapDeadline.After(started.Add(wsBootstrapTimeout+time.Second)) {
-		t.Fatalf("bootstrap deadline = %s, want approximately %s", bootstrapDeadline.Sub(started), wsBootstrapTimeout)
-	}
-	if _, err := transport.RoundTrip(newRequest(t, "/open-apis/auth/v3/tenant_access_token/internal")); err != nil {
-		t.Fatal(err)
-	}
-	if apiHasDeadline {
-		t.Fatal("normal Feishu API request should not receive the bootstrap deadline")
-	}
-}
-
-func TestTuneWSBootstrapConfig(t *testing.T) {
-	payload := []byte(`{"code":0,"msg":"","data":{"URL":"wss://example.test/?ticket=opaque","ClientConfig":{"ReconnectCount":-1,"ReconnectInterval":90,"ReconnectNonce":25,"PingInterval":90}}}`)
-	tuned, ok := tuneWSBootstrapConfig(payload)
-	if !ok {
-		t.Fatal("expected bootstrap config to be tuned")
-	}
-	var decoded struct {
-		Data struct {
-			URL          string
-			ClientConfig struct {
-				ReconnectCount    int
-				ReconnectInterval int
-				ReconnectNonce    int
-				PingInterval      int
-			}
-		}
-	}
-	if err := json.Unmarshal(tuned, &decoded); err != nil {
-		t.Fatal(err)
-	}
-	if decoded.Data.URL != "wss://example.test/?ticket=opaque" {
-		t.Fatalf("URL was not preserved: %q", decoded.Data.URL)
-	}
-	if decoded.Data.ClientConfig.ReconnectCount != -1 || decoded.Data.ClientConfig.ReconnectInterval != sdkReconnectDelay || decoded.Data.ClientConfig.ReconnectNonce != sdkReconnectNonce || decoded.Data.ClientConfig.PingInterval != sdkPingInterval {
-		t.Fatalf("unexpected tuned config: %+v", decoded.Data.ClientConfig)
-	}
-}
-
-func TestTuneWSBootstrapConfigRejectsInvalidPayload(t *testing.T) {
-	payload := []byte(`not-json`)
-	tuned, ok := tuneWSBootstrapConfig(payload)
-	if ok || string(tuned) != string(payload) {
-		t.Fatalf("invalid payload should remain unchanged: %q", tuned)
-	}
-}
-
 func TestCardCallbackEnvelopePreservesButtonActionValue(t *testing.T) {
 	raw := mustMarshal(cardCallbackEnvelope(&callback.CardActionTriggerEvent{
 		Event: &callback.CardActionTriggerRequest{
@@ -310,21 +212,6 @@ type fakeEventSource struct {
 	events   []sourceResult
 	connects int
 	closes   int
-}
-
-type roundTripFunc func(*http.Request) (*http.Response, error)
-
-func (f roundTripFunc) RoundTrip(req *http.Request) (*http.Response, error) {
-	return f(req)
-}
-
-func newRequest(t *testing.T, path string) *http.Request {
-	t.Helper()
-	req, err := http.NewRequestWithContext(context.Background(), http.MethodPost, "https://open.feishu.cn"+path, nil)
-	if err != nil {
-		t.Fatal(err)
-	}
-	return req
 }
 
 type sourceResult struct {

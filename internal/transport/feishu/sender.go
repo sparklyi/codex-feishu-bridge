@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"net"
 	"time"
 
@@ -177,7 +178,7 @@ func (s *Sender) patchWithRetry(ctx context.Context, messageID string, card []by
 }
 
 func shouldRetrySendError(err error) bool {
-	if errors.Is(err, ErrRateLimited) {
+	if errors.Is(err, ErrRateLimited) || errors.Is(err, io.EOF) || errors.Is(err, io.ErrUnexpectedEOF) || errors.Is(err, net.ErrClosed) {
 		return true
 	}
 	var netErr net.Error

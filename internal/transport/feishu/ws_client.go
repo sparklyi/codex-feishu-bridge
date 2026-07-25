@@ -24,7 +24,7 @@ const (
 	feishuWSEndpoint        = "https://open.feishu.cn/callback/ws/endpoint"
 	feishuHTTPTimeout       = 30 * time.Second
 	feishuBootstrapTimeout  = 8 * time.Second
-	feishuHeartbeatInterval = 15 * time.Second
+	feishuHeartbeatInterval = 90 * time.Second
 	feishuReconnectDelay    = time.Second
 	feishuWriteTimeout      = 5 * time.Second
 	fragmentTTL             = 5 * time.Second
@@ -42,10 +42,13 @@ type feishuWSClient struct {
 	dialer      *websocket.Dialer
 	endpointURL string
 
-	bootstrapTimeout  time.Duration
-	heartbeatInterval time.Duration
-	reconnectDelay    time.Duration
-	writeTimeout      time.Duration
+	bootstrapTimeout time.Duration
+	// heartbeatInterval is an explicit local override used by tests. Production
+	// connections use the value Feishu supplies during WebSocket bootstrap.
+	heartbeatInterval       time.Duration
+	serverHeartbeatInterval time.Duration
+	reconnectDelay          time.Duration
+	writeTimeout            time.Duration
 
 	mu     sync.Mutex
 	cancel context.CancelFunc
@@ -65,17 +68,16 @@ type fragmentBuffer struct {
 
 func newFeishuWSClient(appID, appSecret string, eventDispatcher *dispatcher.EventDispatcher) *feishuWSClient {
 	return &feishuWSClient{
-		appID:             appID,
-		appSecret:         appSecret,
-		dispatcher:        eventDispatcher,
-		httpClient:        newFeishuHTTPClient(feishuHTTPTimeout),
-		dialer:            newFeishuWebSocketDialer(),
-		endpointURL:       feishuWSEndpoint,
-		bootstrapTimeout:  feishuBootstrapTimeout,
-		heartbeatInterval: feishuHeartbeatInterval,
-		reconnectDelay:    feishuReconnectDelay,
-		writeTimeout:      feishuWriteTimeout,
-		fragments:         make(map[string]fragmentBuffer),
+		appID:            appID,
+		appSecret:        appSecret,
+		dispatcher:       eventDispatcher,
+		httpClient:       newFeishuHTTPClient(feishuHTTPTimeout),
+		dialer:           newFeishuWebSocketDialer(),
+		endpointURL:      feishuWSEndpoint,
+		bootstrapTimeout: feishuBootstrapTimeout,
+		reconnectDelay:   feishuReconnectDelay,
+		writeTimeout:     feishuWriteTimeout,
+		fragments:        make(map[string]fragmentBuffer),
 	}
 }
 
@@ -182,11 +184,12 @@ func (c *feishuWSClient) clearActive(conn *websocket.Conn) {
 
 func (c *feishuWSClient) connect(ctx context.Context) (*websocket.Conn, int32, error) {
 	bootstrapCtx, cancelBootstrap := context.WithTimeout(ctx, c.bootstrapTimeout)
-	endpoint, serviceID, err := c.bootstrap(bootstrapCtx)
+	endpoint, serviceID, heartbeatInterval, err := c.bootstrap(bootstrapCtx)
 	cancelBootstrap()
 	if err != nil {
 		return nil, 0, err
 	}
+	c.setServerHeartbeatInterval(heartbeatInterval)
 	dialCtx, cancelDial := context.WithTimeout(ctx, c.bootstrapTimeout)
 	defer cancelDial()
 	conn, response, err := c.dialer.DialContext(dialCtx, endpoint, nil)
@@ -199,14 +202,14 @@ func (c *feishuWSClient) connect(ctx context.Context) (*websocket.Conn, int32, e
 	return conn, serviceID, nil
 }
 
-func (c *feishuWSClient) bootstrap(ctx context.Context) (string, int32, error) {
+func (c *feishuWSClient) bootstrap(ctx context.Context) (string, int32, time.Duration, error) {
 	body, err := json.Marshal(larkws.BootstrapRequest{AppID: c.appID, AppSecret: c.appSecret})
 	if err != nil {
-		return "", 0, err
+		return "", 0, 0, err
 	}
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, c.endpointURL, bytes.NewReader(body))
 	if err != nil {
-		return "", 0, err
+		return "", 0, 0, err
 	}
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("locale", "zh")
@@ -214,32 +217,60 @@ func (c *feishuWSClient) bootstrap(ctx context.Context) (string, int32, error) {
 
 	resp, err := c.httpClient.Do(req)
 	if err != nil {
-		return "", 0, err
+		return "", 0, 0, err
 	}
 	defer func() { _ = resp.Body.Close() }()
 	payload, err := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
 	if err != nil {
-		return "", 0, err
+		return "", 0, 0, err
 	}
 	if resp.StatusCode != http.StatusOK {
-		return "", 0, fmt.Errorf("bootstrap returned HTTP %d", resp.StatusCode)
+		return "", 0, 0, fmt.Errorf("bootstrap returned HTTP %d", resp.StatusCode)
 	}
 
 	endpoint := &larkws.EndpointResp{}
 	if err := json.Unmarshal(payload, endpoint); err != nil {
-		return "", 0, err
+		return "", 0, 0, err
 	}
 	if endpoint.Code != larkws.OK {
-		return "", 0, fmt.Errorf("bootstrap returned code %d", endpoint.Code)
+		return "", 0, 0, fmt.Errorf("bootstrap returned code %d", endpoint.Code)
 	}
 	if endpoint.Data == nil || endpoint.Data.Url == "" {
-		return "", 0, errors.New("bootstrap returned no WebSocket endpoint")
+		return "", 0, 0, errors.New("bootstrap returned no WebSocket endpoint")
 	}
 	serviceID, err := endpointServiceID(endpoint.Data.Url)
 	if err != nil {
-		return "", 0, err
+		return "", 0, 0, err
 	}
-	return endpoint.Data.Url, serviceID, nil
+	return endpoint.Data.Url, serviceID, heartbeatFromConfig(endpoint.Data.ClientConfig), nil
+}
+
+func heartbeatFromConfig(config *larkws.ClientConfig) time.Duration {
+	if config == nil || config.PingInterval <= 0 {
+		return feishuHeartbeatInterval
+	}
+	return time.Duration(config.PingInterval) * time.Second
+}
+
+func (c *feishuWSClient) setServerHeartbeatInterval(interval time.Duration) {
+	if interval <= 0 {
+		interval = feishuHeartbeatInterval
+	}
+	c.mu.Lock()
+	c.serverHeartbeatInterval = interval
+	c.mu.Unlock()
+}
+
+func (c *feishuWSClient) currentHeartbeatInterval() time.Duration {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.heartbeatInterval > 0 {
+		return c.heartbeatInterval
+	}
+	if c.serverHeartbeatInterval > 0 {
+		return c.serverHeartbeatInterval
+	}
+	return feishuHeartbeatInterval
 }
 
 func endpointServiceID(rawURL string) (int32, error) {
@@ -275,10 +306,7 @@ func (c *feishuWSClient) serveConnection(ctx context.Context, conn *websocket.Co
 	}()
 	go func() {
 		defer workers.Done()
-		interval := c.heartbeatInterval
-		if interval <= 0 {
-			interval = feishuHeartbeatInterval
-		}
+		interval := c.currentHeartbeatInterval()
 		ticker := time.NewTicker(interval)
 		defer ticker.Stop()
 		for {

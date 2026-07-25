@@ -26,7 +26,10 @@ func TestFeishuWSClientBootstrapReadsEndpoint(t *testing.T) {
 		}
 		_ = json.NewEncoder(w).Encode(larkws.EndpointResp{
 			Code: larkws.OK,
-			Data: &larkws.Endpoint{Url: "wss://example.test/ws?service_id=73"},
+			Data: &larkws.Endpoint{
+				Url:          "wss://example.test/ws?service_id=73",
+				ClientConfig: &larkws.ClientConfig{PingInterval: 45},
+			},
 		})
 	}))
 	defer server.Close()
@@ -34,12 +37,15 @@ func TestFeishuWSClientBootstrapReadsEndpoint(t *testing.T) {
 	client := newFeishuWSClient("cli_test", "secret", nil)
 	client.httpClient = server.Client()
 	client.endpointURL = server.URL + "/callback/ws/endpoint"
-	endpoint, serviceID, err := client.bootstrap(context.Background())
+	endpoint, serviceID, heartbeatInterval, err := client.bootstrap(context.Background())
 	if err != nil {
 		t.Fatal(err)
 	}
 	if endpoint != "wss://example.test/ws?service_id=73" || serviceID != 73 {
 		t.Fatalf("unexpected endpoint result: endpoint=%q service_id=%d", endpoint, serviceID)
+	}
+	if heartbeatInterval != 45*time.Second {
+		t.Fatalf("heartbeat interval = %s, want %s", heartbeatInterval, 45*time.Second)
 	}
 	if received.AppID != "cli_test" || received.AppSecret != "secret" || received.ClientAssertion != "" {
 		t.Fatalf("unexpected bootstrap request: %+v", received)

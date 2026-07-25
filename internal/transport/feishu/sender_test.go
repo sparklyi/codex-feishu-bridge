@@ -70,7 +70,7 @@ func TestBuildInteractiveCardUsesCompactTaskInfoSection(t *testing.T) {
 		},
 		Actions: []contracts.Action{
 			{ID: "continue_submit", Label: "继续跟进", Value: map[string]string{"action": "continue", "task_id": "cx_123"}},
-			{ID: "shortcut", Label: "总结", Value: map[string]string{"action": "shortcut", "shortcut": "summarize"}},
+			{ID: "stop_task", Label: "停止", Style: "danger", Value: map[string]string{"action": "stop_task", "task_id": "cx_123"}},
 		},
 	})
 	if err != nil {
@@ -82,7 +82,7 @@ func TestBuildInteractiveCardUsesCompactTaskInfoSection(t *testing.T) {
 			t.Fatalf("card missing compact layout content %q: %s", want, body)
 		}
 	}
-	for _, banned := range []string{"Status:", "Project:", "Workspace:", "Follow up", "总结", "summarize"} {
+	for _, banned := range []string{"Status:", "Project:", "Workspace:", "Follow up"} {
 		if jsonContains(body, banned) {
 			t.Fatalf("card retained old layout text %q: %s", banned, body)
 		}
@@ -96,7 +96,7 @@ func TestBuildInteractiveCardRendersContinueForm(t *testing.T) {
 		BodyMarkdown: "**结果**\nHello",
 		Actions: []contracts.Action{
 			{ID: "continue_submit", Label: "继续跟进", Value: map[string]string{"action": "continue", "task_id": "cx_123"}},
-			{ID: "shortcut", Label: "总结", Value: map[string]string{"action": "shortcut", "shortcut": "summarize", "task_id": "cx_123"}},
+			{ID: "stop_task", Label: "停止", Style: "danger", Value: map[string]string{"action": "stop_task", "task_id": "cx_123"}},
 		},
 	})
 	if err != nil {
@@ -145,8 +145,10 @@ func TestBuildInteractiveCardRendersContinueForm(t *testing.T) {
 			switch value["action_id"] {
 			case "continue_submit":
 				t.Fatalf("continue action should be rendered as a form submit button, not an action-row button: %s", string(card))
-			case "shortcut":
-				t.Fatalf("task card should not render shortcut action buttons: %s", string(card))
+			case "stop_task":
+				if action["type"] != "danger" {
+					t.Fatalf("stop action should preserve danger styling: %s", string(card))
+				}
 			}
 		}
 	}

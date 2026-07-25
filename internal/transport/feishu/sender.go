@@ -214,9 +214,6 @@ func BuildInteractiveCard(msg contracts.OutboundMessage) ([]byte, error) {
 				followUpAction = &actionCopy
 				continue
 			}
-			if isTaskCard(msg.CardKind) {
-				continue
-			}
 			buttonActions = append(buttonActions, action)
 		}
 		if len(buttonActions) > 0 {
@@ -237,10 +234,6 @@ func BuildInteractiveCard(msg contracts.OutboundMessage) ([]byte, error) {
 		card["elements"] = elements
 	}
 	return json.Marshal(card)
-}
-
-func isTaskCard(kind contracts.CardKind) bool {
-	return kind == contracts.CardStart || kind == contracts.CardSuccess || kind == contracts.CardFailure
 }
 
 func followUpForm(action contracts.Action) map[string]any {
@@ -293,9 +286,9 @@ func templateFor(msg contracts.OutboundMessage) string {
 		return "green"
 	case contracts.CardFailure, contracts.CardRoutingError:
 		return "red"
-	case contracts.CardRunningConflict, contracts.CardShortcutConfirm:
+	case contracts.CardRunningConflict:
 		return "orange"
-	case contracts.CardProjectSelection, contracts.CardMigrationHint:
+	case contracts.CardProjectSelection, contracts.CardThreadSelection:
 		return "blue"
 	default:
 		if msg.Status == "failed" {

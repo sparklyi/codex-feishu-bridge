@@ -3,7 +3,7 @@ module github.com/sparklyi/codex-feishu-bridge
 go 1.26
 
 require (
-	github.com/larksuite/oapi-sdk-go/v3 v3.9.5
+	github.com/larksuite/oapi-sdk-go/v3 v3.9.9
 	gopkg.in/yaml.v3 v3.0.1
 	modernc.org/sqlite v1.34.5
 )

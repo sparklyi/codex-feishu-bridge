@@ -36,12 +36,12 @@ func TestPrivateUnknownProject(t *testing.T) {
 	}
 }
 
-func TestCodexCommandReturnsMigrationHint(t *testing.T) {
+func TestSlashPrefixedPromptStartsTask(t *testing.T) {
 	got := ParseStart(ParseInput{
-		Event:          contracts.InboundEvent{ChatType: "private", Text: "/codex fix tests"},
+		Event:          contracts.InboundEvent{ChatType: "private", Text: "/plan fix tests"},
 		ProjectAliases: []string{"backend"},
 	})
-	if got.Kind != KindMigrationHint {
+	if got.Kind != KindStartTask || got.Prompt != "/plan fix tests" {
 		t.Fatalf("unexpected intent: %+v", got)
 	}
 }

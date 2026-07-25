@@ -4,7 +4,6 @@ import (
 	"context"
 	"errors"
 	"strings"
-	"time"
 
 	"github.com/sparklyi/codex-feishu-bridge/internal/contracts"
 	"github.com/sparklyi/codex-feishu-bridge/internal/redact"
@@ -26,23 +25,26 @@ type Notifier struct {
 type TaskCardInput struct {
 	ChatID           string
 	ReplyToMessageID string
+	UpdateMessageID  string
 	TaskID           string
 	Status           string
 	ProjectAlias     string
 	CWDLabel         string
 	Body             string
-	CodexSessionID   string
 }
 
-type FollowUpAcceptedInput struct {
-	ChatID          string
-	UpdateMessageID string
-	TaskID          string
-	Status          string
-	ProjectAlias    string
-	CWDLabel        string
-	Prompt          string
-	SubmittedAt     time.Time
+type ThreadOption struct {
+	ID      string
+	Name    string
+	Preview string
+	CWD     string
+	Status  string
+}
+
+type ThreadSelectionInput struct {
+	ChatID           string
+	ReplyToMessageID string
+	Threads          []ThreadOption
 }
 
 type ProjectSelectionInput struct {
@@ -61,19 +63,15 @@ type RunningConflictInput struct {
 	ProjectAlias     string
 }
 
-type ShortcutConfirmationInput struct {
-	ChatID           string
-	ReplyToMessageID string
-	RootMessageID    string
-	Shortcut         string
-	Prompt           string
-}
-
 func New(sender transport.Sender) *Notifier {
 	return &Notifier{sender: sender}
 }
 
 func (n *Notifier) Start(ctx context.Context, in TaskCardInput) (contracts.SentMessage, error) {
+	return n.sendTask(ctx, contracts.CardStart, in, successBodyLimit)
+}
+
+func (n *Notifier) Progress(ctx context.Context, in TaskCardInput) (contracts.SentMessage, error) {
 	return n.sendTask(ctx, contracts.CardStart, in, successBodyLimit)
 }
 
@@ -85,35 +83,38 @@ func (n *Notifier) Failure(ctx context.Context, in TaskCardInput) (contracts.Sen
 	return n.sendTask(ctx, contracts.CardFailure, in, failureBodyLimit)
 }
 
-func (n *Notifier) FollowUpAccepted(ctx context.Context, in FollowUpAcceptedInput) (contracts.SentMessage, error) {
-	status := in.Status
-	if status == "" {
-		status = "running"
+func (n *Notifier) ThreadSelection(ctx context.Context, in ThreadSelectionInput) (contracts.SentMessage, error) {
+	if len(in.Threads) == 0 {
+		return n.sender.Send(ctx, contracts.OutboundMessage{
+			ChatID:           in.ChatID,
+			ReplyToMessageID: in.ReplyToMessageID,
+			CardKind:         contracts.CardThreadSelection,
+			Status:           "empty",
+			Title:            "没有可接管的会话",
+			BodyMarkdown:     "本机 Codex 暂未发现可用会话。",
+		})
 	}
-	body := buildFollowUpAcceptedBody(in)
-	msg := contracts.OutboundMessage{
-		ChatID:          in.ChatID,
-		UpdateMessageID: in.UpdateMessageID,
-		CardKind:        contracts.CardStart,
-		TaskID:          in.TaskID,
-		Status:          status,
-		Title:           redact.FeishuText("继续处理中 · "+in.TaskID, 120),
-		BodyMarkdown:    body,
-		Fields: taskFields(TaskCardInput{
-			TaskID:       in.TaskID,
-			Status:       status,
-			ProjectAlias: in.ProjectAlias,
-			CWDLabel:     in.CWDLabel,
-		}),
+	actions := make([]contracts.Action, 0, len(in.Threads))
+	lines := make([]string, 0, len(in.Threads)+1)
+	lines = append(lines, "选择一个本机 Codex 会话以从飞书继续处理。")
+	for index, thread := range in.Threads {
+		label := threadLabel(thread, index)
+		lines = append(lines, "**"+label+"**\n"+redact.FeishuText(thread.Preview, 180))
+		actions = append(actions, contracts.Action{
+			ID:    "attach_thread",
+			Label: label,
+			Value: map[string]string{"action": "attach_thread", "thread_id": thread.ID},
+		})
 	}
-	sent, err := n.sender.Send(ctx, msg)
-	if err != nil {
-		return contracts.SentMessage{}, err
-	}
-	if sent.MessageID == "" {
-		return contracts.SentMessage{}, ErrMissingMessageID
-	}
-	return sent, nil
+	return n.sender.Send(ctx, contracts.OutboundMessage{
+		ChatID:           in.ChatID,
+		ReplyToMessageID: in.ReplyToMessageID,
+		CardKind:         contracts.CardThreadSelection,
+		Status:           "select_thread",
+		Title:            "接管 Codex 会话",
+		BodyMarkdown:     redact.FeishuText(strings.Join(lines, "\n\n"), successBodyLimit),
+		Actions:          actions,
+	})
 }
 
 func (n *Notifier) RoutingError(ctx context.Context, chatID, replyToMessageID string) (contracts.SentMessage, error) {
@@ -122,38 +123,19 @@ func (n *Notifier) RoutingError(ctx context.Context, chatID, replyToMessageID st
 		ReplyToMessageID: replyToMessageID,
 		CardKind:         contracts.CardRoutingError,
 		Status:           "routing_error",
-		Title:            "Cannot route reply",
-		BodyMarkdown:     "Please reply from a task card or start a new task in a private chat.",
+		Title:            "无法定位任务",
+		BodyMarkdown:     "请从任务卡片继续，或重新发起一个任务。",
 	})
-}
-
-func (n *Notifier) MigrationHint(ctx context.Context, chatID, replyToMessageID string) error {
-	_, err := n.sender.Send(ctx, contracts.OutboundMessage{
-		ChatID:           chatID,
-		ReplyToMessageID: replyToMessageID,
-		CardKind:         contracts.CardMigrationHint,
-		Status:           "migration_hint",
-		Title:            "Command updated",
-		BodyMarkdown:     "Send plain text in a private chat to start a Codex task. Use `@project prompt` when you need a configured project.",
-	})
-	return err
 }
 
 func (n *Notifier) ProjectSelection(ctx context.Context, in ProjectSelectionInput) (contracts.SentMessage, error) {
-	body := "Prompt: " + redact.FeishuText(in.Prompt, 500)
-	if len(in.ProjectAliases) > 0 {
-		body += "\nProjects: " + strings.Join(in.ProjectAliases, ", ")
-	}
+	body := "任务：" + redact.FeishuText(in.Prompt, 500)
 	actions := make([]contracts.Action, 0, len(in.ProjectAliases))
 	for _, alias := range in.ProjectAliases {
 		actions = append(actions, contracts.Action{
 			ID:    "project_select",
 			Label: alias,
-			Value: map[string]string{
-				"action":     "select_project",
-				"pending_id": in.PendingID,
-				"project":    alias,
-			},
+			Value: map[string]string{"action": "select_project", "pending_id": in.PendingID, "project": alias},
 		})
 	}
 	return n.sender.Send(ctx, contracts.OutboundMessage{
@@ -161,7 +143,7 @@ func (n *Notifier) ProjectSelection(ctx context.Context, in ProjectSelectionInpu
 		ReplyToMessageID: in.ReplyToMessageID,
 		CardKind:         contracts.CardProjectSelection,
 		Status:           "project_selection",
-		Title:            "Choose project",
+		Title:            "选择项目",
 		BodyMarkdown:     body,
 		Actions:          actions,
 	})
@@ -178,30 +160,15 @@ func (n *Notifier) RunningConflict(ctx context.Context, in RunningConflictInput)
 		CardKind:         contracts.CardRunningConflict,
 		TaskID:           in.TaskID,
 		Status:           "running_conflict",
-		Title:            "Task already running",
-		BodyMarkdown:     "Task: " + in.TaskID + "\nStatus: " + in.Status + "\nProject: " + project,
+		Title:            "任务仍在处理",
+		BodyMarkdown:     "请等待当前操作完成后再继续。",
 		Fields: []contracts.Field{
-			{Title: "Task", Value: in.TaskID},
-			{Title: "Status", Value: in.Status},
-			{Title: "Project", Value: project},
+			{Title: "任务", Value: in.TaskID},
+			{Title: "状态", Value: localizedStatus(in.Status)},
+			{Title: "项目", Value: project},
 		},
 	})
 	return err
-}
-
-func (n *Notifier) ShortcutConfirmation(ctx context.Context, in ShortcutConfirmationInput) (contracts.SentMessage, error) {
-	return n.sender.Send(ctx, contracts.OutboundMessage{
-		ChatID:           in.ChatID,
-		ReplyToMessageID: in.ReplyToMessageID,
-		CardKind:         contracts.CardShortcutConfirm,
-		Status:           "shortcut_confirmation",
-		Title:            "Confirm shortcut",
-		BodyMarkdown:     redact.FeishuText(in.Prompt, failureBodyLimit),
-		Actions: []contracts.Action{
-			{ID: "confirm_shortcut", Label: "Run", Style: "primary", Value: map[string]string{"action": "confirm_shortcut", "shortcut": in.Shortcut, "root_message_id": in.RootMessageID}},
-			{ID: "cancel_shortcut", Label: "Cancel", Value: map[string]string{"action": "cancel_shortcut", "shortcut": in.Shortcut}},
-		},
-	})
 }
 
 func (n *Notifier) Rejection(ctx context.Context, chatID, replyToMessageID, body string) error {
@@ -210,24 +177,24 @@ func (n *Notifier) Rejection(ctx context.Context, chatID, replyToMessageID, body
 		ReplyToMessageID: replyToMessageID,
 		CardKind:         contracts.CardRoutingError,
 		Status:           "rejected",
-		Title:            "Request rejected",
+		Title:            "请求未执行",
 		BodyMarkdown:     redact.FeishuText(body, failureBodyLimit),
 	})
 	return err
 }
 
 func (n *Notifier) sendTask(ctx context.Context, kind contracts.CardKind, in TaskCardInput, limit int) (contracts.SentMessage, error) {
-	body := buildTaskBody(kind, in, limit)
 	msg := contracts.OutboundMessage{
 		ChatID:           in.ChatID,
 		ReplyToMessageID: in.ReplyToMessageID,
+		UpdateMessageID:  in.UpdateMessageID,
 		CardKind:         kind,
 		TaskID:           in.TaskID,
 		Status:           in.Status,
-		Title:            redact.FeishuText(taskTitle(kind, in.TaskID), 120),
-		BodyMarkdown:     body,
+		Title:            redact.FeishuText(taskTitle(kind, in.Status, in.TaskID), 120),
+		BodyMarkdown:     buildTaskBody(kind, in, limit),
 		Fields:           taskFields(in),
-		Actions:          taskActions(kind, in.TaskID),
+		Actions:          taskActions(in.Status, in.TaskID),
 	}
 	sent, err := n.sender.Send(ctx, msg)
 	if err != nil {
@@ -251,52 +218,54 @@ func taskFields(in TaskCardInput) []contracts.Field {
 	}
 }
 
-func taskActions(_ contracts.CardKind, taskID string) []contracts.Action {
-	return []contracts.Action{
-		{ID: continueActionID, Label: "继续跟进", Style: "primary", Value: map[string]string{"action": "continue", "task_id": taskID}},
+func taskActions(status, taskID string) []contracts.Action {
+	actions := []contracts.Action{{ID: continueActionID, Label: "继续跟进", Style: "primary", Value: map[string]string{"action": "continue", "task_id": taskID}}}
+	if status == "queued" || status == "running" {
+		actions = append(actions, contracts.Action{ID: "stop_task", Label: "停止", Style: "danger", Value: map[string]string{"action": "stop_task", "task_id": taskID}})
 	}
+	return actions
 }
 
 func buildTaskBody(kind contracts.CardKind, in TaskCardInput, limit int) string {
-	body := in.Body
-	if in.CodexSessionID != "" {
-		body = strings.ReplaceAll(body, in.CodexSessionID, "[codex-session]")
-	}
-	body = strings.TrimSpace(body)
-	if kind == contracts.CardStart || body == "" || body == "Task accepted." {
-		body = "已接收，Codex 正在处理。"
+	body := strings.TrimSpace(in.Body)
+	if body == "" {
+		switch in.Status {
+		case "idle":
+			body = "已绑定桌面 Codex 会话。"
+		case "queued":
+			body = "任务已进入队列。"
+		default:
+			body = "Codex 正在处理。"
+		}
 	}
 	text := "**" + bodyHeading(kind) + "**\n" + body
-	if kind != contracts.CardStart {
-		text += "\n\n继续处理请直接回复这张任务卡片。"
-	}
 	return redact.FeishuText(text, limit)
 }
 
-func buildFollowUpAcceptedBody(in FollowUpAcceptedInput) string {
-	lines := []string{
-		"**进度**",
-		"已收到继续跟进，Codex 正在处理。",
+func threadLabel(thread ThreadOption, index int) string {
+	label := strings.TrimSpace(thread.Name)
+	if label == "" {
+		label = strings.TrimSpace(thread.Preview)
 	}
-	if !in.SubmittedAt.IsZero() {
-		lines = append(lines, "提交时间：`"+in.SubmittedAt.Format("2006-01-02 15:04:05 MST")+"`")
+	if label == "" {
+		label = "会话 " + string(rune('A'+index))
 	}
-	prompt := strings.TrimSpace(redact.FeishuText(in.Prompt, 500))
-	if prompt != "" {
-		lines = append(lines, "本次输入：\n"+prompt)
-	}
-	return redact.FeishuText(strings.Join(lines, "\n"), successBodyLimit)
+	return redact.FeishuText(label, 42)
 }
 
-func taskTitle(kind contracts.CardKind, taskID string) string {
+func taskTitle(kind contracts.CardKind, status, taskID string) string {
 	prefix := "任务状态"
-	switch kind {
-	case contracts.CardStart:
-		prefix = "正在处理"
-	case contracts.CardSuccess:
+	switch {
+	case kind == contracts.CardSuccess:
 		prefix = "任务已完成"
-	case contracts.CardFailure:
-		prefix = "任务失败"
+	case kind == contracts.CardFailure:
+		prefix = "任务未完成"
+	case status == "idle":
+		prefix = "已接管会话"
+	case status == "queued":
+		prefix = "等待处理"
+	default:
+		prefix = "正在处理"
 	}
 	if taskID == "" {
 		return prefix
@@ -306,27 +275,29 @@ func taskTitle(kind contracts.CardKind, taskID string) string {
 
 func bodyHeading(kind contracts.CardKind) string {
 	switch kind {
-	case contracts.CardStart:
-		return "进度"
 	case contracts.CardSuccess:
 		return "结果"
 	case contracts.CardFailure:
 		return "错误"
 	default:
-		return "摘要"
+		return "进度"
 	}
 }
 
 func localizedStatus(status string) string {
 	switch status {
+	case "idle":
+		return "已接管"
+	case "queued":
+		return "排队中"
 	case "running":
 		return "运行中"
 	case "succeeded":
 		return "已完成"
 	case "failed":
 		return "失败"
-	case "":
-		return "未知"
+	case "canceled":
+		return "已停止"
 	default:
 		return status
 	}

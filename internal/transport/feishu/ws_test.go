@@ -241,7 +241,7 @@ func TestTuneWSBootstrapConfig(t *testing.T) {
 	if decoded.Data.URL != "wss://example.test/?ticket=opaque" {
 		t.Fatalf("URL was not preserved: %q", decoded.Data.URL)
 	}
-	if decoded.Data.ClientConfig.ReconnectCount != -1 || decoded.Data.ClientConfig.ReconnectInterval != sdkReconnectDelay || decoded.Data.ClientConfig.ReconnectNonce != sdkReconnectNonce || decoded.Data.ClientConfig.PingInterval != 90 {
+	if decoded.Data.ClientConfig.ReconnectCount != -1 || decoded.Data.ClientConfig.ReconnectInterval != sdkReconnectDelay || decoded.Data.ClientConfig.ReconnectNonce != sdkReconnectNonce || decoded.Data.ClientConfig.PingInterval != sdkPingInterval {
 		t.Fatalf("unexpected tuned config: %+v", decoded.Data.ClientConfig)
 	}
 }

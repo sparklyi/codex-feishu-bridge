@@ -8,11 +8,9 @@
 6. Copy the bot open id into `feishu.bot_open_id`.
 7. Add your user open id to `security.allowed_open_ids`.
 
-Private chat plain text starts a new Codex task. Use `@backend fix the failing router test` to choose a configured project. Group chat works only for allowlisted users and requires mentioning the bot, for example `@Codex @backend fix the failing router test`. If the bot is mentioned without a project, the bridge returns a project selection card.
+Private-chat plain text starts a task. Use `@backend fix the failing router test` to choose a configured project. Group chat works only for allowlisted users and requires mentioning the bot, for example `@Codex @backend fix the failing router test`. If the bot is mentioned without a project, the bridge returns a project selection card.
 
-`/codex` is no longer the task entry point and returns a migration hint.
-
-Task cards include Continue, Summarize, Explain error, Run tests, and MR description actions. Run tests and MR description require confirmation before resuming Codex.
+Send `/sessions` in a private chat to select and attach a Codex Desktop thread. The attached task card accepts follow-up text and can stop a running turn. Every turn runs with fixed full access and does not show an approval card.
 
 Run:
 

@@ -6,19 +6,13 @@ feishu:
 security:
   allowed_open_ids:
     - ou_xxx
-codex:
+app_server:
   command: codex
   default_model: ""
-  sandbox: workspace-write
-  approval: never
-  extra_args:
-    - --ignore-user-config
-  log_retention_days: 14
+  startup_timeout_seconds: 15
 workspace:
   default: /path/to/default/repo
 projects:
   backend:
     cwd: /path/to/backend
     model: ""
-    sandbox: workspace-write
-    approval: never

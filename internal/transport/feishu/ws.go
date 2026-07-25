@@ -1,21 +1,16 @@
 package feishu
 
 import (
-	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
-	"io"
 	"log/slog"
-	"net/http"
-	"strconv"
 	"sync"
 	"time"
 
 	"github.com/larksuite/oapi-sdk-go/v3/event/dispatcher"
 	"github.com/larksuite/oapi-sdk-go/v3/event/dispatcher/callback"
 	larkim "github.com/larksuite/oapi-sdk-go/v3/service/im/v1"
-	larkws "github.com/larksuite/oapi-sdk-go/v3/ws"
 	"github.com/sparklyi/codex-feishu-bridge/internal/contracts"
 )
 
@@ -24,14 +19,7 @@ var ErrDisconnected = errors.New("feishu websocket disconnected")
 const (
 	RawEventMessage    = "message"
 	RawEventCardAction = "card_action"
-	sdkHTTPTimeout     = 30 * time.Second
-	wsBootstrapTimeout = 8 * time.Second
-	sdkReconnectDelay  = 1
-	sdkReconnectNonce  = 0
-	sdkPingInterval    = 20
 )
-
-var sdkHTTPTimeoutOnce sync.Once
 
 type RawEvent struct {
 	Kind string
@@ -45,7 +33,7 @@ type EventSource interface {
 }
 
 type SDKEventSource struct {
-	client      *larkws.Client
+	client      *feishuWSClient
 	events      chan sourceEvent
 	cardActions chan sourceEvent
 	startOnce   sync.Once
@@ -57,7 +45,6 @@ type sourceEvent struct {
 }
 
 func NewSDKEventSource(appID, appSecret, verificationToken string) *SDKEventSource {
-	configureSDKHTTPTimeout()
 	source := &SDKEventSource{
 		events:      make(chan sourceEvent, 64),
 		cardActions: make(chan sourceEvent, 64),
@@ -76,106 +63,8 @@ func NewSDKEventSource(appID, appSecret, verificationToken string) *SDKEventSour
 		slog.Info("Feishu card action received")
 		return cardActionResponse("success", "操作已收到。"), nil
 	})
-	source.client = larkws.NewClient(appID, appSecret, larkws.WithEventHandler(eventDispatcher), larkws.WithAutoReconnect(true))
+	source.client = newFeishuWSClient(appID, appSecret, eventDispatcher)
 	return source
-}
-
-// The upstream WebSocket SDK uses http.DefaultClient to obtain a connection
-// endpoint but does not expose a retry policy. Bound endpoint requests and
-// tighten only that response's reconnect policy so transient network failures
-// do not leave the bridge offline for the SDK's 90-second backoff.
-func configureSDKHTTPTimeout() {
-	sdkHTTPTimeoutOnce.Do(func() {
-		applyHTTPTimeout(http.DefaultClient, sdkHTTPTimeout)
-		base := http.DefaultClient.Transport
-		if base == nil {
-			base = http.DefaultTransport
-		}
-		http.DefaultClient.Transport = wsBootstrapTransport{base: base}
-	})
-}
-
-func applyHTTPTimeout(client *http.Client, timeout time.Duration) {
-	if client == nil || timeout <= 0 {
-		return
-	}
-	if client.Timeout == 0 || client.Timeout > timeout {
-		client.Timeout = timeout
-	}
-}
-
-type wsBootstrapTransport struct {
-	base http.RoundTripper
-}
-
-func (t wsBootstrapTransport) RoundTrip(req *http.Request) (*http.Response, error) {
-	if req.URL.Path != "/callback/ws/endpoint" {
-		return t.base.RoundTrip(req)
-	}
-
-	ctx, cancel := context.WithTimeout(req.Context(), wsBootstrapTimeout)
-	resp, err := t.base.RoundTrip(req.Clone(ctx))
-	if err != nil || resp == nil || resp.Body == nil {
-		cancel()
-		return resp, err
-	}
-	payload, readErr := io.ReadAll(resp.Body)
-	closeErr := resp.Body.Close()
-	cancel()
-	if readErr != nil {
-		return nil, readErr
-	}
-	if closeErr != nil {
-		return nil, closeErr
-	}
-	if tuned, ok := tuneWSBootstrapConfig(payload); ok {
-		payload = tuned
-	}
-	resp.Body = io.NopCloser(bytes.NewReader(payload))
-	resp.ContentLength = int64(len(payload))
-	resp.Header.Set("Content-Length", strconv.Itoa(len(payload)))
-	return resp, nil
-}
-
-func tuneWSBootstrapConfig(payload []byte) ([]byte, bool) {
-	var response map[string]json.RawMessage
-	if err := json.Unmarshal(payload, &response); err != nil {
-		return payload, false
-	}
-	dataRaw, ok := response["data"]
-	if !ok {
-		return payload, false
-	}
-	var data map[string]json.RawMessage
-	if err := json.Unmarshal(dataRaw, &data); err != nil {
-		return payload, false
-	}
-	configRaw, ok := data["ClientConfig"]
-	if !ok {
-		return payload, false
-	}
-	var config map[string]json.RawMessage
-	if err := json.Unmarshal(configRaw, &config); err != nil {
-		return payload, false
-	}
-	config["ReconnectInterval"] = json.RawMessage(strconv.Itoa(sdkReconnectDelay))
-	config["ReconnectNonce"] = json.RawMessage(strconv.Itoa(sdkReconnectNonce))
-	config["PingInterval"] = json.RawMessage(strconv.Itoa(sdkPingInterval))
-	tunedConfig, err := json.Marshal(config)
-	if err != nil {
-		return payload, false
-	}
-	data["ClientConfig"] = tunedConfig
-	tunedData, err := json.Marshal(data)
-	if err != nil {
-		return payload, false
-	}
-	response["data"] = tunedData
-	tuned, err := json.Marshal(response)
-	if err != nil {
-		return payload, false
-	}
-	return tuned, true
 }
 
 func (s *SDKEventSource) Connect(ctx context.Context) error {
@@ -212,7 +101,7 @@ func (s *SDKEventSource) Receive(ctx context.Context) (RawEvent, error) {
 
 func (s *SDKEventSource) Close() error {
 	if s.client != nil {
-		s.client.Close()
+		return s.client.Close()
 	}
 	return nil
 }

@@ -46,6 +46,20 @@ func TestFeishuWSClientBootstrapReadsEndpoint(t *testing.T) {
 	}
 }
 
+func TestFeishuTransportsBypassProxyEnvironment(t *testing.T) {
+	httpClient := newFeishuHTTPClient(time.Second)
+	transport, ok := httpClient.Transport.(*http.Transport)
+	if !ok {
+		t.Fatalf("transport type = %T, want *http.Transport", httpClient.Transport)
+	}
+	if transport.Proxy != nil {
+		t.Fatal("Feishu HTTP client must not use an environment proxy")
+	}
+	if dialer := newFeishuWebSocketDialer(); dialer.Proxy != nil {
+		t.Fatal("Feishu WebSocket dialer must not use an environment proxy")
+	}
+}
+
 func TestFeishuWSClientSendsProtocolHeartbeat(t *testing.T) {
 	upgrader := websocket.Upgrader{}
 	frames := make(chan larkws.Frame, 1)

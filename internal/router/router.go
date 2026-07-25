@@ -9,49 +9,50 @@ import (
 	"strings"
 	"time"
 
-	"github.com/sparklyi/codex-feishu-bridge/internal/codexrunner"
+	"github.com/sparklyi/codex-feishu-bridge/internal/appserver"
 	"github.com/sparklyi/codex-feishu-bridge/internal/config"
 	"github.com/sparklyi/codex-feishu-bridge/internal/contracts"
 	"github.com/sparklyi/codex-feishu-bridge/internal/intent"
-	notify "github.com/sparklyi/codex-feishu-bridge/internal/notifier"
+	"github.com/sparklyi/codex-feishu-bridge/internal/notifier"
+	"github.com/sparklyi/codex-feishu-bridge/internal/runtime"
 	"github.com/sparklyi/codex-feishu-bridge/internal/store"
 )
 
 type TaskStore interface {
 	AdmitNewTask(ctx context.Context, dedupKey, source string, in store.CreateTaskInput) (store.AdmitResult, error)
+	AttachThread(ctx context.Context, dedupKey, source string, in store.AttachThreadInput) (store.Task, bool, error)
 	AdmitResumeRun(ctx context.Context, dedupKey, source string, in store.ResumeRunInput) (store.AdmitResult, error)
-	RecordRunSession(ctx context.Context, runID, threadID string) error
-	FinishRun(ctx context.Context, dedupKey, runID string, result contracts.RunResult, status string) error
+	FinishRun(ctx context.Context, dedupKey string, in store.FinishRunInput) error
 	FailDedup(ctx context.Context, dedupKey string, err error) error
 	UserEnabled(ctx context.Context, openID string) (bool, error)
 	InsertMessageRoute(ctx context.Context, messageID, taskID, routeType string) error
+	SetTaskRootMessageID(ctx context.Context, taskID, messageID string, now time.Time) error
 	ResolveMessageRoute(ctx context.Context, messageID string) (store.Task, error)
+	GetTask(ctx context.Context, taskID string) (store.Task, []store.Run, error)
 	CreatePendingIntent(ctx context.Context, in store.CreatePendingIntentInput) (store.PendingIntent, error)
 	ConsumePendingIntent(ctx context.Context, id, createdBy string, now time.Time) (store.PendingIntent, error)
-	FindRunningTask(ctx context.Context, chatID, creatorOpenID string) (store.Task, bool, error)
 }
 
-type Runner interface {
-	Exec(ctx context.Context, in codexrunner.ExecInput) (contracts.RunResult, error)
-	Resume(ctx context.Context, in codexrunner.ResumeInput) (contracts.RunResult, error)
+type Controller interface {
+	Threads(ctx context.Context, limit int) ([]appserver.Thread, error)
+	Enqueue(ctx context.Context, input runtime.StartInput) error
+	Stop(ctx context.Context, taskID string) error
 }
 
 type Notifier interface {
-	Start(ctx context.Context, in notify.TaskCardInput) (contracts.SentMessage, error)
-	Success(ctx context.Context, in notify.TaskCardInput) (contracts.SentMessage, error)
-	Failure(ctx context.Context, in notify.TaskCardInput) (contracts.SentMessage, error)
+	Start(ctx context.Context, in notifier.TaskCardInput) (contracts.SentMessage, error)
+	Failure(ctx context.Context, in notifier.TaskCardInput) (contracts.SentMessage, error)
+	ThreadSelection(ctx context.Context, in notifier.ThreadSelectionInput) (contracts.SentMessage, error)
 	RoutingError(ctx context.Context, chatID, replyToMessageID string) (contracts.SentMessage, error)
 	Rejection(ctx context.Context, chatID, replyToMessageID, body string) error
-	MigrationHint(ctx context.Context, chatID, replyToMessageID string) error
-	ProjectSelection(ctx context.Context, in notify.ProjectSelectionInput) (contracts.SentMessage, error)
-	RunningConflict(ctx context.Context, in notify.RunningConflictInput) error
-	ShortcutConfirmation(ctx context.Context, in notify.ShortcutConfirmationInput) (contracts.SentMessage, error)
+	ProjectSelection(ctx context.Context, in notifier.ProjectSelectionInput) (contracts.SentMessage, error)
+	RunningConflict(ctx context.Context, in notifier.RunningConflictInput) error
 }
 
 type RouterOptions struct {
 	Config       config.Config
 	Store        TaskStore
-	Runner       Runner
+	Controller   Controller
 	Notifier     Notifier
 	Now          func() time.Time
 	NewTaskID    func() string
@@ -62,7 +63,7 @@ type RouterOptions struct {
 type Router struct {
 	cfg          config.Config
 	store        TaskStore
-	runner       Runner
+	controller   Controller
 	notifier     Notifier
 	now          func() time.Time
 	newTaskID    func() string
@@ -77,23 +78,32 @@ func New(opts RouterOptions) *Router {
 	}
 	newTaskID := opts.NewTaskID
 	if newTaskID == nil {
-		newTaskID = randomTaskID
+		newTaskID = func() string { return randomID("task") }
 	}
 	newRunID := opts.NewRunID
 	if newRunID == nil {
-		newRunID = func() string { return "run_" + time.Now().UTC().Format("20060102150405.000000000") }
+		newRunID = func() string { return randomID("run") }
 	}
 	newPendingID := opts.NewPendingID
 	if newPendingID == nil {
-		newPendingID = randomPendingID
+		newPendingID = func() string { return randomID("pending") }
 	}
-	return &Router{cfg: opts.Config, store: opts.Store, runner: opts.Runner, notifier: opts.Notifier, now: now, newTaskID: newTaskID, newRunID: newRunID, newPendingID: newPendingID}
+	return &Router{
+		cfg:          opts.Config,
+		store:        opts.Store,
+		controller:   opts.Controller,
+		notifier:     opts.Notifier,
+		now:          now,
+		newTaskID:    newTaskID,
+		newRunID:     newRunID,
+		newPendingID: newPendingID,
+	}
 }
 
 func (r *Router) Handle(ctx context.Context, ev contracts.InboundEvent) error {
 	if !r.authorized(ctx, ev.SenderOpenID) {
 		if ev.ChatType == "private" {
-			return r.notifier.Rejection(ctx, ev.ChatID, ev.MessageID, "You are not authorized to run Codex from this bridge.")
+			return r.notifier.Rejection(ctx, ev.ChatID, ev.MessageID, "当前用户未获授权使用 Codex Bridge。")
 		}
 		return nil
 	}
@@ -101,13 +111,13 @@ func (r *Router) Handle(ctx context.Context, ev contracts.InboundEvent) error {
 	case contracts.InboundNewTask:
 		return r.handleNewTask(ctx, ev)
 	case contracts.InboundCardAction:
-		switch {
-		case ev.ActionValue["action"] == "select_project":
+		switch ev.ActionValue["action"] {
+		case "select_project":
 			return r.handleProjectSelection(ctx, ev)
-		case ev.ActionValue["action"] == "confirm_shortcut":
-			return r.handleShortcutConfirmation(ctx, ev)
-		case ev.ActionID == "shortcut" || ev.ActionValue["action"] == "shortcut":
-			return r.handleShortcut(ctx, ev)
+		case "attach_thread":
+			return r.handleAttachThread(ctx, ev)
+		case "stop_task":
+			return r.handleStop(ctx, ev)
 		}
 		return r.handleContinuation(ctx, ev)
 	case contracts.InboundReply:
@@ -122,35 +132,101 @@ func (r *Router) handleNewTask(ctx context.Context, ev contracts.InboundEvent) e
 	switch parsed.Kind {
 	case intent.KindIgnored:
 		return nil
-	case intent.KindMigrationHint:
-		return r.notifier.MigrationHint(ctx, ev.ChatID, ev.MessageID)
+	case intent.KindThreadSelection:
+		return r.sendThreadSelection(ctx, ev)
 	case intent.KindUnknownProject:
-		return r.notifier.Rejection(ctx, ev.ChatID, ev.MessageID, "Project configuration error: unknown project alias "+parsed.ProjectAlias)
+		return r.notifier.Rejection(ctx, ev.ChatID, ev.MessageID, "项目配置错误：未找到项目 "+parsed.ProjectAlias)
 	case intent.KindProjectSelection:
 		return r.sendProjectSelection(ctx, ev, parsed.Prompt)
 	case intent.KindStartTask:
+		return r.startTask(ctx, ev, parsed.ProjectAlias, parsed.Prompt)
 	default:
 		return nil
 	}
-	return r.startTask(ctx, ev, parsed.ProjectAlias, parsed.Prompt)
+}
+
+func (r *Router) sendThreadSelection(ctx context.Context, ev contracts.InboundEvent) error {
+	if r.controller == nil {
+		return errors.New("runtime controller is not configured")
+	}
+	threads, err := r.controller.Threads(ctx, 8)
+	if err != nil {
+		return r.notifier.Rejection(ctx, ev.ChatID, ev.MessageID, "无法发现桌面 Codex 会话："+err.Error())
+	}
+	options := make([]notifier.ThreadOption, 0, len(threads))
+	for _, thread := range threads {
+		options = append(options, notifier.ThreadOption{
+			ID:      thread.ID,
+			Name:    thread.Name,
+			Preview: thread.Preview,
+			CWD:     thread.CWD,
+			Status:  thread.Status.Type,
+		})
+	}
+	_, err = r.notifier.ThreadSelection(ctx, notifier.ThreadSelectionInput{ChatID: ev.ChatID, ReplyToMessageID: ev.MessageID, Threads: options})
+	return err
+}
+
+func (r *Router) handleAttachThread(ctx context.Context, ev contracts.InboundEvent) error {
+	threadID := ev.ActionValue["thread_id"]
+	if threadID == "" {
+		return r.notifier.Rejection(ctx, ev.ChatID, ev.MessageID, "会话标识缺失。")
+	}
+	threads, err := r.controller.Threads(ctx, 32)
+	if err != nil {
+		return r.notifier.Rejection(ctx, ev.ChatID, ev.MessageID, "无法验证桌面 Codex 会话："+err.Error())
+	}
+	thread, ok := findThread(threads, threadID)
+	if !ok {
+		return r.notifier.Rejection(ctx, ev.ChatID, ev.MessageID, "该 Codex 会话已不存在，请重新发送 /sessions。")
+	}
+	if thread.CWD == "" {
+		return r.notifier.Rejection(ctx, ev.ChatID, ev.MessageID, "该 Codex 会话没有可用工作目录。")
+	}
+	alias := r.cfg.ProjectAliasForCWD(thread.CWD)
+	task, replay, err := r.store.AttachThread(ctx, ev.DedupKey, sourceFor(ev), store.AttachThreadInput{
+		TaskID:       r.newTaskID(),
+		ThreadID:     thread.ID,
+		ProjectAlias: alias,
+		CWD:          thread.CWD,
+		CreatedBy:    ev.SenderOpenID,
+		ChatID:       ev.ChatID,
+		Now:          r.now(),
+	})
+	if err != nil || replay {
+		return err
+	}
+	sent, err := r.notifier.Start(ctx, notifier.TaskCardInput{
+		ChatID:       task.ChatID,
+		TaskID:       task.ID,
+		Status:       "idle",
+		ProjectAlias: task.ProjectAlias,
+		CWDLabel:     task.CWD,
+		Body:         "桌面 Codex 会话已接管。",
+	})
+	if err != nil {
+		return err
+	}
+	if err := r.store.SetTaskRootMessageID(ctx, task.ID, sent.MessageID, r.now()); err != nil {
+		return err
+	}
+	return r.insertRouteWithRetry(ctx, sent.MessageID, task.ID, "start_card")
 }
 
 func (r *Router) sendProjectSelection(ctx context.Context, ev contracts.InboundEvent, prompt string) error {
-	pendingID := r.newPendingID()
-	aliases := r.cfg.ProjectAliases()
 	pending, err := r.store.CreatePendingIntent(ctx, store.CreatePendingIntentInput{
-		ID:             pendingID,
+		ID:             r.newPendingID(),
 		ChatID:         ev.ChatID,
 		CreatedBy:      ev.SenderOpenID,
 		Prompt:         prompt,
-		ProjectAliases: aliases,
+		ProjectAliases: r.cfg.ProjectAliases(),
 		Now:            r.now(),
 		ExpiresAt:      r.now().Add(10 * time.Minute),
 	})
 	if err != nil {
 		return err
 	}
-	_, err = r.notifier.ProjectSelection(ctx, notify.ProjectSelectionInput{
+	_, err = r.notifier.ProjectSelection(ctx, notifier.ProjectSelectionInput{
 		ChatID:           ev.ChatID,
 		ReplyToMessageID: ev.MessageID,
 		PendingID:        pending.ID,
@@ -170,236 +246,200 @@ func (r *Router) handleProjectSelection(ctx context.Context, ev contracts.Inboun
 	}
 	alias := ev.ActionValue["project"]
 	if !containsProjectAlias(pending.ProjectAliases, alias) {
-		_, sendErr := r.notifier.ProjectSelection(ctx, notify.ProjectSelectionInput{
-			ChatID:           ev.ChatID,
-			ReplyToMessageID: ev.MessageID,
-			PendingID:        pending.ID,
-			Prompt:           pending.Prompt,
-			ProjectAliases:   pending.ProjectAliases,
-		})
-		return sendErr
+		return r.notifier.Rejection(ctx, ev.ChatID, ev.MessageID, "项目选择已失效，请重新发送任务。")
 	}
 	return r.startTask(ctx, ev, alias, pending.Prompt)
 }
 
 func (r *Router) startTask(ctx context.Context, ev contracts.InboundEvent, alias, prompt string) error {
-	running, ok, err := r.store.FindRunningTask(ctx, ev.ChatID, ev.SenderOpenID)
-	if err != nil {
-		return err
-	}
-	if ok {
-		return r.notifier.RunningConflict(ctx, notify.RunningConflictInput{
-			ChatID:           ev.ChatID,
-			ReplyToMessageID: ev.MessageID,
-			TaskID:           running.ID,
-			Status:           running.Status,
-			ProjectAlias:     running.ProjectAlias,
-		})
-	}
 	project, err := r.cfg.ResolveProject(alias)
 	if err != nil {
-		return r.notifier.Rejection(ctx, ev.ChatID, ev.MessageID, "Project configuration error: "+err.Error())
+		return r.notifier.Rejection(ctx, ev.ChatID, ev.MessageID, "项目配置错误："+err.Error())
 	}
-	taskID := r.newTaskID()
-	runID := r.newRunID()
 	admit, err := r.store.AdmitNewTask(ctx, ev.DedupKey, sourceFor(ev), store.CreateTaskInput{
-		TaskID:                         taskID,
-		RunID:                          runID,
-		ProjectAlias:                   alias,
-		CWD:                            project.CWD,
-		CreatedBy:                      ev.SenderOpenID,
-		ChatID:                         ev.ChatID,
-		Prompt:                         prompt,
-		EffectiveCodexCommand:          project.Command,
-		EffectiveSandbox:               project.Sandbox,
-		EffectiveModel:                 project.Model,
-		EffectiveApproval:              project.Approval,
-		EffectiveApprovalFlagSupported: false,
-		EffectiveExtraArgs:             project.ExtraArgs,
-		Now:                            r.now(),
+		TaskID:       r.newTaskID(),
+		RunID:        r.newRunID(),
+		ProjectAlias: alias,
+		CWD:          project.CWD,
+		CreatedBy:    ev.SenderOpenID,
+		ChatID:       ev.ChatID,
+		Prompt:       prompt,
+		Now:          r.now(),
 	})
 	if err != nil || admit.Replay {
 		return err
 	}
-	start, err := r.notifier.Start(ctx, cardInput(admit.Task, "running", "Task accepted.", ""))
-	if err != nil || start.MessageID == "" {
-		if err == nil {
-			err = notify.ErrMissingMessageID
-		}
-		_ = r.store.FinishRun(ctx, ev.DedupKey, admit.Run.ID, contracts.RunResult{ExitCode: -1, FinalText: err.Error(), FinishedAt: r.now()}, "failed")
-		return nil
-	}
-	if err := r.insertRouteWithRetry(ctx, start.MessageID, admit.Task.ID, "start_card"); err != nil {
-		_ = r.store.FinishRun(ctx, ev.DedupKey, admit.Run.ID, contracts.RunResult{ExitCode: -1, FinalText: err.Error(), FinishedAt: r.now()}, "failed")
-		return nil
-	}
-	result, runErr := r.runner.Exec(ctx, execInput(admit.Task, admit.Run.ID, prompt, func(threadID string) error {
-		return r.store.RecordRunSession(ctx, admit.Run.ID, threadID)
-	}))
-	status := statusFromError(runErr)
-	if err := r.store.FinishRun(ctx, ev.DedupKey, admit.Run.ID, result, status); err != nil {
+	sent, err := r.notifier.Start(ctx, notifier.TaskCardInput{
+		ChatID:       admit.Task.ChatID,
+		TaskID:       admit.Task.ID,
+		Status:       "queued",
+		ProjectAlias: admit.Task.ProjectAlias,
+		CWDLabel:     admit.Task.CWD,
+		Body:         "正在创建 Codex 会话。",
+	})
+	if err != nil {
+		r.failQueuedRun(ctx, admit.Task, admit.Run, ev.DedupKey, err)
 		return err
 	}
-	return r.sendResult(ctx, admit.Task, status, result, runErr)
+	if err := r.store.SetTaskRootMessageID(ctx, admit.Task.ID, sent.MessageID, r.now()); err != nil {
+		r.failQueuedRun(ctx, admit.Task, admit.Run, ev.DedupKey, err)
+		return err
+	}
+	if err := r.insertRouteWithRetry(ctx, sent.MessageID, admit.Task.ID, "start_card"); err != nil {
+		r.failQueuedRun(ctx, admit.Task, admit.Run, ev.DedupKey, err)
+		return err
+	}
+	if err := r.controller.Enqueue(ctx, runtime.StartInput{Task: admit.Task, Run: admit.Run, Project: project, CardMessageID: sent.MessageID, DedupKey: ev.DedupKey}); err != nil {
+		r.failQueuedRun(ctx, admit.Task, admit.Run, ev.DedupKey, err)
+		_, _ = r.notifier.Failure(ctx, taskCard(admit.Task, "failed", err.Error(), sent.MessageID))
+		return err
+	}
+	return nil
 }
 
 func (r *Router) handleContinuation(ctx context.Context, ev contracts.InboundEvent) error {
 	text := strings.TrimSpace(ev.Text)
-	if ev.Kind == contracts.InboundCardAction && text == "" {
-		if ev.ActionID == "continue_submit" || ev.ActionValue["action"] == "continue" {
-			return nil
-		}
-		return r.notifier.Rejection(ctx, ev.ChatID, ev.MessageID, "Follow-up text is required.")
+	if text == "" {
+		return r.notifier.Rejection(ctx, ev.ChatID, ev.MessageID, "继续跟进需要填写内容。")
 	}
 	return r.resumeTask(ctx, ev, text)
 }
 
-func (r *Router) handleShortcut(ctx context.Context, ev contracts.InboundEvent) error {
-	shortcutName := ev.ActionValue["shortcut"]
-	shortcut, ok := intent.LookupShortcut(shortcutName)
-	if !ok {
-		return r.notifier.Rejection(ctx, ev.ChatID, ev.MessageID, "Unknown shortcut.")
-	}
-	if shortcut.Immediate {
-		return r.resumeTask(ctx, ev, shortcut.Prompt)
-	}
-	_, err := r.notifier.ShortcutConfirmation(ctx, notify.ShortcutConfirmationInput{
-		ChatID:           ev.ChatID,
-		ReplyToMessageID: ev.MessageID,
-		RootMessageID:    ev.RootMessageID,
-		Shortcut:         shortcutName,
-		Prompt:           shortcut.Prompt,
-	})
-	return err
-}
-
-func (r *Router) handleShortcutConfirmation(ctx context.Context, ev contracts.InboundEvent) error {
-	shortcutName := ev.ActionValue["shortcut"]
-	shortcut, ok := intent.LookupShortcut(shortcutName)
-	if !ok {
-		return r.notifier.Rejection(ctx, ev.ChatID, ev.MessageID, "Unknown shortcut.")
-	}
-	return r.resumeTask(ctx, ev, shortcut.Prompt)
-}
-
 func (r *Router) resumeTask(ctx context.Context, ev contracts.InboundEvent, text string) error {
-	task, err := r.store.ResolveMessageRoute(ctx, ev.RootMessageID)
-	if errors.Is(err, store.ErrRouteMiss) {
+	task, err := r.resolveContinuationTask(ctx, ev)
+	if errors.Is(err, store.ErrRouteMiss) || errors.Is(err, store.ErrNotFound) {
 		_, sendErr := r.notifier.RoutingError(ctx, ev.ChatID, ev.MessageID)
 		return sendErr
 	}
 	if err != nil {
 		return err
 	}
-	runID := r.newRunID()
-	admit, err := r.store.AdmitResumeRun(ctx, ev.DedupKey, sourceFor(ev), store.ResumeRunInput{RunID: runID, TaskID: task.ID, RequestedBy: ev.SenderOpenID, Prompt: text, Now: r.now()})
+	admit, err := r.store.AdmitResumeRun(ctx, ev.DedupKey, sourceFor(ev), store.ResumeRunInput{RunID: r.newRunID(), TaskID: task.ID, RequestedBy: ev.SenderOpenID, Prompt: text, Now: r.now()})
 	if err != nil || admit.Replay {
 		return err
 	}
 	switch admit.Reason {
 	case store.RejectNone:
 	case store.RejectCreatorMismatch:
-		return r.notifier.Rejection(ctx, ev.ChatID, ev.MessageID, "Only the task creator can continue this task.")
+		return r.notifier.Rejection(ctx, ev.ChatID, ev.MessageID, "只有任务创建者可以继续此任务。")
 	case store.RejectActiveRun:
-		return r.notifier.Rejection(ctx, ev.ChatID, ev.MessageID, "This task is already running.")
-	case store.RejectMissingSession:
-		return r.notifier.Rejection(ctx, ev.ChatID, ev.MessageID, "This task has no Codex session id to resume.")
+		return r.notifier.RunningConflict(ctx, notifier.RunningConflictInput{ChatID: ev.ChatID, ReplyToMessageID: ev.MessageID, TaskID: task.ID, Status: task.Status, ProjectAlias: task.ProjectAlias})
+	case store.RejectMissingThread:
+		return r.notifier.Rejection(ctx, ev.ChatID, ev.MessageID, "此任务没有可继续的 Codex 会话。")
 	default:
-		return r.notifier.Rejection(ctx, ev.ChatID, ev.MessageID, "This task cannot be resumed.")
+		return r.notifier.Rejection(ctx, ev.ChatID, ev.MessageID, "此任务当前不能继续。")
 	}
-	result, runErr := r.runner.Resume(ctx, codexrunner.ResumeInput{
-		ExecInput: execInput(admit.Task, admit.Run.ID, text, func(threadID string) error {
-			return r.store.RecordRunSession(ctx, admit.Run.ID, threadID)
-		}),
-		SessionID: admit.Task.CodexSessionID,
-		Reply:     text,
-	})
-	status := statusFromError(runErr)
-	if err := r.store.FinishRun(ctx, ev.DedupKey, admit.Run.ID, result, status); err != nil {
-		return err
+	project, err := r.cfg.ResolveProject(admit.Task.ProjectAlias)
+	if err != nil {
+		r.failQueuedRun(ctx, admit.Task, admit.Run, ev.DedupKey, err)
+		return r.notifier.Rejection(ctx, ev.ChatID, ev.MessageID, "项目配置错误："+err.Error())
 	}
-	return r.sendResult(ctx, admit.Task, status, result, runErr)
-}
-
-func (r *Router) sendResult(ctx context.Context, task store.Task, status string, result contracts.RunResult, runErr error) error {
-	body := result.FinalText
-	if runErr != nil {
-		body = runErr.Error()
-		if result.StderrTail != "" {
-			body += "\n" + result.StderrTail
+	project.CWD = admit.Task.CWD
+	cardID := admit.Task.RootMessageID
+	if cardID == "" {
+		sent, sendErr := r.notifier.Start(ctx, taskCard(admit.Task, "queued", "正在恢复 Codex 会话。", ""))
+		if sendErr != nil {
+			r.failQueuedRun(ctx, admit.Task, admit.Run, ev.DedupKey, sendErr)
+			return sendErr
+		}
+		cardID = sent.MessageID
+		if err := r.store.SetTaskRootMessageID(ctx, admit.Task.ID, cardID, r.now()); err != nil {
+			return err
+		}
+		if err := r.insertRouteWithRetry(ctx, cardID, admit.Task.ID, "start_card"); err != nil {
+			return err
 		}
 	}
-	input := cardInput(task, status, body, result.CodexSessionID)
-	var sent contracts.SentMessage
-	var err error
-	if status == "succeeded" {
-		sent, err = r.notifier.Success(ctx, input)
-	} else {
-		sent, err = r.notifier.Failure(ctx, input)
+	if err := r.controller.Enqueue(ctx, runtime.StartInput{Task: admit.Task, Run: admit.Run, Project: project, CardMessageID: cardID, DedupKey: ev.DedupKey}); err != nil {
+		r.failQueuedRun(ctx, admit.Task, admit.Run, ev.DedupKey, err)
+		return err
 	}
-	if err != nil || sent.MessageID == "" {
-		return nil
-	}
-	_ = r.insertRouteWithRetry(ctx, sent.MessageID, task.ID, "result_card")
 	return nil
 }
 
-func (r *Router) insertRouteWithRetry(ctx context.Context, messageID, taskID, routeType string) error {
-	err := r.store.InsertMessageRoute(ctx, messageID, taskID, routeType)
-	if err == nil {
-		return nil
+func (r *Router) handleStop(ctx context.Context, ev contracts.InboundEvent) error {
+	task, _, err := r.store.GetTask(ctx, ev.ActionValue["task_id"])
+	if errors.Is(err, store.ErrNotFound) {
+		return r.notifier.Rejection(ctx, ev.ChatID, ev.MessageID, "任务不存在。")
 	}
-	return r.store.InsertMessageRoute(ctx, messageID, taskID, routeType)
+	if err != nil {
+		return err
+	}
+	if task.ChatID != ev.ChatID || task.CreatedBy != ev.SenderOpenID {
+		return r.notifier.Rejection(ctx, ev.ChatID, ev.MessageID, "无权停止此任务。")
+	}
+	if err := r.controller.Stop(ctx, task.ID); err != nil {
+		if errors.Is(err, runtime.ErrNotRunning) {
+			return r.notifier.Rejection(ctx, ev.ChatID, ev.MessageID, "此任务当前没有可停止的桥接操作。")
+		}
+		return r.notifier.Rejection(ctx, ev.ChatID, ev.MessageID, "停止任务失败："+err.Error())
+	}
+	return nil
+}
+
+func (r *Router) resolveContinuationTask(ctx context.Context, ev contracts.InboundEvent) (store.Task, error) {
+	task, err := r.store.ResolveMessageRoute(ctx, ev.RootMessageID)
+	if !errors.Is(err, store.ErrRouteMiss) {
+		return task, err
+	}
+	if ev.Kind != contracts.InboundCardAction {
+		return store.Task{}, err
+	}
+	taskID := ev.ActionValue["task_id"]
+	if taskID == "" {
+		return store.Task{}, err
+	}
+	task, _, getErr := r.store.GetTask(ctx, taskID)
+	if getErr != nil {
+		return store.Task{}, getErr
+	}
+	if task.ChatID != ev.ChatID {
+		return store.Task{}, store.ErrRouteMiss
+	}
+	return task, nil
+}
+
+func (r *Router) failQueuedRun(ctx context.Context, task store.Task, run store.Run, dedupKey string, err error) {
+	if err == nil {
+		return
+	}
+	_ = r.store.FinishRun(ctx, dedupKey, store.FinishRunInput{
+		RunID:      run.ID,
+		ThreadID:   task.CodexThreadID,
+		Status:     "failed",
+		ExitCode:   -1,
+		FinalText:  err.Error(),
+		FinishedAt: r.now(),
+	})
+}
+
+func (r *Router) insertRouteWithRetry(ctx context.Context, messageID, taskID, routeType string) error {
+	if err := r.store.InsertMessageRoute(ctx, messageID, taskID, routeType); err != nil {
+		return r.store.InsertMessageRoute(ctx, messageID, taskID, routeType)
+	}
+	return nil
 }
 
 func (r *Router) authorized(ctx context.Context, openID string) bool {
-	allowed := false
 	for _, id := range r.cfg.Security.AllowedOpenIDs {
 		if id == openID {
-			allowed = true
-			break
+			_, _ = r.store.UserEnabled(ctx, openID)
+			return true
 		}
 	}
-	if !allowed {
-		return false
-	}
-	_, _ = r.store.UserEnabled(ctx, openID)
-	return true
+	return false
 }
 
-func execInput(task store.Task, runID, prompt string, onSessionID func(string) error) codexrunner.ExecInput {
-	return codexrunner.ExecInput{
-		Command:               task.EffectiveCodexCommand,
-		CWD:                   task.CWD,
-		Sandbox:               task.EffectiveSandbox,
-		Model:                 task.EffectiveModel,
-		Approval:              task.EffectiveApproval,
-		ApprovalFlagSupported: task.EffectiveApprovalFlagSupported,
-		ExtraArgs:             task.EffectiveExtraArgs,
-		Prompt:                prompt,
-		TaskID:                task.ID,
-		RunID:                 runID,
-		OnSessionID:           onSessionID,
+func taskCard(task store.Task, status, body, updateMessageID string) notifier.TaskCardInput {
+	return notifier.TaskCardInput{
+		ChatID:          task.ChatID,
+		UpdateMessageID: updateMessageID,
+		TaskID:          task.ID,
+		Status:          status,
+		ProjectAlias:    task.ProjectAlias,
+		CWDLabel:        task.CWD,
+		Body:            body,
 	}
-}
-
-func cardInput(task store.Task, status, body, sessionID string) notify.TaskCardInput {
-	return notify.TaskCardInput{
-		ChatID:         task.ChatID,
-		TaskID:         task.ID,
-		Status:         status,
-		ProjectAlias:   task.ProjectAlias,
-		CWDLabel:       task.CWD,
-		Body:           body,
-		CodexSessionID: sessionID,
-	}
-}
-
-func statusFromError(err error) string {
-	if err != nil {
-		return "failed"
-	}
-	return "succeeded"
 }
 
 func sourceFor(ev contracts.InboundEvent) string {
@@ -418,18 +458,19 @@ func containsProjectAlias(aliases []string, want string) bool {
 	return false
 }
 
-func randomTaskID() string {
-	var buf [3]byte
-	if _, err := rand.Read(buf[:]); err != nil {
-		return fmt.Sprintf("cx_%d", time.Now().UnixNano())
+func findThread(threads []appserver.Thread, threadID string) (appserver.Thread, bool) {
+	for _, thread := range threads {
+		if thread.ID == threadID {
+			return thread, true
+		}
 	}
-	return "cx_" + hex.EncodeToString(buf[:])
+	return appserver.Thread{}, false
 }
 
-func randomPendingID() string {
-	var buf [3]byte
-	if _, err := rand.Read(buf[:]); err != nil {
-		return fmt.Sprintf("pi_%d", time.Now().UnixNano())
+func randomID(prefix string) string {
+	var data [8]byte
+	if _, err := rand.Read(data[:]); err != nil {
+		return fmt.Sprintf("%s_%d", prefix, time.Now().UTC().UnixNano())
 	}
-	return "pi_" + hex.EncodeToString(buf[:])
+	return prefix + "_" + hex.EncodeToString(data[:])
 }

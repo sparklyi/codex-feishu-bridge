@@ -9,12 +9,12 @@ import (
 )
 
 func TestNormalizeMessageNewTask(t *testing.T) {
-	raw := messageJSON(t, map[string]any{"text": "/codex hello"}, "")
+	raw := messageJSON(t, map[string]any{"text": "review current changes"}, "")
 	ev, err := NormalizeMessageJSON(raw, VerifyOptions{AppID: "cli_test", VerificationToken: "verify"})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if ev.Kind != contracts.InboundNewTask || ev.Text != "/codex hello" || ev.DedupKey != "evt_1" {
+	if ev.Kind != contracts.InboundNewTask || ev.Text != "review current changes" || ev.DedupKey != "evt_1" {
 		t.Fatalf("unexpected event: %+v", ev)
 	}
 	if ev.ChatType != "private" || ev.ChatID != "chat_1" || ev.SenderOpenID != "ou_owner" || ev.MessageID != "msg_1" || ev.RawReceivedAt.IsZero() {
@@ -45,13 +45,13 @@ func TestNormalizeMessageReplyUsesRootMessageID(t *testing.T) {
 }
 
 func TestNormalizeMessageFallbackDedup(t *testing.T) {
-	raw := messageJSON(t, map[string]any{"text": "/codex @backend fix bug"}, "")
+	raw := messageJSON(t, map[string]any{"text": "@backend fix bug"}, "")
 	raw = []byte(strings.Replace(string(raw), `"event_id":"evt_1",`, "", 1))
 	ev, err := NormalizeMessageJSON(raw, VerifyOptions{AppID: "cli_test", VerificationToken: "verify"})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if ev.DedupKey != "message:msg_1" || ev.Text != "/codex @backend fix bug" {
+	if ev.DedupKey != "message:msg_1" || ev.Text != "@backend fix bug" {
 		t.Fatalf("unexpected fallback dedup: %+v", ev)
 	}
 }
@@ -112,25 +112,23 @@ func TestNormalizeCardFallbackDedupAndEmptyText(t *testing.T) {
 
 func TestNormalizeCardActionValues(t *testing.T) {
 	raw := cardJSONWithValue(t, map[string]any{
-		"text":     "continue",
-		"action":   "shortcut",
-		"shortcut": "summarize",
-		"task_id":  "cx_1",
+		"action":  "stop_task",
+		"task_id": "cx_1",
 	}, "token_1")
 	ev, err := NormalizeCardActionJSON(raw, VerifyOptions{AppID: "cli_test", VerificationToken: "verify"})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if ev.ActionValue["action"] != "shortcut" || ev.ActionValue["shortcut"] != "summarize" || ev.Text != "continue" {
+	if ev.ActionValue["action"] != "stop_task" || ev.ActionValue["task_id"] != "cx_1" || ev.Text != "" {
 		t.Fatalf("unexpected callback values: %+v", ev)
 	}
 }
 
 func TestNormalizeRejectsWrongAppTokenAndMalformedPayload(t *testing.T) {
-	if _, err := NormalizeMessageJSON(messageJSON(t, map[string]any{"text": "/codex hello"}, ""), VerifyOptions{AppID: "wrong", VerificationToken: "verify"}); err == nil {
+	if _, err := NormalizeMessageJSON(messageJSON(t, map[string]any{"text": "review current changes"}, ""), VerifyOptions{AppID: "wrong", VerificationToken: "verify"}); err == nil {
 		t.Fatal("expected wrong app id rejection")
 	}
-	if _, err := NormalizeMessageJSON(messageJSON(t, map[string]any{"text": "/codex hello"}, ""), VerifyOptions{AppID: "cli_test", VerificationToken: "wrong"}); err == nil {
+	if _, err := NormalizeMessageJSON(messageJSON(t, map[string]any{"text": "review current changes"}, ""), VerifyOptions{AppID: "cli_test", VerificationToken: "wrong"}); err == nil {
 		t.Fatal("expected wrong token rejection")
 	}
 	raw := cardJSON(t, "continue", "")

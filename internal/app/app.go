@@ -4,27 +4,32 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"time"
 
-	"github.com/sparklyi/codex-feishu-bridge/internal/codexrunner"
+	"github.com/sparklyi/codex-feishu-bridge/internal/appserver"
 	"github.com/sparklyi/codex-feishu-bridge/internal/config"
-	"github.com/sparklyi/codex-feishu-bridge/internal/logs"
+	"github.com/sparklyi/codex-feishu-bridge/internal/contracts"
 	"github.com/sparklyi/codex-feishu-bridge/internal/notifier"
 	"github.com/sparklyi/codex-feishu-bridge/internal/router"
+	"github.com/sparklyi/codex-feishu-bridge/internal/runtime"
 	"github.com/sparklyi/codex-feishu-bridge/internal/store"
 	"github.com/sparklyi/codex-feishu-bridge/internal/transport"
 	"github.com/sparklyi/codex-feishu-bridge/internal/transport/feishu"
 )
 
+type OpenAppServer func(context.Context, appserver.ProcessOptions) (appserver.API, error)
+
 type ServeOptions struct {
-	ConfigPath string
-	Getenv     func(string) string
-	Receiver   transport.Receiver
-	Sender     transport.Sender
-	Runner     router.Runner
-	Now        func() time.Time
+	ConfigPath    string
+	Getenv        func(string) string
+	Receiver      transport.Receiver
+	Sender        transport.Sender
+	AppServer     appserver.API
+	OpenAppServer OpenAppServer
+	Now           func() time.Time
 }
 
 func Serve(ctx context.Context, opts ServeOptions) error {
@@ -44,6 +49,14 @@ func Serve(ctx context.Context, opts ServeOptions) error {
 	if err != nil {
 		return err
 	}
+	for _, diagnostic := range cfg.Validate(getenv, func(path string) error {
+		_, err := os.Stat(path)
+		return err
+	}) {
+		if diagnostic.Level == config.LevelError {
+			return fmt.Errorf("invalid config %s: %s", diagnostic.Code, diagnostic.Message)
+		}
+	}
 	st, err := store.Open(ctx, cfg.Paths.StateDB)
 	if err != nil {
 		return err
@@ -55,10 +68,7 @@ func Serve(ctx context.Context, opts ServeOptions) error {
 	if err := st.RecoverRunning(ctx, now()); err != nil {
 		return err
 	}
-	if err := logs.Prune(cfg.Paths.LogDir, cfg.Codex.LogRetentionDays, now()); err != nil {
-		return err
-	}
-	startPruneLoop(ctx, cfg.Paths.LogDir, cfg.Codex.LogRetentionDays, now)
+
 	receiver := opts.Receiver
 	sender := opts.Sender
 	secret := getenv(cfg.Feishu.AppSecretEnv)
@@ -67,7 +77,13 @@ func Serve(ctx context.Context, opts ServeOptions) error {
 			return errors.New("missing Feishu app secret")
 		}
 		source := feishu.NewSDKEventSource(cfg.Feishu.AppID, secret, "")
-		receiver = feishu.Receiver{Source: source, Verify: feishu.VerifyOptions{AppID: cfg.Feishu.AppID, BotOpenID: cfg.Feishu.BotOpenID}}
+		receiver = feishu.Receiver{
+			Source: source,
+			Verify: feishu.VerifyOptions{AppID: cfg.Feishu.AppID, BotOpenID: cfg.Feishu.BotOpenID},
+			OnHandleError: func(_ context.Context, event contracts.InboundEvent, err error) {
+				slog.Error("Feishu event handling failed", "kind", event.Kind, "action_id", event.ActionID, "error", err)
+			},
+		}
 	}
 	if sender == nil {
 		api := feishu.NewSDKCardAPI(cfg.Feishu.AppID, secret)
@@ -76,12 +92,38 @@ func Serve(ctx context.Context, opts ServeOptions) error {
 			return err
 		}
 	}
-	run := opts.Runner
-	if run == nil {
-		run = &codexrunner.Runner{LogDir: cfg.Paths.LogDir, Now: now}
+
+	api := opts.AppServer
+	if api == nil {
+		open := opts.OpenAppServer
+		if open == nil {
+			open = func(ctx context.Context, processOpts appserver.ProcessOptions) (appserver.API, error) {
+				return appserver.Open(ctx, processOpts)
+			}
+		}
+		api, err = open(ctx, appserver.ProcessOptions{Command: cfg.AppServer.Command, Version: "dev", Timeout: cfg.StartupTimeout()})
+		if err != nil {
+			return err
+		}
 	}
+	defer api.Close()
+
 	notify := notifier.New(sender)
-	rt := router.New(router.RouterOptions{Config: cfg, Store: st, Runner: run, Notifier: notify, Now: now})
+	controller := runtime.New(runtime.ControllerOptions{
+		AppServer: api,
+		Store:     st,
+		Notifier:  notify,
+		Now:       now,
+	})
+	defer controller.Close()
+	probeCtx, cancelProbe := context.WithTimeout(ctx, cfg.StartupTimeout())
+	err = controller.Probe(probeCtx)
+	cancelProbe()
+	if err != nil {
+		return err
+	}
+
+	rt := router.New(router.RouterOptions{Config: cfg, Store: st, Controller: controller, Notifier: notify, Now: now})
 	return receiver.Receive(ctx, rt.Handle)
 }
 
@@ -138,21 +180,6 @@ func openStoreFromConfig(ctx context.Context, configPath string, getenv func(str
 	return store.Open(ctx, cfg.Paths.StateDB)
 }
 
-func startPruneLoop(ctx context.Context, dir string, retentionDays int, now func() time.Time) {
-	go func() {
-		ticker := time.NewTicker(24 * time.Hour)
-		defer ticker.Stop()
-		for {
-			select {
-			case <-ctx.Done():
-				return
-			case <-ticker.C:
-				_ = logs.Prune(dir, retentionDays, now())
-			}
-		}
-	}()
-}
-
 const defaultConfig = `feishu:
   app_id: cli_xxx
   app_secret_env: FEISHU_APP_SECRET
@@ -161,19 +188,14 @@ const defaultConfig = `feishu:
 security:
   allowed_open_ids:
     - ou_xxx
-codex:
+app_server:
   command: codex
   default_model: ""
-  sandbox: workspace-write
-  approval: never
-  extra_args: []
-  log_retention_days: 14
+  startup_timeout_seconds: 15
 workspace:
   default: /path/to/default/repo
 projects:
   backend:
     cwd: /path/to/backend
     model: ""
-    sandbox: workspace-write
-    approval: never
 `

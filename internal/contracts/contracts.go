@@ -33,26 +33,35 @@ const (
 	CardFailure          CardKind = "failure"
 	CardRoutingError     CardKind = "routing_error"
 	CardProjectSelection CardKind = "project_selection"
+	CardThreadSelection  CardKind = "thread_selection"
 	CardRunningConflict  CardKind = "running_conflict"
-	CardMigrationHint    CardKind = "migration_hint"
-	CardShortcutConfirm  CardKind = "shortcut_confirm"
 )
 
 type OutboundMessage struct {
 	ChatID           string
 	ReplyToMessageID string
+	UpdateMessageID  string
 	CardKind         CardKind
 	TaskID           string
 	Status           string
 	Title            string
 	BodyMarkdown     string
 	Fields           []Field
+	Options          []CardOption
 	Actions          []Action
 }
 
 type Field struct {
 	Title string
 	Value string
+}
+
+// CardOption is a selectable, structured row in a card.
+type CardOption struct {
+	Title  string
+	Detail string
+	Meta   string
+	Action Action
 }
 
 type Action struct {
@@ -64,14 +73,4 @@ type Action struct {
 
 type SentMessage struct {
 	MessageID string
-}
-
-type RunResult struct {
-	CodexSessionID string
-	FinalText      string
-	ExitCode       int
-	StderrTail     string
-	LogPath        string
-	StartedAt      time.Time
-	FinishedAt     time.Time
 }

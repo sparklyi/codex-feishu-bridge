@@ -1,27 +1,27 @@
 package config
 
 import (
+	"bytes"
 	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
 	"sort"
+	"time"
 
 	"gopkg.in/yaml.v3"
 )
 
 const (
-	defaultCommand          = "codex"
-	defaultConnection       = "websocket"
-	defaultSandbox          = "workspace-write"
-	defaultApproval         = "never"
-	defaultLogRetentionDays = 14
+	defaultCommand               = "codex"
+	defaultConnection            = "websocket"
+	defaultStartupTimeoutSeconds = 15
 )
 
 type Config struct {
 	Feishu    FeishuConfig             `yaml:"feishu"`
 	Security  SecurityConfig           `yaml:"security"`
-	Codex     CodexConfig              `yaml:"codex"`
+	AppServer AppServerConfig          `yaml:"app_server"`
 	Workspace WorkspaceConfig          `yaml:"workspace"`
 	Projects  map[string]ProjectConfig `yaml:"projects"`
 	Paths     RuntimePaths             `yaml:"paths"`
@@ -38,13 +38,13 @@ type SecurityConfig struct {
 	AllowedOpenIDs []string `yaml:"allowed_open_ids"`
 }
 
-type CodexConfig struct {
-	Command          string   `yaml:"command"`
-	DefaultModel     string   `yaml:"default_model"`
-	Sandbox          string   `yaml:"sandbox"`
-	Approval         string   `yaml:"approval"`
-	ExtraArgs        []string `yaml:"extra_args"`
-	LogRetentionDays int      `yaml:"log_retention_days"`
+// AppServerConfig configures the local Codex app-server daemon. Execution
+// permissions are intentionally not configurable: every bridge turn uses full
+// access with approvalPolicy=never.
+type AppServerConfig struct {
+	Command               string `yaml:"command"`
+	DefaultModel          string `yaml:"default_model"`
+	StartupTimeoutSeconds int    `yaml:"startup_timeout_seconds"`
 }
 
 type WorkspaceConfig struct {
@@ -52,26 +52,18 @@ type WorkspaceConfig struct {
 }
 
 type ProjectConfig struct {
-	CWD      string `yaml:"cwd"`
-	Model    string `yaml:"model"`
-	Sandbox  string `yaml:"sandbox"`
-	Approval string `yaml:"approval"`
+	CWD   string `yaml:"cwd"`
+	Model string `yaml:"model"`
 }
 
 type RuntimePaths struct {
 	StateDB string `yaml:"state_db"`
-	LogDir  string `yaml:"log_dir"`
 }
 
 type ResolvedProject struct {
-	Alias            string
-	Command          string
-	CWD              string
-	Model            string
-	Sandbox          string
-	Approval         string
-	ExtraArgs        []string
-	LogRetentionDays int
+	Alias string
+	CWD   string
+	Model string
 }
 
 type DiagnosticLevel string
@@ -98,7 +90,9 @@ func Load(path string, getenv func(string) string) (Config, error) {
 		return Config{}, err
 	}
 	var cfg Config
-	if err := yaml.Unmarshal(data, &cfg); err != nil {
+	decoder := yaml.NewDecoder(bytes.NewReader(data))
+	decoder.KnownFields(true)
+	if err := decoder.Decode(&cfg); err != nil {
 		return Config{}, err
 	}
 	cfg.applyDefaults(homeDir(getenv))
@@ -132,9 +126,7 @@ func (cfg Config) Validate(getenv func(string) string, stat func(string) error) 
 	for alias, project := range cfg.Projects {
 		if project.CWD == "" {
 			diags = append(diags, Diagnostic{Level: LevelError, Code: "project." + alias + ".cwd", Message: "project cwd is required"})
-			continue
-		}
-		if stat != nil {
+		} else if stat != nil {
 			if err := stat(project.CWD); err != nil {
 				diags = append(diags, Diagnostic{Level: LevelError, Code: "project." + alias + ".cwd", Message: fmt.Sprintf("project cwd is not accessible: %v", err)})
 			} else {
@@ -142,26 +134,15 @@ func (cfg Config) Validate(getenv func(string) string, stat func(string) error) 
 			}
 		}
 	}
-	if cfg.Codex.LogRetentionDays <= 0 {
-		diags = append(diags, Diagnostic{Level: LevelError, Code: "codex.log_retention_days", Message: "log retention days must be positive"})
-	} else {
-		diags = append(diags, Diagnostic{Level: LevelOK, Code: "codex.log_retention_days", Message: "log retention is positive"})
+	if cfg.AppServer.StartupTimeoutSeconds <= 0 {
+		diags = append(diags, Diagnostic{Level: LevelError, Code: "app_server.startup_timeout_seconds", Message: "startup timeout must be positive"})
 	}
 	return diags
 }
 
 func (cfg Config) ResolveProject(alias string) (ResolvedProject, error) {
 	cfg.applyDefaults("")
-	resolved := ResolvedProject{
-		Alias:            alias,
-		Command:          cfg.Codex.Command,
-		CWD:              cfg.Workspace.Default,
-		Model:            cfg.Codex.DefaultModel,
-		Sandbox:          cfg.Codex.Sandbox,
-		Approval:         cfg.Codex.Approval,
-		ExtraArgs:        append([]string(nil), cfg.Codex.ExtraArgs...),
-		LogRetentionDays: cfg.Codex.LogRetentionDays,
-	}
+	resolved := ResolvedProject{Alias: alias, CWD: cfg.Workspace.Default, Model: cfg.AppServer.DefaultModel}
 	if alias == "" {
 		if resolved.CWD == "" {
 			return ResolvedProject{}, errors.New("default workspace is not configured")
@@ -179,13 +160,27 @@ func (cfg Config) ResolveProject(alias string) (ResolvedProject, error) {
 	if project.Model != "" {
 		resolved.Model = project.Model
 	}
-	if project.Sandbox != "" {
-		resolved.Sandbox = project.Sandbox
-	}
-	if project.Approval != "" {
-		resolved.Approval = project.Approval
-	}
 	return resolved, nil
+}
+
+func (cfg Config) ProjectAliasForCWD(cwd string) string {
+	if cwd == "" {
+		return ""
+	}
+	if samePath(cwd, cfg.Workspace.Default) {
+		return ""
+	}
+	for alias, project := range cfg.Projects {
+		if samePath(cwd, project.CWD) {
+			return alias
+		}
+	}
+	return ""
+}
+
+func (cfg Config) StartupTimeout() time.Duration {
+	cfg.applyDefaults("")
+	return time.Duration(cfg.AppServer.StartupTimeoutSeconds) * time.Second
 }
 
 func (cfg Config) ProjectAliases() []string {
@@ -203,29 +198,25 @@ func (cfg *Config) applyDefaults(home string) {
 	if cfg.Feishu.Connection == "" {
 		cfg.Feishu.Connection = defaultConnection
 	}
-	if cfg.Codex.Command == "" {
-		cfg.Codex.Command = defaultCommand
+	if cfg.AppServer.Command == "" {
+		cfg.AppServer.Command = defaultCommand
 	}
-	if cfg.Codex.Sandbox == "" {
-		cfg.Codex.Sandbox = defaultSandbox
-	}
-	if cfg.Codex.Approval == "" {
-		cfg.Codex.Approval = defaultApproval
-	}
-	if cfg.Codex.LogRetentionDays == 0 {
-		cfg.Codex.LogRetentionDays = defaultLogRetentionDays
+	if cfg.AppServer.StartupTimeoutSeconds == 0 {
+		cfg.AppServer.StartupTimeoutSeconds = defaultStartupTimeoutSeconds
 	}
 	if cfg.Projects == nil {
 		cfg.Projects = map[string]ProjectConfig{}
 	}
-	if home != "" {
-		if cfg.Paths.StateDB == "" {
-			cfg.Paths.StateDB = filepath.Join(home, ".codex-feishu-bridge", "state.db")
-		}
-		if cfg.Paths.LogDir == "" {
-			cfg.Paths.LogDir = filepath.Join(home, ".codex-feishu-bridge", "logs")
-		}
+	if home != "" && cfg.Paths.StateDB == "" {
+		cfg.Paths.StateDB = filepath.Join(home, ".codex-feishu-bridge", "state.db")
 	}
+}
+
+func samePath(left, right string) bool {
+	if left == "" || right == "" {
+		return false
+	}
+	return filepath.Clean(left) == filepath.Clean(right)
 }
 
 func homeDir(getenv func(string) string) string {

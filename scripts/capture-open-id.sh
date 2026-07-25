@@ -11,9 +11,9 @@ Options:
   --app-id cli_xxx                 Feishu app id.
   --app-secret-env FEISHU_APP_SECRET
                                    Environment variable that stores app secret.
-  --timeout 120s                   How long to wait for one incoming /codex message.
+  --timeout 120s                   How long to wait for one incoming message.
 
-After the listener starts, send `/codex ping` to the bot in Feishu. The script
+After the listener starts, send any message to the bot in Feishu. The script
 prints the sender open_id, chat id, and chat type. It never prints the app secret.
 USAGE
 }
@@ -97,7 +97,7 @@ func main() {
 	captured := errors.New("captured")
 	source := feishu.NewSDKEventSource(*appID, secret, "")
 	receiver := feishu.Receiver{Source: source, Verify: feishu.VerifyOptions{AppID: *appID}}
-	fmt.Fprintln(os.Stderr, "Waiting for a Feishu message. Send `/codex ping` to the bot now.")
+	fmt.Fprintln(os.Stderr, "Waiting for a Feishu message. Send any message to the bot now.")
 	err := receiver.Receive(ctx, func(ctx context.Context, ev contracts.InboundEvent) error {
 		fmt.Printf("open_id=%s\n", ev.SenderOpenID)
 		fmt.Printf("chat_id=%s\n", ev.ChatID)
@@ -109,7 +109,7 @@ func main() {
 		return
 	}
 	if errors.Is(err, context.DeadlineExceeded) {
-		fmt.Fprintln(os.Stderr, "timed out waiting for /codex message")
+		fmt.Fprintln(os.Stderr, "timed out waiting for a message")
 		os.Exit(1)
 	}
 	if err != nil {

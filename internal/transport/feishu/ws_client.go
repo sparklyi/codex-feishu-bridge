@@ -31,8 +31,8 @@ const (
 )
 
 // feishuWSClient owns the parts of the Feishu long connection that the SDK
-// leaves server-configurable. In particular, it keeps a short heartbeat so an
-// HTTP proxy cannot expire an otherwise idle WebSocket tunnel.
+// leaves server-configurable. It keeps a short heartbeat and reconnects on a
+// direct network path when the remote endpoint closes the connection.
 type feishuWSClient struct {
 	appID      string
 	appSecret  string
@@ -81,7 +81,7 @@ func newFeishuWSClient(appID, appSecret string, eventDispatcher *dispatcher.Even
 
 func newFeishuHTTPClient(timeout time.Duration) *http.Client {
 	transport := http.DefaultTransport.(*http.Transport).Clone()
-	transport.Proxy = http.ProxyFromEnvironment
+	transport.Proxy = nil
 	transport.MaxIdleConns = 32
 	transport.MaxIdleConnsPerHost = 8
 	transport.IdleConnTimeout = 30 * time.Second
@@ -91,7 +91,6 @@ func newFeishuHTTPClient(timeout time.Duration) *http.Client {
 func newFeishuWebSocketDialer() *websocket.Dialer {
 	dialer := &net.Dialer{Timeout: feishuBootstrapTimeout, KeepAlive: 20 * time.Second}
 	return &websocket.Dialer{
-		Proxy:            http.ProxyFromEnvironment,
 		HandshakeTimeout: feishuBootstrapTimeout,
 		NetDialContext:   dialer.DialContext,
 	}

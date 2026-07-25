@@ -11,11 +11,8 @@ Usage:
     [--config ~/.codex-feishu-bridge/config.yaml] \
     [--app-secret-env FEISHU_APP_SECRET] \
     [--state-db ~/.codex-feishu-bridge/state.db] \
-    [--log-dir ~/.codex-feishu-bridge/logs] \
     [--project-alias default] \
     [--codex-command codex] \
-    [--sandbox workspace-write] \
-    [--approval never] \
     [--model gpt-5] \
     [--create-workspace] \
     [--force]
@@ -53,11 +50,8 @@ APP_SECRET_ENV="FEISHU_APP_SECRET"
 ALLOWED_OPEN_IDS=()
 WORKSPACE=""
 STATE_DB="${HOME}/.codex-feishu-bridge/state.db"
-LOG_DIR="${HOME}/.codex-feishu-bridge/logs"
 PROJECT_ALIAS="default"
 CODEX_COMMAND="codex"
-SANDBOX="workspace-write"
-APPROVAL="never"
 MODEL=""
 CREATE_WORKSPACE=0
 FORCE=0
@@ -88,24 +82,12 @@ while [[ $# -gt 0 ]]; do
       STATE_DB="$2"
       shift 2
       ;;
-    --log-dir)
-      LOG_DIR="$2"
-      shift 2
-      ;;
     --project-alias)
       PROJECT_ALIAS="$2"
       shift 2
       ;;
     --codex-command)
       CODEX_COMMAND="$2"
-      shift 2
-      ;;
-    --sandbox)
-      SANDBOX="$2"
-      shift 2
-      ;;
-    --approval)
-      APPROVAL="$2"
       shift 2
       ;;
     --model)
@@ -144,19 +126,17 @@ if [[ -z "$WORKSPACE" ]]; then
   echo "--workspace is required" >&2
   exit 2
 fi
-
 CONFIG_PATH="$(expand_path "$CONFIG_PATH")"
 WORKSPACE="$(expand_path "$WORKSPACE")"
 STATE_DB="$(expand_path "$STATE_DB")"
-LOG_DIR="$(expand_path "$LOG_DIR")"
 
 if [[ -e "$CONFIG_PATH" && "$FORCE" -ne 1 ]]; then
   echo "config already exists: $CONFIG_PATH (use --force to overwrite)" >&2
   exit 1
 fi
 
-mkdir -p "$(dirname "$CONFIG_PATH")" "$(dirname "$STATE_DB")" "$LOG_DIR"
-chmod 700 "$(dirname "$CONFIG_PATH")" "$(dirname "$STATE_DB")" "$LOG_DIR"
+mkdir -p "$(dirname "$CONFIG_PATH")" "$(dirname "$STATE_DB")"
+chmod 700 "$(dirname "$CONFIG_PATH")" "$(dirname "$STATE_DB")"
 if [[ "$CREATE_WORKSPACE" -eq 1 ]]; then
   mkdir -p "$WORKSPACE"
 fi
@@ -173,25 +153,18 @@ chmod 600 "$tmp"
   for open_id in "${ALLOWED_OPEN_IDS[@]}"; do
     printf '    - %s\n' "$(yaml_quote "$open_id")"
   done
-  printf 'codex:\n'
+  printf 'app_server:\n'
   printf '  command: %s\n' "$(yaml_quote "$CODEX_COMMAND")"
   printf '  default_model: %s\n' "$(yaml_quote "$MODEL")"
-  printf '  sandbox: %s\n' "$(yaml_quote "$SANDBOX")"
-  printf '  approval: %s\n' "$(yaml_quote "$APPROVAL")"
-  printf '  extra_args:\n'
-  printf '    - --skip-git-repo-check\n'
-  printf '  log_retention_days: 14\n'
+  printf '  startup_timeout_seconds: 15\n'
   printf 'workspace:\n'
   printf '  default: %s\n' "$(yaml_quote "$WORKSPACE")"
   printf 'paths:\n'
   printf '  state_db: %s\n' "$(yaml_quote "$STATE_DB")"
-  printf '  log_dir: %s\n' "$(yaml_quote "$LOG_DIR")"
   printf 'projects:\n'
   printf '  %s:\n' "$PROJECT_ALIAS"
   printf '    cwd: %s\n' "$(yaml_quote "$WORKSPACE")"
   printf '    model: %s\n' "$(yaml_quote "$MODEL")"
-  printf '    sandbox: %s\n' "$(yaml_quote "$SANDBOX")"
-  printf '    approval: %s\n' "$(yaml_quote "$APPROVAL")"
 } >"$tmp"
 mv "$tmp" "$CONFIG_PATH"
 chmod 600 "$CONFIG_PATH"

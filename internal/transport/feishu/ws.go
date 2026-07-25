@@ -28,6 +28,7 @@ const (
 	wsBootstrapTimeout = 8 * time.Second
 	sdkReconnectDelay  = 1
 	sdkReconnectNonce  = 0
+	sdkPingInterval    = 20
 )
 
 var sdkHTTPTimeoutOnce sync.Once
@@ -159,6 +160,7 @@ func tuneWSBootstrapConfig(payload []byte) ([]byte, bool) {
 	}
 	config["ReconnectInterval"] = json.RawMessage(strconv.Itoa(sdkReconnectDelay))
 	config["ReconnectNonce"] = json.RawMessage(strconv.Itoa(sdkReconnectNonce))
+	config["PingInterval"] = json.RawMessage(strconv.Itoa(sdkPingInterval))
 	tunedConfig, err := json.Marshal(config)
 	if err != nil {
 		return payload, false

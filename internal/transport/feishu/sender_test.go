@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"io"
 	"testing"
 	"time"
 
@@ -264,6 +265,23 @@ func TestSenderRetriesTemporaryNetworkErrors(t *testing.T) {
 	api := &fakeCardAPI{
 		results: []sendResult{
 			{err: temporarySendError{}},
+			{messageID: "msg_1"},
+		},
+	}
+	s := &Sender{API: api, MaxRetries: 1, Sleep: func(ctx context.Context, d time.Duration) error { return nil }}
+	sent, err := s.Send(context.Background(), contracts.OutboundMessage{ChatID: "chat", CardKind: contracts.CardStart, TaskID: "cx", Title: "title", BodyMarkdown: "body"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if sent.MessageID != "msg_1" || api.calls != 2 {
+		t.Fatalf("unexpected send result: sent=%+v calls=%d", sent, api.calls)
+	}
+}
+
+func TestSenderRetriesUnexpectedEOF(t *testing.T) {
+	api := &fakeCardAPI{
+		results: []sendResult{
+			{err: io.ErrUnexpectedEOF},
 			{messageID: "msg_1"},
 		},
 	}

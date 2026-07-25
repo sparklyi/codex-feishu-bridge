@@ -47,12 +47,21 @@ type OutboundMessage struct {
 	Title            string
 	BodyMarkdown     string
 	Fields           []Field
+	Options          []CardOption
 	Actions          []Action
 }
 
 type Field struct {
 	Title string
 	Value string
+}
+
+// CardOption is a selectable, structured row in a card.
+type CardOption struct {
+	Title  string
+	Detail string
+	Meta   string
+	Action Action
 }
 
 type Action struct {

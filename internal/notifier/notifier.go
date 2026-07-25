@@ -94,16 +94,23 @@ func (n *Notifier) ThreadSelection(ctx context.Context, in ThreadSelectionInput)
 			BodyMarkdown:     "本机 Codex 暂未发现可用会话。",
 		})
 	}
-	actions := make([]contracts.Action, 0, len(in.Threads))
-	lines := make([]string, 0, len(in.Threads)+1)
-	lines = append(lines, "选择一个本机 Codex 会话以从飞书继续处理。")
+	options := make([]contracts.CardOption, 0, len(in.Threads))
 	for index, thread := range in.Threads {
 		label := threadLabel(thread, index)
-		lines = append(lines, "**"+label+"**\n"+redact.FeishuText(thread.Preview, 180))
-		actions = append(actions, contracts.Action{
-			ID:    "attach_thread",
-			Label: label,
-			Value: map[string]string{"action": "attach_thread", "thread_id": thread.ID},
+		meta := ""
+		if thread.Status != "" {
+			meta = "状态：" + localizedStatus(thread.Status)
+		}
+		options = append(options, contracts.CardOption{
+			Title:  label,
+			Detail: redact.FeishuText(thread.Preview, 180),
+			Meta:   meta,
+			Action: contracts.Action{
+				ID:    "attach_thread",
+				Label: "接管",
+				Style: "primary",
+				Value: map[string]string{"action": "attach_thread", "thread_id": thread.ID},
+			},
 		})
 	}
 	return n.sender.Send(ctx, contracts.OutboundMessage{
@@ -112,8 +119,8 @@ func (n *Notifier) ThreadSelection(ctx context.Context, in ThreadSelectionInput)
 		CardKind:         contracts.CardThreadSelection,
 		Status:           "select_thread",
 		Title:            "接管 Codex 会话",
-		BodyMarkdown:     redact.FeishuText(strings.Join(lines, "\n\n"), successBodyLimit),
-		Actions:          actions,
+		BodyMarkdown:     "选择一个本机 Codex 会话以从飞书继续处理。",
+		Options:          options,
 	})
 }
 
@@ -130,12 +137,16 @@ func (n *Notifier) RoutingError(ctx context.Context, chatID, replyToMessageID st
 
 func (n *Notifier) ProjectSelection(ctx context.Context, in ProjectSelectionInput) (contracts.SentMessage, error) {
 	body := "任务：" + redact.FeishuText(in.Prompt, 500)
-	actions := make([]contracts.Action, 0, len(in.ProjectAliases))
+	options := make([]contracts.CardOption, 0, len(in.ProjectAliases))
 	for _, alias := range in.ProjectAliases {
-		actions = append(actions, contracts.Action{
-			ID:    "project_select",
-			Label: alias,
-			Value: map[string]string{"action": "select_project", "pending_id": in.PendingID, "project": alias},
+		options = append(options, contracts.CardOption{
+			Title: alias,
+			Action: contracts.Action{
+				ID:    "project_select",
+				Label: "选择",
+				Style: "primary",
+				Value: map[string]string{"action": "select_project", "pending_id": in.PendingID, "project": alias},
+			},
 		})
 	}
 	return n.sender.Send(ctx, contracts.OutboundMessage{
@@ -145,7 +156,7 @@ func (n *Notifier) ProjectSelection(ctx context.Context, in ProjectSelectionInpu
 		Status:           "project_selection",
 		Title:            "选择项目",
 		BodyMarkdown:     body,
-		Actions:          actions,
+		Options:          options,
 	})
 }
 

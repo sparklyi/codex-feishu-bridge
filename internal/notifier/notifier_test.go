@@ -46,7 +46,7 @@ func TestThreadSelectionCard(t *testing.T) {
 		t.Fatal(err)
 	}
 	threadCard := sender.messages[0]
-	if threadCard.CardKind != contracts.CardThreadSelection || !hasAction(threadCard, "attach_thread") || strings.Contains(threadCard.BodyMarkdown, "thread-secret") {
+	if threadCard.CardKind != contracts.CardThreadSelection || !hasOptionAction(threadCard, "attach_thread") || strings.Contains(threadCard.BodyMarkdown, "thread-secret") {
 		t.Fatalf("unexpected thread card: %+v", threadCard)
 	}
 }
@@ -57,7 +57,7 @@ func TestProjectAndErrorCards(t *testing.T) {
 	if _, err := n.ProjectSelection(context.Background(), ProjectSelectionInput{ChatID: "chat", PendingID: "pending", Prompt: "fix", ProjectAliases: []string{"backend"}}); err != nil {
 		t.Fatal(err)
 	}
-	if sender.messages[0].CardKind != contracts.CardProjectSelection || actionValue(sender.messages[0], "project_select", "project") != "backend" {
+	if sender.messages[0].CardKind != contracts.CardProjectSelection || optionActionValue(sender.messages[0], "project_select", "project") != "backend" {
 		t.Fatalf("unexpected project card: %+v", sender.messages[0])
 	}
 	if err := n.Rejection(context.Background(), "chat", "input", "bad request"); err != nil {
@@ -95,10 +95,19 @@ func hasAction(message contracts.OutboundMessage, id string) bool {
 	return false
 }
 
-func actionValue(message contracts.OutboundMessage, id, key string) string {
-	for _, action := range message.Actions {
-		if action.ID == id {
-			return action.Value[key]
+func hasOptionAction(message contracts.OutboundMessage, id string) bool {
+	for _, option := range message.Options {
+		if option.Action.ID == id {
+			return true
+		}
+	}
+	return false
+}
+
+func optionActionValue(message contracts.OutboundMessage, id, key string) string {
+	for _, option := range message.Options {
+		if option.Action.ID == id {
+			return option.Action.Value[key]
 		}
 	}
 	return ""

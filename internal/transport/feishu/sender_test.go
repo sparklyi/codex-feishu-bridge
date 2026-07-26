@@ -270,29 +270,6 @@ func TestBuildInteractiveCardWithActionValues(t *testing.T) {
 	if header["template"] == nil {
 		t.Fatalf("missing header template: %s", string(card))
 	}
-	visit(value)
-	return found
-}
-
-func callbackValue(t *testing.T, button map[string]any, card []byte) map[string]any {
-	t.Helper()
-	behaviors, ok := button["behaviors"].([]any)
-	if !ok {
-		t.Fatalf("button has no V2 callback behavior: %s", string(card))
-	}
-	for _, rawBehavior := range behaviors {
-		behavior, ok := rawBehavior.(map[string]any)
-		if !ok || behavior["type"] != "callback" {
-			continue
-		}
-		value, ok := behavior["value"].(map[string]any)
-		if !ok {
-			t.Fatalf("callback behavior has no value: %s", string(card))
-		}
-		return value
-	}
-	t.Fatalf("button has no callback behavior: %s", string(card))
-	return nil
 }
 
 func TestSenderRateLimitRetryAndMessageID(t *testing.T) {

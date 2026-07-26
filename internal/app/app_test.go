@@ -70,7 +70,7 @@ func TestServeRecoversStaleRunAndInitConfigUsesAppServer(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer st.Close()
+	defer func() { _ = st.Close() }()
 	task, _, err := st.GetTask(context.Background(), "stale-task")
 	if err != nil || task.Status != "failed" {
 		t.Fatalf("stale task not recovered: %+v err=%v", task, err)
@@ -85,6 +85,45 @@ func TestServeRecoversStaleRunAndInitConfigUsesAppServer(t *testing.T) {
 	}
 	if !strings.Contains(string(data), "app_server:") || !strings.Contains(string(data), "startup_timeout_seconds: 15") || strings.Contains(string(data), "approval:") || strings.Contains(string(data), "sandbox:") || strings.Contains(string(data), "bot_open_id:") || strings.Contains(string(data), "connection:") || strings.Contains(string(data), "projects:") {
 		t.Fatalf("unexpected generated config:\n%s", data)
+	}
+}
+
+func TestServeClosesDependenciesWhenContextIsCanceled(t *testing.T) {
+	dir := t.TempDir()
+	workspace := filepath.Join(dir, "workspace")
+	if err := os.MkdirAll(workspace, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	receiver := &blockingReceiver{started: make(chan struct{})}
+	api := &fakeAppServer{threads: []appserver.Thread{{ID: "desktop", CWD: workspace}}}
+	done := make(chan error, 1)
+	go func() {
+		done <- Serve(ctx, ServeOptions{
+			ConfigPath: writeAppConfig(t, dir, workspace),
+			Getenv:     appEnv(dir),
+			Receiver:   receiver,
+			Sender:     &fakeSender{},
+			AppServer:  api,
+		})
+	}()
+	select {
+	case <-receiver.started:
+	case <-time.After(time.Second):
+		t.Fatal("serve did not reach the receiver")
+	}
+	cancel()
+	select {
+	case err := <-done:
+		if !errors.Is(err, context.Canceled) {
+			t.Fatalf("serve error = %v, want context canceled", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("serve did not return after cancellation")
+	}
+	if !api.closed {
+		t.Fatal("app server was not closed after cancellation")
 	}
 }
 
@@ -127,6 +166,16 @@ type fakeReceiver struct{ calls int }
 func (f *fakeReceiver) Receive(_ context.Context, _ func(context.Context, contracts.InboundEvent) error) error {
 	f.calls++
 	return nil
+}
+
+type blockingReceiver struct {
+	started chan struct{}
+}
+
+func (r *blockingReceiver) Receive(ctx context.Context, _ func(context.Context, contracts.InboundEvent) error) error {
+	close(r.started)
+	<-ctx.Done()
+	return ctx.Err()
 }
 
 type fakeSender struct{}

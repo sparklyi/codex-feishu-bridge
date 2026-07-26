@@ -3,10 +3,10 @@ package intent
 type Kind string
 
 const (
-	KindIgnored          Kind = "ignored"
-	KindStartTask        Kind = "start_task"
-	KindUnknownProject   Kind = "unknown_project"
-	KindThreadSelection  Kind = "thread_selection"
+	KindIgnored         Kind = "ignored"
+	KindStartTask       Kind = "start_task"
+	KindUnknownProject  Kind = "unknown_project"
+	KindThreadSelection Kind = "thread_selection"
 )
 
 type ParseInput struct {

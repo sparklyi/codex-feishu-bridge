@@ -23,7 +23,6 @@ type TaskStore interface {
 	AttachThread(ctx context.Context, dedupKey, source string, in store.AttachThreadInput) (store.Task, bool, error)
 	AdmitResumeRun(ctx context.Context, dedupKey, source string, in store.ResumeRunInput) (store.AdmitResult, error)
 	FinishRun(ctx context.Context, dedupKey string, in store.FinishRunInput) error
-	FailDedup(ctx context.Context, dedupKey string, err error) error
 	UserEnabled(ctx context.Context, openID string) (bool, error)
 	InsertMessageRoute(ctx context.Context, messageID, taskID, routeType string) error
 	SetTaskRootMessageID(ctx context.Context, taskID, messageID string, now time.Time) error
@@ -47,23 +46,23 @@ type Notifier interface {
 }
 
 type RouterOptions struct {
-	Config       config.Config
-	Store        TaskStore
-	Controller   Controller
-	Notifier     Notifier
-	Now          func() time.Time
-	NewTaskID    func() string
-	NewRunID     func() string
+	Config     config.Config
+	Store      TaskStore
+	Controller Controller
+	Notifier   Notifier
+	Now        func() time.Time
+	NewTaskID  func() string
+	NewRunID   func() string
 }
 
 type Router struct {
-	cfg          config.Config
-	store        TaskStore
-	controller   Controller
-	notifier     Notifier
-	now          func() time.Time
-	newTaskID    func() string
-	newRunID     func() string
+	cfg        config.Config
+	store      TaskStore
+	controller Controller
+	notifier   Notifier
+	now        func() time.Time
+	newTaskID  func() string
+	newRunID   func() string
 }
 
 func New(opts RouterOptions) *Router {
@@ -80,13 +79,13 @@ func New(opts RouterOptions) *Router {
 		newRunID = func() string { return randomID("run") }
 	}
 	return &Router{
-		cfg:          opts.Config,
-		store:        opts.Store,
-		controller:   opts.Controller,
-		notifier:     opts.Notifier,
-		now:          now,
-		newTaskID:    newTaskID,
-		newRunID:     newRunID,
+		cfg:        opts.Config,
+		store:      opts.Store,
+		controller: opts.Controller,
+		notifier:   opts.Notifier,
+		now:        now,
+		newTaskID:  newTaskID,
+		newRunID:   newRunID,
 	}
 }
 
@@ -94,7 +93,11 @@ func (r *Router) Handle(ctx context.Context, ev contracts.InboundEvent) error {
 	if ev.ChatType != "private" {
 		return nil
 	}
-	if !r.authorized(ctx, ev.SenderOpenID) {
+	authorized, err := r.authorized(ctx, ev.SenderOpenID)
+	if err != nil {
+		return fmt.Errorf("authorize Feishu user: %w", err)
+	}
+	if !authorized {
 		return r.notifier.Rejection(ctx, ev.ChatID, ev.MessageID, "当前用户未获授权使用 Codex Bridge。")
 	}
 	switch ev.Kind {
@@ -226,21 +229,18 @@ func (r *Router) startTask(ctx context.Context, ev contracts.InboundEvent, alias
 		Body:         "正在创建 Codex 会话。",
 	})
 	if err != nil {
-		r.failQueuedRun(ctx, admit.Task, admit.Run, ev.DedupKey, err)
-		return err
+		return r.failQueuedRun(admit.Task, admit.Run, ev.DedupKey, err)
 	}
 	if err := r.store.SetTaskRootMessageID(ctx, admit.Task.ID, sent.MessageID, r.now()); err != nil {
-		r.failQueuedRun(ctx, admit.Task, admit.Run, ev.DedupKey, err)
-		return err
+		return r.failQueuedRun(admit.Task, admit.Run, ev.DedupKey, err)
 	}
 	if err := r.insertRouteWithRetry(ctx, sent.MessageID, admit.Task.ID, "start_card"); err != nil {
-		r.failQueuedRun(ctx, admit.Task, admit.Run, ev.DedupKey, err)
-		return err
+		return r.failQueuedRun(admit.Task, admit.Run, ev.DedupKey, err)
 	}
 	if err := r.controller.Enqueue(ctx, runtime.StartInput{Task: admit.Task, Run: admit.Run, Project: project, CardMessageID: sent.MessageID, DedupKey: ev.DedupKey}); err != nil {
-		r.failQueuedRun(ctx, admit.Task, admit.Run, ev.DedupKey, err)
-		_, _ = r.notifier.Failure(ctx, taskCard(admit.Task, "failed", err.Error(), sent.MessageID))
-		return err
+		finishErr := r.failQueuedRun(admit.Task, admit.Run, ev.DedupKey, err)
+		_, notifyErr := r.notifier.Failure(ctx, taskCard(admit.Task, "failed", err.Error(), sent.MessageID))
+		return errors.Join(finishErr, notifyErr)
 	}
 	return nil
 }
@@ -279,28 +279,26 @@ func (r *Router) resumeTask(ctx context.Context, ev contracts.InboundEvent, text
 	}
 	project, err := r.cfg.ResolveProject(admit.Task.ProjectAlias)
 	if err != nil {
-		r.failQueuedRun(ctx, admit.Task, admit.Run, ev.DedupKey, err)
-		return r.notifier.Rejection(ctx, ev.ChatID, ev.MessageID, "项目配置错误："+err.Error())
+		finishErr := r.failQueuedRun(admit.Task, admit.Run, ev.DedupKey, err)
+		return errors.Join(finishErr, r.notifier.Rejection(ctx, ev.ChatID, ev.MessageID, "项目配置错误："+err.Error()))
 	}
 	project.CWD = admit.Task.CWD
 	cardID := admit.Task.RootMessageID
 	if cardID == "" {
 		sent, sendErr := r.notifier.Start(ctx, taskCard(admit.Task, "queued", "正在恢复 Codex 会话。", ""))
 		if sendErr != nil {
-			r.failQueuedRun(ctx, admit.Task, admit.Run, ev.DedupKey, sendErr)
-			return sendErr
+			return r.failQueuedRun(admit.Task, admit.Run, ev.DedupKey, sendErr)
 		}
 		cardID = sent.MessageID
 		if err := r.store.SetTaskRootMessageID(ctx, admit.Task.ID, cardID, r.now()); err != nil {
-			return err
+			return r.failQueuedRun(admit.Task, admit.Run, ev.DedupKey, err)
 		}
 		if err := r.insertRouteWithRetry(ctx, cardID, admit.Task.ID, "start_card"); err != nil {
-			return err
+			return r.failQueuedRun(admit.Task, admit.Run, ev.DedupKey, err)
 		}
 	}
 	if err := r.controller.Enqueue(ctx, runtime.StartInput{Task: admit.Task, Run: admit.Run, Project: project, CardMessageID: cardID, DedupKey: ev.DedupKey}); err != nil {
-		r.failQueuedRun(ctx, admit.Task, admit.Run, ev.DedupKey, err)
-		return err
+		return r.failQueuedRun(admit.Task, admit.Run, ev.DedupKey, err)
 	}
 	return nil
 }
@@ -347,18 +345,23 @@ func (r *Router) resolveContinuationTask(ctx context.Context, ev contracts.Inbou
 	return task, nil
 }
 
-func (r *Router) failQueuedRun(ctx context.Context, task store.Task, run store.Run, dedupKey string, err error) {
-	if err == nil {
-		return
+func (r *Router) failQueuedRun(task store.Task, run store.Run, dedupKey string, cause error) error {
+	if cause == nil {
+		return nil
 	}
-	_ = r.store.FinishRun(ctx, dedupKey, store.FinishRunInput{
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	defer cancel()
+	if err := r.store.FinishRun(ctx, dedupKey, store.FinishRunInput{
 		RunID:      run.ID,
 		ThreadID:   task.CodexThreadID,
 		Status:     "failed",
 		ExitCode:   -1,
-		FinalText:  err.Error(),
+		FinalText:  cause.Error(),
 		FinishedAt: r.now(),
-	})
+	}); err != nil {
+		return errors.Join(cause, fmt.Errorf("mark queued run failed: %w", err))
+	}
+	return cause
 }
 
 func (r *Router) insertRouteWithRetry(ctx context.Context, messageID, taskID, routeType string) error {
@@ -368,14 +371,11 @@ func (r *Router) insertRouteWithRetry(ctx context.Context, messageID, taskID, ro
 	return nil
 }
 
-func (r *Router) authorized(ctx context.Context, openID string) bool {
-	for _, id := range r.cfg.Security.AllowedOpenIDs {
-		if id == openID {
-			_, _ = r.store.UserEnabled(ctx, openID)
-			return true
-		}
+func (r *Router) authorized(ctx context.Context, openID string) (bool, error) {
+	if openID == "" {
+		return false, nil
 	}
-	return false
+	return r.store.UserEnabled(ctx, openID)
 }
 
 func taskCard(task store.Task, status, body, updateMessageID string) notifier.TaskCardInput {

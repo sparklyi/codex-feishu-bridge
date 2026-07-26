@@ -7,6 +7,7 @@ import (
 	"log/slog"
 	"net/url"
 	"sync"
+	"time"
 
 	"github.com/larksuite/oapi-sdk-go/v3/event/dispatcher"
 	"github.com/larksuite/oapi-sdk-go/v3/event/dispatcher/callback"
@@ -17,7 +18,10 @@ import (
 const (
 	RawEventMessage    = "message"
 	RawEventCardAction = "card_action"
+	sourceCloseTimeout = 5 * time.Second
 )
+
+var errMessageQueueFull = errors.New("feishu message queue is full")
 
 type RawEvent struct {
 	Kind string
@@ -34,23 +38,29 @@ type SDKEventSource struct {
 	client      *feishuWSClient
 	events      chan sourceEvent
 	cardActions chan sourceEvent
+	failures    chan error
 	startOnce   sync.Once
+	mu          sync.Mutex
+	done        chan struct{}
 }
 
 type sourceEvent struct {
 	raw RawEvent
-	err error
 }
 
 func NewSDKEventSource(appID, appSecret string, proxyURL *url.URL) *SDKEventSource {
 	source := &SDKEventSource{
 		events:      make(chan sourceEvent, 64),
 		cardActions: make(chan sourceEvent, 64),
+		failures:    make(chan error, 1),
 	}
 	eventDispatcher := dispatcher.NewEventDispatcher("", "")
 	eventDispatcher.OnP2MessageReceiveV1(func(ctx context.Context, event *larkim.P2MessageReceiveV1) error {
 		slog.Info("Feishu message received")
-		source.publish(ctx, RawEvent{Kind: RawEventMessage, Data: mustMarshal(event)})
+		if !source.tryPublishMessage(ctx, RawEvent{Kind: RawEventMessage, Data: mustMarshal(event)}) {
+			slog.Warn("Feishu message rejected because the event queue is full")
+			return errMessageQueueFull
+		}
 		return nil
 	})
 	eventDispatcher.OnP2CardActionTrigger(func(ctx context.Context, event *callback.CardActionTriggerEvent) (*callback.CardActionTriggerResponse, error) {
@@ -70,9 +80,14 @@ func (s *SDKEventSource) Connect(ctx context.Context) error {
 		return errors.New("feishu websocket client is nil")
 	}
 	s.startOnce.Do(func() {
+		done := make(chan struct{})
+		s.mu.Lock()
+		s.done = done
+		s.mu.Unlock()
 		go func() {
+			defer close(done)
 			if err := s.client.Start(ctx); err != nil && !errors.Is(err, context.Canceled) {
-				s.publish(ctx, RawEvent{}, err)
+				s.publishFailure(ctx, err)
 			}
 		}()
 	})
@@ -83,50 +98,75 @@ func (s *SDKEventSource) Receive(ctx context.Context) (RawEvent, error) {
 	if s.cardActions != nil {
 		select {
 		case ev := <-s.cardActions:
-			return ev.raw, ev.err
+			return ev.raw, nil
 		default:
 		}
 	}
 	select {
 	case <-ctx.Done():
 		return RawEvent{}, ctx.Err()
+	case err := <-s.failures:
+		return RawEvent{}, err
 	case ev := <-s.cardActions:
-		return ev.raw, ev.err
+		return ev.raw, nil
 	case ev := <-s.events:
-		return ev.raw, ev.err
+		return ev.raw, nil
 	}
 }
 
 func (s *SDKEventSource) Close() error {
-	if s.client != nil {
-		return s.client.Close()
+	if s.client == nil {
+		return nil
 	}
-	return nil
+	closeErr := s.client.Close()
+	s.mu.Lock()
+	done := s.done
+	s.mu.Unlock()
+	if done == nil {
+		return closeErr
+	}
+	timer := time.NewTimer(sourceCloseTimeout)
+	defer timer.Stop()
+	select {
+	case <-done:
+		return closeErr
+	case <-timer.C:
+		return errors.Join(closeErr, errors.New("feishu event source did not stop before timeout"))
+	}
 }
 
-func (s *SDKEventSource) publish(ctx context.Context, raw RawEvent, errs ...error) {
-	var err error
-	if len(errs) > 0 {
-		err = errs[0]
+func (s *SDKEventSource) tryPublishMessage(ctx context.Context, raw RawEvent) bool {
+	if s.events == nil {
+		return false
 	}
 	select {
 	case <-ctx.Done():
-	case s.events <- sourceEvent{raw: raw, err: err}:
+		return false
+	case s.events <- sourceEvent{raw: raw}:
+		return true
+	default:
+		return false
 	}
 }
 
-func (s *SDKEventSource) tryPublishCardAction(ctx context.Context, raw RawEvent, errs ...error) bool {
+func (s *SDKEventSource) publishFailure(ctx context.Context, err error) {
+	if err == nil || s.failures == nil {
+		return
+	}
+	select {
+	case <-ctx.Done():
+	case s.failures <- err:
+	}
+}
+
+func (s *SDKEventSource) tryPublishCardAction(ctx context.Context, raw RawEvent) bool {
 	if s.cardActions == nil {
 		return false
 	}
-	var err error
-	if len(errs) > 0 {
-		err = errs[0]
-	}
 	select {
 	case <-ctx.Done():
 		return false
-	case s.cardActions <- sourceEvent{raw: raw, err: err}:
+	case s.cardActions <- sourceEvent{raw: raw}:
 		return true
 	default:
 		return false
@@ -147,7 +187,11 @@ func (r Receiver) Receive(ctx context.Context, handle func(context.Context, cont
 	if r.Source == nil {
 		return errors.New("feishu event source is nil")
 	}
-	defer r.Source.Close()
+	defer func() {
+		if err := r.Source.Close(); err != nil {
+			slog.Warn("Feishu event source close failed", "error", err)
+		}
+	}()
 	if err := r.Source.Connect(ctx); err != nil {
 		return err
 	}

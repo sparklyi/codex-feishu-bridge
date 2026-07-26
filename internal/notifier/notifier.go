@@ -243,7 +243,7 @@ func threadLabel(thread ThreadOption, index int) string {
 }
 
 func taskTitle(kind contracts.CardKind, status, taskID string) string {
-	prefix := "任务状态"
+	var prefix string
 	switch {
 	case kind == contracts.CardSuccess:
 		prefix = "任务已完成"

@@ -40,7 +40,7 @@ func TestCheckProbesManagedAppServerAndSQLite(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer db.Close()
+	defer func() { _ = db.Close() }()
 	var name string
 	if err := db.QueryRow(`SELECT name FROM sqlite_master WHERE type='table' AND name='tasks'`).Scan(&name); err != nil {
 		t.Fatalf("doctor did not run migrations: %v", err)

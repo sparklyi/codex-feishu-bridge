@@ -5,6 +5,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"os"
 	"os/exec"
 	"sync"
 	"time"
@@ -47,11 +48,17 @@ func Open(ctx context.Context, opts ProcessOptions) (*Client, error) {
 	closeProcess := func() error {
 		var waitErr error
 		waitOnce.Do(func() {
-			_ = stdin.Close()
+			killed := false
 			if cmd.Process != nil {
-				_ = cmd.Process.Kill()
+				if err := cmd.Process.Kill(); err == nil {
+					killed = true
+				} else if !errors.Is(err, os.ErrProcessDone) {
+					waitErr = err
+				}
 			}
-			waitErr = cmd.Wait()
+			if err := cmd.Wait(); err != nil && !killed && waitErr == nil {
+				waitErr = err
+			}
 			if waitErr != nil && !errors.Is(waitErr, exec.ErrWaitDelay) {
 				if text := bytes.TrimSpace(stderr.Bytes()); len(text) > 0 {
 					waitErr = fmt.Errorf("%w: %s", waitErr, text)
@@ -65,7 +72,9 @@ func Open(ctx context.Context, opts ProcessOptions) (*Client, error) {
 	initCtx, initCancel := context.WithTimeout(ctx, timeout)
 	defer initCancel()
 	if err := client.Initialize(initCtx, "codex-feishu-bridge", opts.Version); err != nil {
-		_ = client.Close()
+		if closeErr := client.Close(); closeErr != nil {
+			return nil, fmt.Errorf("initialize app-server: %w", errors.Join(err, fmt.Errorf("close app-server: %w", closeErr)))
+		}
 		return nil, fmt.Errorf("initialize app-server: %w", err)
 	}
 	return client, nil
@@ -75,12 +84,16 @@ type ProbeResult struct {
 	ThreadCount int
 }
 
-func Probe(ctx context.Context, opts ProcessOptions) (ProbeResult, error) {
+func Probe(ctx context.Context, opts ProcessOptions) (result ProbeResult, err error) {
 	client, err := Open(ctx, opts)
 	if err != nil {
 		return ProbeResult{}, err
 	}
-	defer client.Close()
+	defer func() {
+		if closeErr := client.Close(); closeErr != nil && err == nil {
+			err = fmt.Errorf("close app-server: %w", closeErr)
+		}
+	}()
 	threads, err := client.ListThreads(ctx, 1)
 	if err != nil {
 		return ProbeResult{}, fmt.Errorf("list desktop threads: %w", err)

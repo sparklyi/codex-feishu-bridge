@@ -37,11 +37,7 @@ func IsTransientError(err error) bool {
 		return true
 	}
 	var netErr net.Error
-	if errors.As(err, &netErr) && (netErr.Timeout() || netErr.Temporary()) {
-		return true
-	}
-	var temporary interface{ Temporary() bool }
-	if errors.As(err, &temporary) && temporary.Temporary() {
+	if errors.As(err, &netErr) && netErr.Timeout() {
 		return true
 	}
 

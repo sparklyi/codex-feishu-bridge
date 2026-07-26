@@ -138,7 +138,7 @@ func TestFeishuWSClientSendsProtocolHeartbeat(t *testing.T) {
 			t.Error(err)
 			return
 		}
-		defer conn.Close()
+		defer func() { _ = conn.Close() }()
 		for i := 0; i < 2; i++ {
 			_, payload, err := conn.ReadMessage()
 			if err != nil {
@@ -199,7 +199,7 @@ func TestFeishuWSClientDispatchesEventAndReplies(t *testing.T) {
 			t.Error(err)
 			return
 		}
-		defer conn.Close()
+		defer func() { _ = conn.Close() }()
 
 		payload, err := json.Marshal(map[string]any{
 			"schema": "2.0",
@@ -278,7 +278,7 @@ func TestFeishuWSClientDispatchesEventAndReplies(t *testing.T) {
 	}
 	select {
 	case event := <-source.events:
-		if event.err != nil || event.raw.Kind != RawEventMessage {
+		if event.raw.Kind != RawEventMessage {
 			t.Fatalf("unexpected dispatched event: %+v", event)
 		}
 	case <-time.After(time.Second):
@@ -301,7 +301,7 @@ func TestFeishuWSClientAcknowledgesCardActions(t *testing.T) {
 			t.Error(err)
 			return
 		}
-		defer conn.Close()
+		defer func() { _ = conn.Close() }()
 
 		payload, err := json.Marshal(map[string]any{
 			"schema": "2.0",
@@ -384,7 +384,7 @@ func TestFeishuWSClientAcknowledgesCardActions(t *testing.T) {
 	}
 	select {
 	case event := <-source.cardActions:
-		if event.err != nil || event.raw.Kind != RawEventCardAction {
+		if event.raw.Kind != RawEventCardAction {
 			t.Fatalf("unexpected card action: %+v", event)
 		}
 	case <-time.After(time.Second):

@@ -26,6 +26,7 @@ const (
 	progressUpdateInterval    = 400 * time.Millisecond
 	progressRetryDelay        = 800 * time.Millisecond
 	notificationTimeout       = 20 * time.Second
+	defaultAppServerTimeout   = 30 * time.Second
 	terminalRetryAttempts     = 3
 	defaultTerminalRetryDelay = time.Second
 )
@@ -42,6 +43,18 @@ type CardNotifier interface {
 	Failure(ctx context.Context, in notifier.TaskCardInput) (contracts.SentMessage, error)
 }
 
+// AppServer is the app-server surface the runtime needs to manage Codex turns.
+type AppServer interface {
+	ListThreads(ctx context.Context, limit int) ([]appserver.Thread, error)
+	StartThread(ctx context.Context, in appserver.ThreadStartInput) (appserver.Thread, error)
+	ResumeThread(ctx context.Context, in appserver.ThreadResumeInput) (appserver.Thread, error)
+	StartTurn(ctx context.Context, in appserver.TurnStartInput) (appserver.Turn, error)
+	Interrupt(ctx context.Context, threadID, turnID string) error
+	Respond(ctx context.Context, id json.RawMessage, result any) error
+	Events() <-chan appserver.Event
+	Requests() <-chan appserver.ServerRequest
+}
+
 type StartInput struct {
 	Task          store.Task
 	Run           store.Run
@@ -51,18 +64,20 @@ type StartInput struct {
 }
 
 type ControllerOptions struct {
-	AppServer          appserver.API
+	AppServer          AppServer
 	Store              TaskStore
 	Notifier           CardNotifier
 	Now                func() time.Time
+	AppServerTimeout   time.Duration
 	TerminalRetryDelay time.Duration
 }
 
 type Controller struct {
-	api                appserver.API
+	api                AppServer
 	store              TaskStore
 	notifier           CardNotifier
 	now                func() time.Time
+	appServerTimeout   time.Duration
 	terminalRetryDelay time.Duration
 
 	ctx    context.Context
@@ -116,12 +131,17 @@ func New(opts ControllerOptions) *Controller {
 	if retryDelay <= 0 {
 		retryDelay = defaultTerminalRetryDelay
 	}
+	appServerTimeout := opts.AppServerTimeout
+	if appServerTimeout <= 0 {
+		appServerTimeout = defaultAppServerTimeout
+	}
 	ctx, cancel := context.WithCancel(context.Background())
 	c := &Controller{
 		api:                opts.AppServer,
 		store:              opts.Store,
 		notifier:           opts.Notifier,
 		now:                now,
+		appServerTimeout:   appServerTimeout,
 		terminalRetryDelay: retryDelay,
 		ctx:                ctx,
 		cancel:             cancel,
@@ -141,7 +161,9 @@ func (c *Controller) Probe(ctx context.Context) error {
 	if c.api == nil {
 		return errors.New("app-server client is nil")
 	}
-	if _, err := c.api.ListThreads(ctx, 1); err != nil {
+	probeCtx, cancel := c.appServerContext(ctx)
+	defer cancel()
+	if _, err := c.api.ListThreads(probeCtx, 1); err != nil {
 		return fmt.Errorf("discover desktop Codex threads: %w", err)
 	}
 	return nil
@@ -151,7 +173,9 @@ func (c *Controller) Threads(ctx context.Context, limit int) ([]appserver.Thread
 	if c.api == nil {
 		return nil, errors.New("app-server client is nil")
 	}
-	threads, err := c.api.ListThreads(ctx, limit)
+	threadsCtx, cancel := c.appServerContext(ctx)
+	defer cancel()
+	threads, err := c.api.ListThreads(threadsCtx, limit)
 	if err != nil {
 		return nil, fmt.Errorf("list desktop Codex threads: %w", err)
 	}
@@ -198,7 +222,7 @@ func (c *Controller) Enqueue(ctx context.Context, input StartInput) error {
 	c.wg.Add(1)
 	c.lifecycleMu.Unlock()
 
-	c.sendProgress(ctx, active, "已接收，正在连接 Codex。", true)
+	c.sendProgress(active, "已接收，正在连接 Codex。", true)
 	go c.launch(active)
 	return nil
 }
@@ -220,15 +244,15 @@ func (c *Controller) Stop(ctx context.Context, taskID string) error {
 		return nil
 	}
 	if turnID == "" {
-		c.sendProgress(ctx, active, "正在停止 Codex。", true)
+		c.sendProgress(active, "正在停止 Codex。", true)
 		return nil
 	}
 	if !active.takeStopRequest() {
 		return nil
 	}
-	c.sendProgress(ctx, active, "正在停止 Codex。", true)
+	c.sendProgress(active, "正在停止 Codex。", true)
 	if !c.start(func() {
-		stopCtx, cancel := c.notificationContext()
+		stopCtx, cancel := c.appServerContext(c.ctx)
 		defer cancel()
 		if err := c.api.Interrupt(stopCtx, threadID, turnID); err != nil {
 			c.finish(active, "failed", -1, "停止 Codex 任务失败："+err.Error())
@@ -264,20 +288,24 @@ func (c *Controller) launch(active *activeRun) {
 		err    error
 	)
 	if active.run.Kind == "new" {
-		thread, err = c.api.StartThread(active.ctx, appserver.ThreadStartInput{
+		startCtx, cancel := c.appServerContext(active.ctx)
+		thread, err = c.api.StartThread(startCtx, appserver.ThreadStartInput{
 			CWD:   active.project.CWD,
 			Model: active.project.Model,
 		})
+		cancel()
 	} else {
 		threadID, _ := active.ids()
 		if threadID == "" {
 			threadID = active.task.CodexThreadID
 		}
-		thread, err = c.api.ResumeThread(active.ctx, appserver.ThreadResumeInput{
+		resumeCtx, cancel := c.appServerContext(active.ctx)
+		thread, err = c.api.ResumeThread(resumeCtx, appserver.ThreadResumeInput{
 			ThreadID: threadID,
 			CWD:      active.task.CWD,
 			Model:    active.project.Model,
 		})
+		cancel()
 	}
 	if err != nil {
 		c.finishFromError(active, err)
@@ -304,14 +332,16 @@ func (c *Controller) launch(active *activeRun) {
 		c.finish(active, "canceled", -1, "已停止。")
 		return
 	}
-	c.sendProgress(c.ctx, active, "Codex 正在处理。", true)
+	c.sendProgress(active, "Codex 正在处理。", true)
 
-	turn, err := c.api.StartTurn(active.ctx, appserver.TurnStartInput{
+	turnCtx, cancel := c.appServerContext(active.ctx)
+	turn, err := c.api.StartTurn(turnCtx, appserver.TurnStartInput{
 		ThreadID: thread.ID,
 		Text:     active.run.Prompt,
 		CWD:      active.task.CWD,
 		Model:    active.project.Model,
 	})
+	cancel()
 	if err != nil {
 		c.finishFromError(active, err)
 		return
@@ -331,7 +361,7 @@ func (c *Controller) launch(active *activeRun) {
 	}
 	active.setState(task, run)
 	if active.takeStopRequest() {
-		stopCtx, cancel := c.notificationContext()
+		stopCtx, cancel := c.appServerContext(c.ctx)
 		err := c.api.Interrupt(stopCtx, thread.ID, turn.ID)
 		cancel()
 		if err != nil {
@@ -388,7 +418,7 @@ func (c *Controller) handleEvent(event appserver.Event) {
 		}
 		if active := c.activeFor(params.ThreadID, params.TurnID); active != nil {
 			active.appendText(params.Delta)
-			c.sendProgress(c.ctx, active, active.progressBody(), false)
+			c.sendProgress(active, active.progressBody(), false)
 		}
 	case "item/completed":
 		var params itemCompletedParams
@@ -421,25 +451,26 @@ func (c *Controller) handleEvent(event appserver.Event) {
 		if body == "" && status == "canceled" {
 			body = "已停止。"
 		}
-		c.finish(active, status, exitCode, body)
+		c.scheduleFinish(active, status, exitCode, body)
 	}
 }
 
 func (c *Controller) handleRequest(request appserver.ServerRequest) {
 	if !isApprovalMethod(request.Method) {
-		_ = c.api.Respond(c.ctx, request.ID, map[string]string{"decision": "decline"})
+		c.respond(request, map[string]string{"decision": "decline"})
 		return
 	}
 	response, err := approvalResponse(request.Method, request.Params, "approved")
 	if err != nil {
-		_ = c.api.Respond(c.ctx, request.ID, declineResponse(request.Method))
+		slog.Warn("Codex approval request could not be decoded; declining", "method", request.Method, "error", err)
+		c.respond(request, declineResponse(request.Method))
 		return
 	}
-	_ = c.api.Respond(c.ctx, request.ID, response)
+	c.respond(request, response)
 }
 
 func (c *Controller) finishFromError(active *activeRun, err error) {
-	if errors.Is(err, context.Canceled) {
+	if errors.Is(err, context.Canceled) || active.stopPending() {
 		c.finish(active, "canceled", -1, "已停止。")
 		return
 	}
@@ -447,11 +478,32 @@ func (c *Controller) finishFromError(active *activeRun, err error) {
 }
 
 func (c *Controller) finish(active *activeRun, status string, exitCode int, body string) {
-	if !active.markTerminal() {
+	if !c.beginFinish(active) {
 		return
+	}
+	c.finalize(active, status, exitCode, body)
+}
+
+func (c *Controller) scheduleFinish(active *activeRun, status string, exitCode int, body string) {
+	if !c.beginFinish(active) {
+		return
+	}
+	if c.start(func() { c.finalize(active, status, exitCode, body) }) {
+		return
+	}
+	c.finalize(active, status, exitCode, body)
+}
+
+func (c *Controller) beginFinish(active *activeRun) bool {
+	if !active.markTerminal() {
+		return false
 	}
 	active.cancel()
 	c.unregister(active)
+	return true
+}
+
+func (c *Controller) finalize(active *activeRun, status string, exitCode int, body string) {
 	threadID, turnID := active.ids()
 	storeCtx, cancelStore := c.notificationContext()
 	if err := c.store.FinishRun(storeCtx, active.dedupKey, store.FinishRunInput{
@@ -495,6 +547,14 @@ func (c *Controller) finish(active *activeRun, status string, exitCode int, body
 		return
 	}
 	c.insertTerminalRoute(active, sent)
+}
+
+func (c *Controller) respond(request appserver.ServerRequest, response any) {
+	respondCtx, cancel := c.appServerContext(c.ctx)
+	defer cancel()
+	if err := c.api.Respond(respondCtx, request.ID, response); err != nil {
+		slog.Error("Codex approval response failed", "method", request.Method, "error", err)
+	}
 }
 
 func (c *Controller) sendTerminal(ctx context.Context, status string, input notifier.TaskCardInput) (contracts.SentMessage, error) {
@@ -566,11 +626,14 @@ func (c *Controller) insertTerminalRoute(active *activeRun, sent contracts.SentM
 		return
 	}
 	routeCtx, cancelRoute := c.notificationContext()
-	_ = c.store.InsertMessageRoute(routeCtx, sent.MessageID, active.taskID(), "result_card")
+	err := c.store.InsertMessageRoute(routeCtx, sent.MessageID, active.taskID(), "result_card")
 	cancelRoute()
+	if err != nil {
+		slog.Error("Feishu result card route could not be persisted", "task_id", active.taskID(), "message_id", sent.MessageID, "error", err)
+	}
 }
 
-func (c *Controller) sendProgress(_ context.Context, active *activeRun, body string, force bool) {
+func (c *Controller) sendProgress(active *activeRun, body string, force bool) {
 	if !active.queueProgress(body, force) {
 		return
 	}
@@ -647,6 +710,10 @@ func (c *Controller) flushProgress(active *activeRun) {
 
 func (c *Controller) notificationContext() (context.Context, context.CancelFunc) {
 	return context.WithTimeout(context.Background(), notificationTimeout)
+}
+
+func (c *Controller) appServerContext(parent context.Context) (context.Context, context.CancelFunc) {
+	return context.WithTimeout(parent, c.appServerTimeout)
 }
 
 func (c *Controller) setThread(active *activeRun, threadID string) {
@@ -788,6 +855,12 @@ func (a *activeRun) takeStopRequest() bool {
 	}
 	a.stopHandled = true
 	return true
+}
+
+func (a *activeRun) stopPending() bool {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	return a.stopRequested
 }
 
 func (a *activeRun) appendText(delta string) {

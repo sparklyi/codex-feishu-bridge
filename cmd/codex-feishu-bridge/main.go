@@ -2,17 +2,22 @@ package main
 
 import (
 	"context"
+	"errors"
 	"flag"
 	"fmt"
 	"io"
 	"os"
+	"os/signal"
+	"syscall"
 
 	"github.com/sparklyi/codex-feishu-bridge/internal/app"
 	"github.com/sparklyi/codex-feishu-bridge/internal/doctor"
 )
 
 func main() {
-	os.Exit(run(context.Background(), os.Args[1:]))
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
+	os.Exit(run(ctx, os.Args[1:]))
 }
 
 func run(ctx context.Context, args []string) int {
@@ -21,7 +26,7 @@ func run(ctx context.Context, args []string) int {
 
 func runWithIO(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 	if len(args) == 0 {
-		fmt.Fprintln(stderr, "usage: codex-feishu-bridge <serve|init-config|doctor|tasks list|tasks show>")
+		_, _ = fmt.Fprintln(stderr, "usage: codex-feishu-bridge <serve|init-config|doctor|tasks list|tasks show>")
 		return 2
 	}
 	switch args[0] {
@@ -33,7 +38,7 @@ func runWithIO(ctx context.Context, args []string, stdout, stderr io.Writer) int
 			return 2
 		}
 		report := doctor.Check(ctx, doctor.Options{ConfigPath: *configPath})
-		fmt.Fprint(stdout, report.Render())
+		_, _ = fmt.Fprint(stdout, report.Render())
 		if report.HasErrors() {
 			return 1
 		}
@@ -47,10 +52,10 @@ func runWithIO(ctx context.Context, args []string, stdout, stderr io.Writer) int
 			return 2
 		}
 		if err := app.InitConfig(*configPath, *force); err != nil {
-			fmt.Fprintln(stderr, err)
+			_, _ = fmt.Fprintln(stderr, err)
 			return 1
 		}
-		fmt.Fprintln(stdout, "config initialized")
+		_, _ = fmt.Fprintln(stdout, "config initialized")
 		return 0
 	case "serve":
 		fs := flag.NewFlagSet(args[0], flag.ContinueOnError)
@@ -59,22 +64,22 @@ func runWithIO(ctx context.Context, args []string, stdout, stderr io.Writer) int
 		if err := fs.Parse(args[1:]); err != nil {
 			return 2
 		}
-		if err := app.Serve(ctx, app.ServeOptions{ConfigPath: *configPath}); err != nil {
-			fmt.Fprintln(stderr, err)
+		if err := app.Serve(ctx, app.ServeOptions{ConfigPath: *configPath}); err != nil && !errors.Is(err, context.Canceled) {
+			_, _ = fmt.Fprintln(stderr, err)
 			return 1
 		}
 		return 0
 	case "tasks":
 		return runTasks(ctx, args[1:], stdout, stderr)
 	default:
-		fmt.Fprintf(stderr, "unknown command %q\n", args[0])
+		_, _ = fmt.Fprintf(stderr, "unknown command %q\n", args[0])
 		return 2
 	}
 }
 
 func runTasks(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 	if len(args) == 0 {
-		fmt.Fprintln(stderr, "usage: codex-feishu-bridge tasks <list|show>")
+		_, _ = fmt.Fprintln(stderr, "usage: codex-feishu-bridge tasks <list|show>")
 		return 2
 	}
 	switch args[0] {
@@ -87,11 +92,11 @@ func runTasks(ctx context.Context, args []string, stdout, stderr io.Writer) int 
 		}
 		tasks, err := app.ListTasks(ctx, *configPath, os.Getenv, 50)
 		if err != nil {
-			fmt.Fprintln(stderr, err)
+			_, _ = fmt.Fprintln(stderr, err)
 			return 1
 		}
 		for _, task := range tasks {
-			fmt.Fprintf(stdout, "%s\t%s\t%s\n", task.ID, task.Status, task.ProjectAlias)
+			_, _ = fmt.Fprintf(stdout, "%s\t%s\t%s\n", task.ID, task.Status, task.ProjectAlias)
 		}
 		return 0
 	case "show":
@@ -103,18 +108,18 @@ func runTasks(ctx context.Context, args []string, stdout, stderr io.Writer) int 
 		}
 		rest := fs.Args()
 		if len(rest) != 1 {
-			fmt.Fprintln(stderr, "usage: codex-feishu-bridge tasks show [--config path] <task_id>")
+			_, _ = fmt.Fprintln(stderr, "usage: codex-feishu-bridge tasks show [--config path] <task_id>")
 			return 2
 		}
 		task, runs, err := app.ShowTask(ctx, *configPath, os.Getenv, rest[0])
 		if err != nil {
-			fmt.Fprintln(stderr, err)
+			_, _ = fmt.Fprintln(stderr, err)
 			return 1
 		}
-		fmt.Fprintf(stdout, "task %s\nstatus %s\nproject %s\ncwd %s\nruns %d\n", task.ID, task.Status, task.ProjectAlias, task.CWD, len(runs))
+		_, _ = fmt.Fprintf(stdout, "task %s\nstatus %s\nproject %s\ncwd %s\nruns %d\n", task.ID, task.Status, task.ProjectAlias, task.CWD, len(runs))
 		return 0
 	default:
-		fmt.Fprintf(stderr, "unknown tasks command %q\n", args[0])
+		_, _ = fmt.Fprintf(stderr, "unknown tasks command %q\n", args[0])
 		return 2
 	}
 }

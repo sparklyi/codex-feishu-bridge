@@ -15,12 +15,12 @@ func TestClientInitializesAndListsThreads(t *testing.T) {
 	serverIn, clientOut := io.Pipe()
 	clientIn, serverOut := io.Pipe()
 	client := NewClient(clientIn, clientOut, func() error { return nil })
-	defer client.Close()
+	defer func() { _ = client.Close() }()
 
 	go func() {
 		reader := bufio.NewScanner(serverIn)
 		writer := bufio.NewWriter(serverOut)
-		defer writer.Flush()
+		defer func() { _ = writer.Flush() }()
 		for reader.Scan() {
 			var message map[string]json.RawMessage
 			if err := json.Unmarshal(reader.Bytes(), &message); err != nil {
@@ -58,13 +58,13 @@ func TestClientRoutesServerRequestAndResponse(t *testing.T) {
 	serverIn, clientOut := io.Pipe()
 	clientIn, serverOut := io.Pipe()
 	client := NewClient(clientIn, clientOut, func() error { return nil })
-	defer client.Close()
+	defer func() { _ = client.Close() }()
 
 	var once sync.Once
 	go func() {
 		reader := bufio.NewScanner(serverIn)
 		writer := bufio.NewWriter(serverOut)
-		defer writer.Flush()
+		defer func() { _ = writer.Flush() }()
 		for reader.Scan() {
 			line := reader.Text()
 			if strings.Contains(line, `"method":"initialized"`) {
@@ -99,6 +99,54 @@ func TestClientRoutesServerRequestAndResponse(t *testing.T) {
 		}
 	case <-ctx.Done():
 		t.Fatal("timed out waiting for server request")
+	}
+}
+
+func TestClientCloseStopsReadLoopAndClosesStreams(t *testing.T) {
+	serverIn, clientOut := io.Pipe()
+	clientIn, serverOut := io.Pipe()
+	t.Cleanup(func() {
+		_ = serverIn.Close()
+		_ = serverOut.Close()
+	})
+	client := NewClient(clientIn, clientOut, func() error { return nil })
+
+	done := make(chan error, 1)
+	go func() { done <- client.Close() }()
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("close client: %v", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("client close did not wait for the reader loop")
+	}
+	if _, ok := <-client.Events(); ok {
+		t.Fatal("events stream remains open after client close")
+	}
+	if _, ok := <-client.Requests(); ok {
+		t.Fatal("requests stream remains open after client close")
+	}
+}
+
+func TestClientWriteFailureShutsDownReadLoop(t *testing.T) {
+	serverIn, clientOut := io.Pipe()
+	clientIn, serverOut := io.Pipe()
+	if err := serverIn.Close(); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = serverOut.Close() })
+	client := NewClient(clientIn, clientOut, func() error { return nil })
+
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	if err := client.Call(ctx, "thread/list", map[string]any{}, nil); err == nil {
+		t.Fatal("call succeeded after the app-server input was closed")
+	}
+	select {
+	case <-client.readDone:
+	case <-time.After(time.Second):
+		t.Fatal("write failure did not stop the reader loop")
 	}
 }
 

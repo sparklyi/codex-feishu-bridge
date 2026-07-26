@@ -19,8 +19,6 @@ const (
 	approvalPolicy    = "never"
 )
 
-var _ API = (*Client)(nil)
-
 type rpcMessage struct {
 	ID     json.RawMessage `json:"id"`
 	Method string          `json:"method"`
@@ -31,8 +29,8 @@ type rpcMessage struct {
 
 // Client owns one initialized JSON-RPC connection to Codex app-server.
 type Client struct {
-	reader io.Reader
-	writer io.Writer
+	reader io.ReadCloser
+	writer io.WriteCloser
 	close  func() error
 
 	writeMu sync.Mutex
@@ -40,15 +38,17 @@ type Client struct {
 	pending map[string]chan rpcMessage
 	nextID  atomic.Int64
 
-	events    chan Event
-	requests  chan ServerRequest
-	done      chan struct{}
-	closeOnce sync.Once
-	errMu     sync.Mutex
-	err       error
+	events        chan Event
+	requests      chan ServerRequest
+	done          chan struct{}
+	readDone      chan struct{}
+	closeOnce     sync.Once
+	errMu         sync.Mutex
+	err           error
+	shutdownError error
 }
 
-func NewClient(reader io.Reader, writer io.Writer, closeFn func() error) *Client {
+func NewClient(reader io.ReadCloser, writer io.WriteCloser, closeFn func() error) *Client {
 	c := &Client{
 		reader:   reader,
 		writer:   writer,
@@ -57,6 +57,7 @@ func NewClient(reader io.Reader, writer io.Writer, closeFn func() error) *Client
 		events:   make(chan Event, 512),
 		requests: make(chan ServerRequest, 64),
 		done:     make(chan struct{}),
+		readDone: make(chan struct{}),
 	}
 	go c.readLoop()
 	return c
@@ -236,18 +237,15 @@ func fullAccessSandboxPolicy() map[string]any {
 }
 
 func (c *Client) Close() error {
-	var closeErr error
-	c.closeOnce.Do(func() {
-		close(c.done)
-		if c.close != nil {
-			closeErr = c.close()
-		}
-		c.failPending(ErrClosed)
-	})
-	return closeErr
+	c.shutdown(ErrClosed)
+	<-c.readDone
+	return c.shutdownErr()
 }
 
 func (c *Client) readLoop() {
+	defer close(c.events)
+	defer close(c.requests)
+	defer close(c.readDone)
 	scanner := bufio.NewScanner(c.reader)
 	scanner.Buffer(make([]byte, 0, 64*1024), 10*1024*1024)
 	for scanner.Scan() {
@@ -272,8 +270,30 @@ func (c *Client) readLoop() {
 	if err == nil {
 		err = io.EOF
 	}
-	c.setCloseErr(err)
-	_ = c.Close()
+	c.shutdown(err)
+}
+
+func (c *Client) shutdown(err error) {
+	c.closeOnce.Do(func() {
+		c.setCloseErr(err)
+		close(c.done)
+		if c.writer != nil {
+			if closeErr := c.writer.Close(); closeErr != nil {
+				c.setShutdownErr(closeErr)
+			}
+		}
+		if c.reader != nil {
+			if closeErr := c.reader.Close(); closeErr != nil {
+				c.setShutdownErr(closeErr)
+			}
+		}
+		if c.close != nil {
+			if closeErr := c.close(); closeErr != nil {
+				c.setShutdownErr(closeErr)
+			}
+		}
+		c.failPending(c.closeErr())
+	})
 }
 
 func (c *Client) writeMessage(message any) error {
@@ -282,16 +302,18 @@ func (c *Client) writeMessage(message any) error {
 		return err
 	}
 	c.writeMu.Lock()
-	defer c.writeMu.Unlock()
 	select {
 	case <-c.done:
+		c.writeMu.Unlock()
 		return c.closeErr()
 	default:
 	}
 	_, err = c.writer.Write(append(data, '\n'))
-	if err != nil {
-		c.setCloseErr(err)
+	c.writeMu.Unlock()
+	if err == nil {
+		return nil
 	}
+	c.shutdown(err)
 	return err
 }
 
@@ -361,6 +383,24 @@ func (c *Client) setCloseErr(err error) {
 		c.err = err
 	}
 	c.errMu.Unlock()
+}
+
+func (c *Client) setShutdownErr(err error) {
+	if err == nil {
+		return
+	}
+	c.errMu.Lock()
+	if c.shutdownError == nil {
+		c.shutdownError = err
+	}
+	c.errMu.Unlock()
+}
+
+func (c *Client) shutdownErr() error {
+	c.errMu.Lock()
+	err := c.shutdownError
+	c.errMu.Unlock()
+	return err
 }
 
 func (c *Client) closeErr() error {

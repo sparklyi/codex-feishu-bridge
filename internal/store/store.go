@@ -403,18 +403,6 @@ UPDATE tasks SET status=?,codex_thread_id=COALESCE(NULLIF(?,''),codex_thread_id)
 	return tx.Commit()
 }
 
-func (s *Store) FailDedup(ctx context.Context, dedupKey string, err error) error {
-	if dedupKey == "" {
-		return nil
-	}
-	message := ""
-	if err != nil {
-		message = err.Error()
-	}
-	_, execErr := s.db.ExecContext(ctx, `UPDATE event_dedup SET state='failed',completed_at=?,last_error=? WHERE dedup_key=?`, formatTime(time.Now().UTC()), message, dedupKey)
-	return execErr
-}
-
 func (s *Store) RefreshUsers(ctx context.Context, allowedOpenIDs []string) error {
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
@@ -492,7 +480,7 @@ func (s *Store) ListTasks(ctx context.Context, limit int) ([]Task, error) {
 	if err != nil {
 		return nil, err
 	}
-	defer rows.Close()
+	defer func() { _ = rows.Close() }()
 	tasks := make([]Task, 0)
 	for rows.Next() {
 		task, err := scanTask(rows)
@@ -513,7 +501,7 @@ func (s *Store) GetTask(ctx context.Context, taskID string) (Task, []Run, error)
 	if err != nil {
 		return Task{}, nil, err
 	}
-	defer rows.Close()
+	defer func() { _ = rows.Close() }()
 	runs := make([]Run, 0)
 	for rows.Next() {
 		run, err := scanRun(rows)

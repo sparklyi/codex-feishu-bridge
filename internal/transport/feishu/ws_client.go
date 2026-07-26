@@ -29,7 +29,34 @@ const (
 	feishuReconnectDelay    = time.Second
 	feishuWriteTimeout      = 5 * time.Second
 	fragmentTTL             = 5 * time.Second
+	sourceCloseTimeout      = 5 * time.Second
+	feishuIdleConnTimeout   = 30 * time.Second
+	feishuDialKeepAlive     = 20 * time.Second
+	feishuMaxIdleConns      = 32
+	feishuMaxIdleConnsHost  = 8
+	feishuEventQueueSize    = 64
+	feishuFailureQueueSize  = 1
 )
+
+// NetworkOptions controls Feishu connection and event-source behavior.
+// Zero values preserve the bridge defaults.
+type NetworkOptions struct {
+	HTTPTimeout                time.Duration
+	BootstrapTimeout           time.Duration
+	WebSocketFallbackHeartbeat time.Duration
+	WebSocketMaxHeartbeat      time.Duration
+	ReconnectDelay             time.Duration
+	WriteTimeout               time.Duration
+	FragmentTTL                time.Duration
+	SourceCloseTimeout         time.Duration
+	MaxIdleConnections         int
+	MaxIdleConnectionsPerHost  int
+	IdleConnectionTimeout      time.Duration
+	DialKeepAlive              time.Duration
+	EventQueueCapacity         int
+	CardActionQueueCapacity    int
+	FailureQueueCapacity       int
+}
 
 // feishuWSClient owns the parts of the Feishu long connection that the SDK
 // leaves server-configurable. It keeps a conservative protocol heartbeat and
@@ -44,13 +71,16 @@ type feishuWSClient struct {
 	dialer      *websocket.Dialer
 	endpointURL string
 
-	bootstrapTimeout time.Duration
+	bootstrapTimeout          time.Duration
+	fallbackHeartbeatInterval time.Duration
+	maxHeartbeatInterval      time.Duration
 	// heartbeatInterval is an explicit local override used by tests. Production
 	// connections use the value Feishu supplies during WebSocket bootstrap.
 	heartbeatInterval       time.Duration
 	serverHeartbeatInterval time.Duration
 	reconnectDelay          time.Duration
 	writeTimeout            time.Duration
+	fragmentTTL             time.Duration
 
 	mu     sync.Mutex
 	cancel context.CancelFunc
@@ -69,24 +99,37 @@ type fragmentBuffer struct {
 }
 
 func newFeishuWSClient(appID, appSecret string, eventDispatcher *dispatcher.EventDispatcher, proxyURL *url.URL) *feishuWSClient {
+	return newFeishuWSClientWithOptions(appID, appSecret, eventDispatcher, proxyURL, NetworkOptions{})
+}
+
+func newFeishuWSClientWithOptions(appID, appSecret string, eventDispatcher *dispatcher.EventDispatcher, proxyURL *url.URL, options NetworkOptions) *feishuWSClient {
+	options = normalizeNetworkOptions(options)
 	return &feishuWSClient{
-		appID:            appID,
-		appSecret:        appSecret,
-		dispatcher:       eventDispatcher,
-		httpClient:       newFeishuHTTPClient(feishuHTTPTimeout, proxyURL),
-		dialer:           newFeishuWebSocketDialer(proxyURL),
-		endpointURL:      feishuWSEndpoint,
-		bootstrapTimeout: feishuBootstrapTimeout,
-		reconnectDelay:   feishuReconnectDelay,
-		writeTimeout:     feishuWriteTimeout,
-		fragments:        make(map[string]fragmentBuffer),
+		appID:                     appID,
+		appSecret:                 appSecret,
+		dispatcher:                eventDispatcher,
+		httpClient:                newFeishuHTTPClientWithOptions(options, proxyURL),
+		dialer:                    newFeishuWebSocketDialerWithOptions(options, proxyURL),
+		endpointURL:               feishuWSEndpoint,
+		bootstrapTimeout:          options.BootstrapTimeout,
+		fallbackHeartbeatInterval: options.WebSocketFallbackHeartbeat,
+		maxHeartbeatInterval:      options.WebSocketMaxHeartbeat,
+		reconnectDelay:            options.ReconnectDelay,
+		writeTimeout:              options.WriteTimeout,
+		fragmentTTL:               options.FragmentTTL,
+		fragments:                 make(map[string]fragmentBuffer),
 	}
 }
 
 func newFeishuHTTPClient(timeout time.Duration, proxyURL *url.URL) *http.Client {
-	transport := newFeishuTransport()
+	return newFeishuHTTPClientWithOptions(NetworkOptions{HTTPTimeout: timeout}, proxyURL)
+}
+
+func newFeishuHTTPClientWithOptions(options NetworkOptions, proxyURL *url.URL) *http.Client {
+	options = normalizeNetworkOptions(options)
+	transport := newFeishuTransportWithOptions(options)
 	transport.Proxy = staticProxy(proxyURL)
-	return &http.Client{Transport: transport, Timeout: timeout}
+	return &http.Client{Transport: transport, Timeout: options.HTTPTimeout}
 }
 
 func staticProxy(proxyURL *url.URL) func(*http.Request) (*url.URL, error) {
@@ -97,18 +140,24 @@ func staticProxy(proxyURL *url.URL) func(*http.Request) (*url.URL, error) {
 	return http.ProxyURL(&proxyCopy)
 }
 
-func newFeishuTransport() *http.Transport {
+func newFeishuTransportWithOptions(options NetworkOptions) *http.Transport {
+	options = normalizeNetworkOptions(options)
 	transport := http.DefaultTransport.(*http.Transport).Clone()
-	transport.MaxIdleConns = 32
-	transport.MaxIdleConnsPerHost = 8
-	transport.IdleConnTimeout = 30 * time.Second
+	transport.MaxIdleConns = options.MaxIdleConnections
+	transport.MaxIdleConnsPerHost = options.MaxIdleConnectionsPerHost
+	transport.IdleConnTimeout = options.IdleConnectionTimeout
 	return transport
 }
 
 func newFeishuWebSocketDialer(proxyURL *url.URL) *websocket.Dialer {
-	dialer := &net.Dialer{Timeout: feishuBootstrapTimeout, KeepAlive: 20 * time.Second}
+	return newFeishuWebSocketDialerWithOptions(NetworkOptions{}, proxyURL)
+}
+
+func newFeishuWebSocketDialerWithOptions(options NetworkOptions, proxyURL *url.URL) *websocket.Dialer {
+	options = normalizeNetworkOptions(options)
+	dialer := &net.Dialer{Timeout: options.BootstrapTimeout, KeepAlive: options.DialKeepAlive}
 	return &websocket.Dialer{
-		HandshakeTimeout: feishuBootstrapTimeout,
+		HandshakeTimeout: options.BootstrapTimeout,
 		NetDialContext:   dialer.DialContext,
 		Proxy:            staticProxy(proxyURL),
 	}
@@ -258,26 +307,38 @@ func (c *feishuWSClient) bootstrap(ctx context.Context) (string, int32, time.Dur
 	if err != nil {
 		return "", 0, 0, err
 	}
-	return endpoint.Data.Url, serviceID, heartbeatFromConfig(endpoint.Data.ClientConfig), nil
+	return endpoint.Data.Url, serviceID, c.heartbeatFromConfig(endpoint.Data.ClientConfig), nil
 }
 
 func heartbeatFromConfig(config *larkws.ClientConfig) time.Duration {
+	return heartbeatFromConfigWithOptions(config, NetworkOptions{})
+}
+
+func heartbeatFromConfigWithOptions(config *larkws.ClientConfig, options NetworkOptions) time.Duration {
+	options = normalizeNetworkOptions(options)
 	if config == nil || config.PingInterval <= 0 {
-		return feishuHeartbeatInterval
+		return options.WebSocketFallbackHeartbeat
 	}
 	interval := time.Duration(config.PingInterval) * time.Second / 2
 	if interval <= 0 {
-		return feishuHeartbeatInterval
+		return options.WebSocketFallbackHeartbeat
 	}
-	if interval > maxHeartbeatInterval {
-		return maxHeartbeatInterval
+	if interval > options.WebSocketMaxHeartbeat {
+		return options.WebSocketMaxHeartbeat
 	}
 	return interval
 }
 
+func (c *feishuWSClient) heartbeatFromConfig(config *larkws.ClientConfig) time.Duration {
+	return heartbeatFromConfigWithOptions(config, NetworkOptions{
+		WebSocketFallbackHeartbeat: c.fallbackHeartbeatInterval,
+		WebSocketMaxHeartbeat:      c.maxHeartbeatInterval,
+	})
+}
+
 func (c *feishuWSClient) setServerHeartbeatInterval(interval time.Duration) {
 	if interval <= 0 {
-		interval = feishuHeartbeatInterval
+		interval = c.fallbackHeartbeatInterval
 	}
 	c.mu.Lock()
 	c.serverHeartbeatInterval = interval
@@ -293,7 +354,7 @@ func (c *feishuWSClient) currentHeartbeatInterval() time.Duration {
 	if c.serverHeartbeatInterval > 0 {
 		return c.serverHeartbeatInterval
 	}
-	return feishuHeartbeatInterval
+	return c.fallbackHeartbeatInterval
 }
 
 func endpointServiceID(rawURL string) (int32, error) {
@@ -474,7 +535,7 @@ func (c *feishuWSClient) completeFrame(frame larkws.Frame) (larkws.Frame, bool) 
 	}
 	pending, ok := c.fragments[messageID]
 	if !ok || len(pending.parts) != parts {
-		pending = fragmentBuffer{frame: frame, parts: make([][]byte, parts), expiresAt: now.Add(fragmentTTL)}
+		pending = fragmentBuffer{frame: frame, parts: make([][]byte, parts), expiresAt: now.Add(c.fragmentTTL)}
 	}
 	if pending.parts[part] == nil {
 		pending.parts[part] = append([]byte(nil), frame.Payload...)
@@ -496,6 +557,55 @@ func (c *feishuWSClient) completeFrame(frame larkws.Frame) (larkws.Frame, bool) 
 	delete(c.fragments, messageID)
 	pending.frame.Payload = combined
 	return pending.frame, true
+}
+
+func normalizeNetworkOptions(options NetworkOptions) NetworkOptions {
+	if options.HTTPTimeout <= 0 {
+		options.HTTPTimeout = feishuHTTPTimeout
+	}
+	if options.BootstrapTimeout <= 0 {
+		options.BootstrapTimeout = feishuBootstrapTimeout
+	}
+	if options.WebSocketFallbackHeartbeat <= 0 {
+		options.WebSocketFallbackHeartbeat = feishuHeartbeatInterval
+	}
+	if options.WebSocketMaxHeartbeat <= 0 {
+		options.WebSocketMaxHeartbeat = maxHeartbeatInterval
+	}
+	if options.ReconnectDelay <= 0 {
+		options.ReconnectDelay = feishuReconnectDelay
+	}
+	if options.WriteTimeout <= 0 {
+		options.WriteTimeout = feishuWriteTimeout
+	}
+	if options.FragmentTTL <= 0 {
+		options.FragmentTTL = fragmentTTL
+	}
+	if options.SourceCloseTimeout <= 0 {
+		options.SourceCloseTimeout = sourceCloseTimeout
+	}
+	if options.MaxIdleConnections <= 0 {
+		options.MaxIdleConnections = feishuMaxIdleConns
+	}
+	if options.MaxIdleConnectionsPerHost <= 0 {
+		options.MaxIdleConnectionsPerHost = feishuMaxIdleConnsHost
+	}
+	if options.IdleConnectionTimeout <= 0 {
+		options.IdleConnectionTimeout = feishuIdleConnTimeout
+	}
+	if options.DialKeepAlive <= 0 {
+		options.DialKeepAlive = feishuDialKeepAlive
+	}
+	if options.EventQueueCapacity <= 0 {
+		options.EventQueueCapacity = feishuEventQueueSize
+	}
+	if options.CardActionQueueCapacity <= 0 {
+		options.CardActionQueueCapacity = feishuEventQueueSize
+	}
+	if options.FailureQueueCapacity <= 0 {
+		options.FailureQueueCapacity = feishuFailureQueueSize
+	}
+	return options
 }
 
 func sleepContext(ctx context.Context, delay time.Duration) error {

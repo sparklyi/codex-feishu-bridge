@@ -19,7 +19,11 @@ import (
 // shared transport sentinel so runtime delivery retries classify it correctly.
 var ErrRateLimited = transport.ErrRateLimited
 
-const defaultDeliveryAttemptTimeout = 5 * time.Second
+const (
+	defaultDeliveryAttemptTimeout = 5 * time.Second
+	defaultDeliveryMaxRetries     = 2
+	defaultDeliveryRetryDelay     = 100 * time.Millisecond
+)
 
 type CardAPI interface {
 	SendCard(ctx context.Context, chatID, replyToMessageID string, cardJSON []byte) (messageID string, retryAfter time.Duration, err error)
@@ -30,12 +34,25 @@ type Sender struct {
 	AppID          string
 	AppSecret      string
 	API            CardAPI
+	MaxAttempts    int
 	MaxRetries     int
 	AttemptTimeout time.Duration
+	RetryDelay     time.Duration
 	Sleep          func(context.Context, time.Duration) error
 }
 
+// SenderOptions controls retry behavior for Feishu card delivery.
+type SenderOptions struct {
+	MaxAttempts    int
+	AttemptTimeout time.Duration
+	RetryDelay     time.Duration
+}
+
 func NewSenderFromEnv(appID, secretEnv string, getenv func(string) string, api CardAPI) (*Sender, error) {
+	return NewSenderFromEnvWithOptions(appID, secretEnv, getenv, api, SenderOptions{})
+}
+
+func NewSenderFromEnvWithOptions(appID, secretEnv string, getenv func(string) string, api CardAPI, options SenderOptions) (*Sender, error) {
 	if getenv == nil {
 		return nil, errors.New("getenv is required")
 	}
@@ -43,11 +60,22 @@ func NewSenderFromEnv(appID, secretEnv string, getenv func(string) string, api C
 	if secret == "" {
 		return nil, fmt.Errorf("missing Feishu app secret env %s", secretEnv)
 	}
-	return &Sender{AppID: appID, AppSecret: secret, API: api}, nil
+	return &Sender{
+		AppID:          appID,
+		AppSecret:      secret,
+		API:            api,
+		MaxAttempts:    options.MaxAttempts,
+		AttemptTimeout: options.AttemptTimeout,
+		RetryDelay:     options.RetryDelay,
+	}, nil
 }
 
 func NewSDKCardAPI(appID, appSecret string, proxyURL *url.URL) *SDKCardAPI {
-	return &SDKCardAPI{client: lark.NewClient(appID, appSecret, lark.WithHttpClient(newFeishuHTTPClient(feishuHTTPTimeout, proxyURL)))}
+	return NewSDKCardAPIWithOptions(appID, appSecret, proxyURL, NetworkOptions{})
+}
+
+func NewSDKCardAPIWithOptions(appID, appSecret string, proxyURL *url.URL, options NetworkOptions) *SDKCardAPI {
+	return &SDKCardAPI{client: lark.NewClient(appID, appSecret, lark.WithHttpClient(newFeishuHTTPClientWithOptions(options, proxyURL)))}
 }
 
 type SDKCardAPI struct {
@@ -131,10 +159,7 @@ func (s *Sender) Send(ctx context.Context, msg contracts.OutboundMessage) (contr
 		}
 		return contracts.SentMessage{MessageID: msg.UpdateMessageID}, nil
 	}
-	maxRetries := s.MaxRetries
-	if maxRetries == 0 {
-		maxRetries = 2
-	}
+	maxRetries := s.maxRetries()
 	var lastErr error
 	for attempt := 0; attempt <= maxRetries; attempt++ {
 		attemptCtx, cancel := s.attemptContext(ctx)
@@ -151,7 +176,7 @@ func (s *Sender) Send(ctx context.Context, msg contracts.OutboundMessage) (contr
 			return contracts.SentMessage{}, err
 		}
 		if retryAfter <= 0 {
-			retryAfter = time.Duration(attempt+1) * 100 * time.Millisecond
+			retryAfter = s.retryDelay(attempt)
 		}
 		if err := s.sleep(ctx, retryAfter); err != nil {
 			return contracts.SentMessage{}, err
@@ -161,10 +186,7 @@ func (s *Sender) Send(ctx context.Context, msg contracts.OutboundMessage) (contr
 }
 
 func (s *Sender) patchWithRetry(ctx context.Context, messageID string, card []byte) error {
-	maxRetries := s.MaxRetries
-	if maxRetries == 0 {
-		maxRetries = 2
-	}
+	maxRetries := s.maxRetries()
 	var lastErr error
 	for attempt := 0; attempt <= maxRetries; attempt++ {
 		attemptCtx, cancel := s.attemptContext(ctx)
@@ -178,7 +200,7 @@ func (s *Sender) patchWithRetry(ctx context.Context, messageID string, card []by
 			return err
 		}
 		if retryAfter <= 0 {
-			retryAfter = time.Duration(attempt+1) * 100 * time.Millisecond
+			retryAfter = s.retryDelay(attempt)
 		}
 		if err := s.sleep(ctx, retryAfter); err != nil {
 			return err
@@ -208,6 +230,24 @@ func (s *Sender) attemptContext(ctx context.Context) (context.Context, context.C
 		timeout = defaultDeliveryAttemptTimeout
 	}
 	return context.WithTimeout(ctx, timeout)
+}
+
+func (s *Sender) maxRetries() int {
+	if s.MaxAttempts > 0 {
+		return s.MaxAttempts - 1
+	}
+	if s.MaxRetries > 0 {
+		return s.MaxRetries
+	}
+	return defaultDeliveryMaxRetries
+}
+
+func (s *Sender) retryDelay(attempt int) time.Duration {
+	delay := s.RetryDelay
+	if delay <= 0 {
+		delay = defaultDeliveryRetryDelay
+	}
+	return time.Duration(attempt+1) * delay
 }
 
 func BuildInteractiveCard(msg contracts.OutboundMessage) ([]byte, error) {

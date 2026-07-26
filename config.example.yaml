@@ -6,6 +6,27 @@ feishu:
   # Optional. All Feishu REST and WebSocket connections use this HTTP proxy.
   # Leave unset for direct connections.
   # proxy_url: http://127.0.0.1:7890
+  # Network and delivery settings. Keep the defaults unless your network
+  # environment requires different timeouts, connection pools, or retries.
+  network:
+    http_timeout_seconds: 30
+    bootstrap_timeout_seconds: 8
+    websocket_fallback_heartbeat_seconds: 30
+    websocket_max_heartbeat_seconds: 30
+    reconnect_delay_milliseconds: 1000
+    write_timeout_seconds: 5
+    fragment_ttl_seconds: 5
+    source_close_timeout_seconds: 5
+    max_idle_connections: 32
+    max_idle_connections_per_host: 8
+    idle_connection_timeout_seconds: 30
+    dial_keep_alive_seconds: 20
+    delivery_attempt_timeout_seconds: 5
+    delivery_max_attempts: 3
+    delivery_retry_delay_milliseconds: 100
+    event_queue_capacity: 64
+    card_action_queue_capacity: 64
+    failure_queue_capacity: 1
 security:
   allowed_open_ids:
     - ou_xxx
@@ -13,6 +34,17 @@ app_server:
   command: codex
   default_model: ""
   startup_timeout_seconds: 15
+runtime:
+  # Cadence for patches of streamed task-card detail.
+  stream_update_interval_milliseconds: 200
+  stream_retry_delay_milliseconds: 800
+  notification_timeout_seconds: 20
+  app_server_timeout_seconds: 30
+  terminal_retry_attempts: 3
+  terminal_retry_delay_milliseconds: 1000
+  route_insert_attempts: 2
+  thread_selection_limit: 8
+  thread_lookup_limit: 32
 workspace:
   default: /path/to/default/repo
 # Optional aliases select additional local workspaces from a private chat.

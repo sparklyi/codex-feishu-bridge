@@ -40,7 +40,7 @@ explain this repository
 
 任务结束后，原卡片会以“结论”展示最终 AI 回复，并附上改动和验证，不再创建独立详情卡片。
 
-`feishu.card_display_mode` 默认是 `preview`，会低频展示处理详情；设置为 `concise` 后只展示阶段与里程碑。两种模式都不会展示原始推理或工具输出。
+`feishu.card_display_mode` 默认是 `preview`，会节流展示处理详情；设置为 `concise` 后只展示阶段与里程碑。两种模式都不会展示原始推理或工具输出。
 
 由监督进程启动时，可在私聊发送 `/restart`、`restart service` 或“重启服务”重启桥接服务。命令会先确认重启；只要存在排队或运行中的任务就会拒绝执行，因此不会中断正在运行的 Codex turn。
 
@@ -65,6 +65,8 @@ codex-feishu-bridge tasks show [--config path] <task_id>
 示例配置见 [config.example.yaml](config.example.yaml)。飞书 app secret 不应写入配置文件，建议通过 `FEISHU_APP_SECRET` 等环境变量注入。
 
 网络需要代理时，在 `feishu.proxy_url` 填写 `http://` 代理地址；不配置时飞书 REST 与 WebSocket 均直连。桥接会忽略环境代理变量。
+
+`runtime.stream_update_interval_milliseconds` 控制流式任务卡片刷新间隔，默认值为 `200`。`runtime` 还可配置任务卡片与 app-server 超时、重试和会话列表上限；`feishu.network` 可配置飞书连接池、WebSocket、事件队列和卡片投递重试。完整字段见 [config.example.yaml](config.example.yaml)，修改后需要重启桥接服务。
 
 ## 安全模型
 

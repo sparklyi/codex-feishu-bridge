@@ -25,6 +25,8 @@ Set `app_server.command` to the standalone Codex CLI installed by the official i
 
 When the network requires a proxy, set `feishu.proxy_url` to an `http://` proxy URL. Leave it unset for direct Feishu REST and WebSocket connections; environment proxy variables are ignored by the bridge.
 
+`runtime.stream_update_interval_milliseconds` controls streamed task-card refreshes and defaults to `200`. The `runtime` section also controls task-card and app-server timeouts, retry behavior, and thread-list limits. `feishu.network` controls Feishu connection pools, WebSocket behavior, event queues, and card-delivery retries. See [config.example.yaml](config.example.yaml) for all values; restart the bridge after changing them.
+
 ## Feishu Workflow
 
 For a screenshot-based setup guide, see [Feishu Bot Quickstart (Chinese)](docs/feishu-quickstart.zh-CN.md).

@@ -79,6 +79,7 @@ func Serve(ctx context.Context, opts ServeOptions) error {
 	if err != nil {
 		return fmt.Errorf("invalid config feishu.proxy_url: %w", err)
 	}
+	networkOptions := feishuNetworkOptions(cfg.Feishu.Network)
 	st, err := store.Open(ctx, cfg.Paths.StateDB)
 	if err != nil {
 		return err
@@ -102,7 +103,7 @@ func Serve(ctx context.Context, opts ServeOptions) error {
 		if secret == "" {
 			return errors.New("missing Feishu app secret")
 		}
-		source := feishu.NewSDKEventSource(cfg.Feishu.AppID, secret, proxyURL)
+		source := feishu.NewSDKEventSourceWithOptions(cfg.Feishu.AppID, secret, proxyURL, networkOptions)
 		receiver = feishu.Receiver{
 			Source: source,
 			Verify: feishu.VerifyOptions{AppID: cfg.Feishu.AppID},
@@ -112,8 +113,12 @@ func Serve(ctx context.Context, opts ServeOptions) error {
 		}
 	}
 	if sender == nil {
-		api := feishu.NewSDKCardAPI(cfg.Feishu.AppID, secret, proxyURL)
-		sender, err = feishu.NewSenderFromEnv(cfg.Feishu.AppID, cfg.Feishu.AppSecretEnv, getenv, api)
+		api := feishu.NewSDKCardAPIWithOptions(cfg.Feishu.AppID, secret, proxyURL, networkOptions)
+		sender, err = feishu.NewSenderFromEnvWithOptions(cfg.Feishu.AppID, cfg.Feishu.AppSecretEnv, getenv, api, feishu.SenderOptions{
+			MaxAttempts:    cfg.Feishu.Network.DeliveryMaxAttempts,
+			AttemptTimeout: cfg.Feishu.Network.DeliveryAttemptTimeout(),
+			RetryDelay:     cfg.Feishu.Network.DeliveryRetryDelay(),
+		})
 		if err != nil {
 			return err
 		}
@@ -140,11 +145,17 @@ func Serve(ctx context.Context, opts ServeOptions) error {
 
 	notify := notifier.New(sender, notifier.Options{CardDisplayMode: cfg.Feishu.CardDisplayMode})
 	controller := runtime.New(runtime.ControllerOptions{
-		AppServer:       api,
-		Store:           st,
-		Notifier:        notify,
-		CardDisplayMode: cfg.Feishu.CardDisplayMode,
-		Now:             now,
+		AppServer:              api,
+		Store:                  st,
+		Notifier:               notify,
+		CardDisplayMode:        cfg.Feishu.CardDisplayMode,
+		Now:                    now,
+		ProgressUpdateInterval: cfg.Runtime.StreamUpdateInterval(),
+		ProgressRetryDelay:     cfg.Runtime.StreamRetryDelay(),
+		NotificationTimeout:    cfg.Runtime.NotificationTimeout(),
+		AppServerTimeout:       cfg.Runtime.AppServerTimeout(),
+		TerminalRetryAttempts:  cfg.Runtime.TerminalRetryAttempts,
+		TerminalRetryDelay:     cfg.Runtime.TerminalRetryDelay(),
 	})
 	defer controller.Close()
 	probeCtx, cancelProbe := context.WithTimeout(ctx, cfg.StartupTimeout())
@@ -240,12 +251,51 @@ func openStoreFromConfig(ctx context.Context, configPath string, getenv func(str
 	return store.Open(ctx, cfg.Paths.StateDB)
 }
 
+func feishuNetworkOptions(cfg config.FeishuNetworkConfig) feishu.NetworkOptions {
+	return feishu.NetworkOptions{
+		HTTPTimeout:                cfg.HTTPTimeout(),
+		BootstrapTimeout:           cfg.BootstrapTimeout(),
+		WebSocketFallbackHeartbeat: cfg.WebSocketFallbackHeartbeat(),
+		WebSocketMaxHeartbeat:      cfg.WebSocketMaxHeartbeat(),
+		ReconnectDelay:             cfg.ReconnectDelay(),
+		WriteTimeout:               cfg.WriteTimeout(),
+		FragmentTTL:                cfg.FragmentTTL(),
+		SourceCloseTimeout:         cfg.SourceCloseTimeout(),
+		MaxIdleConnections:         cfg.MaxIdleConnections,
+		MaxIdleConnectionsPerHost:  cfg.MaxIdleConnectionsPerHost,
+		IdleConnectionTimeout:      cfg.IdleConnectionTimeout(),
+		DialKeepAlive:              cfg.DialKeepAlive(),
+		EventQueueCapacity:         cfg.EventQueueCapacity,
+		CardActionQueueCapacity:    cfg.CardActionQueueCapacity,
+		FailureQueueCapacity:       cfg.FailureQueueCapacity,
+	}
+}
+
 const defaultConfig = `feishu:
   app_id: cli_xxx
   app_secret_env: FEISHU_APP_SECRET
   # preview shows throttled processing detail; concise hides it.
   card_display_mode: preview
   # proxy_url: http://127.0.0.1:7890
+  network:
+    http_timeout_seconds: 30
+    bootstrap_timeout_seconds: 8
+    websocket_fallback_heartbeat_seconds: 30
+    websocket_max_heartbeat_seconds: 30
+    reconnect_delay_milliseconds: 1000
+    write_timeout_seconds: 5
+    fragment_ttl_seconds: 5
+    source_close_timeout_seconds: 5
+    max_idle_connections: 32
+    max_idle_connections_per_host: 8
+    idle_connection_timeout_seconds: 30
+    dial_keep_alive_seconds: 20
+    delivery_attempt_timeout_seconds: 5
+    delivery_max_attempts: 3
+    delivery_retry_delay_milliseconds: 100
+    event_queue_capacity: 64
+    card_action_queue_capacity: 64
+    failure_queue_capacity: 1
 security:
   allowed_open_ids:
     - ou_xxx
@@ -253,6 +303,16 @@ app_server:
   command: codex
   default_model: ""
   startup_timeout_seconds: 15
+runtime:
+  stream_update_interval_milliseconds: 200
+  stream_retry_delay_milliseconds: 800
+  notification_timeout_seconds: 20
+  app_server_timeout_seconds: 30
+  terminal_retry_attempts: 3
+  terminal_retry_delay_milliseconds: 1000
+  route_insert_attempts: 2
+  thread_selection_limit: 8
+  thread_lookup_limit: 32
 workspace:
   default: /path/to/default/repo
 `

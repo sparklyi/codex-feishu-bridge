@@ -30,6 +30,13 @@ type AppServer interface {
 
 type OpenAppServer func(context.Context, appserver.ProcessOptions) (AppServer, error)
 
+const supervisedEnv = "CODEX_FEISHU_BRIDGE_SUPERVISED"
+
+// ErrRestartRequested is returned when a supervised bridge receives its native
+// restart command. The process entrypoint maps it to the supervisor's restart
+// exit code after all owned resources have shut down.
+var ErrRestartRequested = errors.New("bridge restart requested")
+
 type ServeOptions struct {
 	ConfigPath    string
 	Getenv        func(string) string
@@ -41,6 +48,9 @@ type ServeOptions struct {
 }
 
 func Serve(ctx context.Context, opts ServeOptions) error {
+	ctx, cancel := context.WithCancelCause(ctx)
+	defer cancel(nil)
+
 	getenv := opts.Getenv
 	if getenv == nil {
 		getenv = os.Getenv
@@ -144,8 +154,23 @@ func Serve(ctx context.Context, opts ServeOptions) error {
 		return err
 	}
 
-	rt := router.New(router.RouterOptions{Config: cfg, Store: st, Controller: controller, Notifier: notify, Now: now})
-	return receiver.Receive(ctx, rt.Handle)
+	var restart func()
+	if getenv(supervisedEnv) == "1" {
+		restart = func() { cancel(ErrRestartRequested) }
+	}
+	rt := router.New(router.RouterOptions{
+		Config:     cfg,
+		Store:      st,
+		Controller: controller,
+		Notifier:   notify,
+		Now:        now,
+		Restart:    restart,
+	})
+	receiveErr := receiver.Receive(ctx, rt.Handle)
+	if errors.Is(context.Cause(ctx), ErrRestartRequested) {
+		return ErrRestartRequested
+	}
+	return receiveErr
 }
 
 func InitConfig(path string, force bool) error {
@@ -218,8 +243,8 @@ func openStoreFromConfig(ctx context.Context, configPath string, getenv func(str
 const defaultConfig = `feishu:
   app_id: cli_xxx
   app_secret_env: FEISHU_APP_SECRET
-  # concise only shows phases and milestones; preview also shows a throttled reply draft.
-  card_display_mode: concise
+  # preview shows throttled processing detail; concise hides it.
+  card_display_mode: preview
   # proxy_url: http://127.0.0.1:7890
 security:
   allowed_open_ids:

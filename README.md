@@ -40,11 +40,13 @@ Use `@backend` only when `projects.backend` is configured; omit the prefix to us
 
 To continue an existing Codex Desktop thread, send `/sessions` in a private chat, select a thread, then use the attached task card to send a follow-up. The bridge keeps the Codex thread id locally and resumes it through app-server.
 
-While a turn is running, one task card remains attached to that turn. It shows the current phase and key milestones from app-server item events, without exposing reasoning, commands, or command output. Use **Add to current turn** to steer the active Codex turn with an extra constraint; it does not create another task or card. Stop is acknowledged immediately and does not wait for the app-server interrupt to finish.
+While a turn is running, one task card remains attached to that turn. It shows the current phase, key milestones, and throttled processing detail from app-server item events, without exposing reasoning, commands, or command output. Use **Add to current turn** to steer the active Codex turn with an extra constraint; it does not create another task or card. Stop is acknowledged immediately and does not wait for the app-server interrupt to finish.
 
-When the turn completes, the same card becomes a compact result with conclusion, changes, and verification. Select **View details** to open a separate paged card containing the final agent reply.
+When the turn completes, the same card presents the final agent reply as its conclusion, alongside changes and verification.
 
-`feishu.card_display_mode` defaults to `concise`, which only displays phases and milestones. Set it to `preview` to additionally show a throttled reply draft while the turn is running. This mode never exposes raw reasoning or tool output.
+`feishu.card_display_mode` defaults to `preview`, which shows throttled processing detail while the turn is running. Set it to `concise` to show only phases and milestones. Neither mode exposes raw reasoning or tool output.
+
+In a supervised private-chat deployment, send `/restart`, `restart service`, or `重启服务` to restart the bridge. The command first confirms the restart and rejects the request while any task is queued or running, so it never interrupts an active Codex turn.
 
 ## Commands
 

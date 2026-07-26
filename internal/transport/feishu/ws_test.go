@@ -61,6 +61,26 @@ func TestReceiverClosesSourceWhenItStops(t *testing.T) {
 	}
 }
 
+func TestReceiverStopsWhenHandlerCancelsContext(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	source := &fakeEventSource{events: []sourceResult{
+		{event: RawEvent{Kind: RawEventMessage, Data: messageJSON(t, map[string]any{"text": "重启服务"}, "")}},
+		{err: context.Canceled},
+	}}
+	r := Receiver{Source: source, Verify: VerifyOptions{AppID: "cli_test"}}
+	err := r.Receive(ctx, func(context.Context, contracts.InboundEvent) error {
+		cancel()
+		return nil
+	})
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("receiver error = %v, want context canceled", err)
+	}
+	if source.closes != 1 {
+		t.Fatalf("source closes = %d, want 1", source.closes)
+	}
+}
+
 func TestReceiverContinuesAfterHandlerError(t *testing.T) {
 	source := &fakeEventSource{events: []sourceResult{
 		{event: RawEvent{Kind: RawEventCardAction, Data: cardJSON(t, "stop_task", "")}},

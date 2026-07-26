@@ -6,15 +6,15 @@
   <string>info.fofa.codex-feishu-bridge</string>
   <key>ProgramArguments</key>
   <array>
-    <string>codex-feishu-bridge</string>
-    <string>serve</string>
-    <string>--config</string>
-    <string>/Users/example/.codex-feishu-bridge/config.yaml</string>
+    <string>/bin/zsh</string>
+    <string>/Users/example/.codex-feishu-bridge/macos-run-bridge.sh</string>
   </array>
   <key>RunAtLoad</key>
   <true/>
   <key>KeepAlive</key>
   <true/>
+  <key>ThrottleInterval</key>
+  <integer>5</integer>
   <key>StandardOutPath</key>
   <string>/Users/example/.codex-feishu-bridge/bridge.out.log</string>
   <key>StandardErrorPath</key>

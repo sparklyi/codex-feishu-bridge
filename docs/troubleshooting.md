@@ -20,5 +20,6 @@ Common failures:
 - Configuration rejects an old permission field: remove `sandbox`, `approval`, `force_full_access`, and `approval_timeout_seconds`; those settings are no longer supported.
 - Configuration rejects `feishu.connection` or `feishu.bot_open_id`: remove those retired fields from the configuration.
 - State database is unsupported: stop the bridge and recreate `~/.codex-feishu-bridge/state.db`; pre-private-chat schemas are intentionally not migrated.
+- Native restart command: `/restart`, `restart service`, and `重启服务` work only when the bridge is launched by a supervisor. They reject the request while any task is queued or running, so an active Codex turn is never interrupted. For macOS, use `docs/service/macos-run-bridge.sh` with `docs/service/macos-launchagent.plist`; for systemd, set `CODEX_FEISHU_BRIDGE_SUPERVISED=1` as shown in the unit file. A manually launched bridge intentionally rejects the command.
 
 After a bridge restart, in-flight tasks are marked failed. Attached tasks remain resumable because their Codex thread id is retained in SQLite.

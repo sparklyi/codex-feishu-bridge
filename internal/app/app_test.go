@@ -83,7 +83,7 @@ func TestServeRecoversStaleRunAndInitConfigUsesAppServer(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(string(data), "app_server:") || !strings.Contains(string(data), "startup_timeout_seconds: 15") || !strings.Contains(string(data), "card_display_mode: concise") || strings.Contains(string(data), "approval:") || strings.Contains(string(data), "sandbox:") || strings.Contains(string(data), "bot_open_id:") || strings.Contains(string(data), "connection:") || strings.Contains(string(data), "projects:") {
+	if !strings.Contains(string(data), "app_server:") || !strings.Contains(string(data), "startup_timeout_seconds: 15") || !strings.Contains(string(data), "card_display_mode: preview") || strings.Contains(string(data), "approval:") || strings.Contains(string(data), "sandbox:") || strings.Contains(string(data), "bot_open_id:") || strings.Contains(string(data), "connection:") || strings.Contains(string(data), "projects:") {
 		t.Fatalf("unexpected generated config:\n%s", data)
 	}
 }
@@ -124,6 +124,47 @@ func TestServeClosesDependenciesWhenContextIsCanceled(t *testing.T) {
 	}
 	if !api.closed {
 		t.Fatal("app server was not closed after cancellation")
+	}
+}
+
+func TestServeReturnsRestartSignalOnlyForSupervisedNativeRestart(t *testing.T) {
+	dir := t.TempDir()
+	workspace := filepath.Join(dir, "workspace")
+	if err := os.MkdirAll(workspace, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	baseEnv := appEnv(dir)
+	getenv := func(key string) string {
+		if key == supervisedEnv {
+			return "1"
+		}
+		return baseEnv(key)
+	}
+	sender := &fakeSender{}
+	api := &fakeAppServer{threads: []appserver.Thread{{ID: "desktop", CWD: workspace}}}
+	err := Serve(context.Background(), ServeOptions{
+		ConfigPath: writeAppConfig(t, dir, workspace),
+		Getenv:     getenv,
+		Receiver: restartReceiver{event: contracts.InboundEvent{
+			DedupKey:     "restart-event",
+			Kind:         contracts.InboundNewTask,
+			ChatType:     "private",
+			ChatID:       "chat",
+			SenderOpenID: "ou_owner",
+			MessageID:    "restart-message",
+			Text:         "重启服务",
+		}},
+		Sender:    sender,
+		AppServer: api,
+	})
+	if !errors.Is(err, ErrRestartRequested) {
+		t.Fatalf("serve error = %v, want restart request", err)
+	}
+	if !api.closed {
+		t.Fatal("app server was not closed before the restart signal returned")
+	}
+	if len(sender.messages) != 1 || sender.messages[0].CardKind != contracts.CardRestarting {
+		t.Fatalf("restart confirmation card = %+v", sender.messages)
 	}
 }
 
@@ -178,10 +219,25 @@ func (r *blockingReceiver) Receive(ctx context.Context, _ func(context.Context, 
 	return ctx.Err()
 }
 
-type fakeSender struct{}
+type fakeSender struct {
+	messages []contracts.OutboundMessage
+}
 
-func (*fakeSender) Send(context.Context, contracts.OutboundMessage) (contracts.SentMessage, error) {
+func (f *fakeSender) Send(_ context.Context, message contracts.OutboundMessage) (contracts.SentMessage, error) {
+	f.messages = append(f.messages, message)
 	return contracts.SentMessage{MessageID: "card"}, nil
+}
+
+type restartReceiver struct {
+	event contracts.InboundEvent
+}
+
+func (r restartReceiver) Receive(ctx context.Context, handle func(context.Context, contracts.InboundEvent) error) error {
+	if err := handle(ctx, r.event); err != nil {
+		return err
+	}
+	<-ctx.Done()
+	return ctx.Err()
 }
 
 type fakeAppServer struct {

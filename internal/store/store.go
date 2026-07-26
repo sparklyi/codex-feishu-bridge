@@ -271,6 +271,29 @@ VALUES(?,?, 'idle', ?,?,?,?,?,?)`,
 	return task, false, tx.Commit()
 }
 
+// AdmitRestart records a native service restart command as complete before the
+// caller tears down the process. A redelivered Feishu event must not cause a
+// second restart after the supervisor brings the bridge back up.
+func (s *Store) AdmitRestart(ctx context.Context, dedupKey, source string, now time.Time) (bool, error) {
+	now = normalizeTime(now)
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return false, err
+	}
+	defer rollback(tx)
+	inserted, err := insertDedup(ctx, tx, dedupKey, source, now)
+	if err != nil {
+		return false, err
+	}
+	if !inserted {
+		return false, tx.Commit()
+	}
+	if _, err := tx.ExecContext(ctx, `UPDATE event_dedup SET state='completed',completed_at=? WHERE dedup_key=?`, formatTime(now), dedupKey); err != nil {
+		return false, err
+	}
+	return true, tx.Commit()
+}
+
 func (s *Store) AdmitResumeRun(ctx context.Context, dedupKey, source string, in ResumeRunInput) (AdmitResult, error) {
 	now := normalizeTime(in.Now)
 	tx, err := s.db.BeginTx(ctx, nil)
@@ -490,6 +513,15 @@ func (s *Store) ListTasks(ctx context.Context, limit int) ([]Task, error) {
 		tasks = append(tasks, task)
 	}
 	return tasks, rows.Err()
+}
+
+// HasActiveTask reports whether a restart would interrupt an admitted bridge
+// task. It intentionally checks task status rather than local goroutine state
+// so restart safety remains correct across app-server event timing.
+func (s *Store) HasActiveTask(ctx context.Context) (bool, error) {
+	var active bool
+	err := s.db.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM tasks WHERE status IN ('queued','running'))`).Scan(&active)
+	return active, err
 }
 
 func (s *Store) GetTask(ctx context.Context, taskID string) (Task, []Run, error) {

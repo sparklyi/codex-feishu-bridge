@@ -1,8 +1,8 @@
 feishu:
   app_id: cli_xxx
   app_secret_env: FEISHU_APP_SECRET
-  # concise only shows phases and milestones; preview also shows a throttled reply draft.
-  card_display_mode: concise
+  # preview shows throttled processing detail; concise hides it.
+  card_display_mode: preview
   # Optional. All Feishu REST and WebSocket connections use this HTTP proxy.
   # Leave unset for direct connections.
   # proxy_url: http://127.0.0.1:7890

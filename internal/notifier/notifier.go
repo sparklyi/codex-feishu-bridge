@@ -4,7 +4,6 @@ import (
 	"context"
 	"errors"
 	"path/filepath"
-	"strconv"
 	"strings"
 
 	"github.com/sparklyi/codex-feishu-bridge/internal/contracts"
@@ -13,14 +12,10 @@ import (
 )
 
 const (
-	continueActionID    = "continue_submit"
-	steerActionID       = "steer_submit"
-	viewDetailsActionID = "view_details"
-	detailsPageActionID = "details_page"
-	successBodyLimit    = 4000
-	failureBodyLimit    = 2000
-	detailPageLimit     = 1500
-	maxDetailPages      = 12
+	continueActionID = "continue_submit"
+	steerActionID    = "steer_submit"
+	successBodyLimit = 4000
+	failureBodyLimit = 2000
 )
 
 var ErrMissingMessageID = errors.New("routeable card send returned empty message id")
@@ -46,18 +41,6 @@ type TaskCardInput struct {
 	Presentation     contracts.TaskPresentation
 }
 
-type DetailsInput struct {
-	ChatID           string
-	ReplyToMessageID string
-	UpdateMessageID  string
-	TaskID           string
-	Status           string
-	ProjectAlias     string
-	CWDLabel         string
-	FinalText        string
-	Page             int
-}
-
 type ThreadOption struct {
 	ID      string
 	Name    string
@@ -81,9 +64,9 @@ type RunningConflictInput struct {
 }
 
 func New(sender transport.Sender, options ...Options) *Notifier {
-	mode := "concise"
-	if len(options) > 0 && options[0].CardDisplayMode == "preview" {
-		mode = "preview"
+	mode := "preview"
+	if len(options) > 0 && options[0].CardDisplayMode == "concise" {
+		mode = "concise"
 	}
 	return &Notifier{sender: sender, cardDisplayMode: mode}
 }
@@ -104,43 +87,20 @@ func (n *Notifier) Failure(ctx context.Context, in TaskCardInput) (contracts.Sen
 	return n.sendTask(ctx, contracts.CardFailure, in, failureBodyLimit)
 }
 
-// Details sends or patches an independent, paged result card. The page source
-// is only the final agent message persisted by the bridge, never tool output.
-func (n *Notifier) Details(ctx context.Context, in DetailsInput) (contracts.SentMessage, error) {
-	pages := detailPages(redact.FeishuText(strings.TrimSpace(in.FinalText), detailPageLimit*maxDetailPages))
-	page := in.Page
-	if page < 0 {
-		page = 0
-	}
-	if page >= len(pages) {
-		page = len(pages) - 1
-	}
-	presentation := contracts.TaskPresentation{
-		Layout:      contracts.TaskCardDetails,
-		DetailText:  pages[page],
-		DetailPage:  page + 1,
-		DetailPages: len(pages),
-	}
-	msg := contracts.OutboundMessage{
-		ChatID:           in.ChatID,
-		ReplyToMessageID: in.ReplyToMessageID,
-		UpdateMessageID:  in.UpdateMessageID,
-		CardKind:         contracts.CardDetails,
-		TaskID:           in.TaskID,
-		Status:           in.Status,
-		Title:            "任务详情",
-		Subtitle:         taskSubtitle(TaskCardInput{ProjectAlias: in.ProjectAlias, CWDLabel: in.CWDLabel}),
-		Presentation:     &presentation,
-		Actions:          detailActions(in.TaskID, page, len(pages)),
-	}
-	sent, err := n.sender.Send(ctx, msg)
-	if err != nil {
-		return contracts.SentMessage{}, err
-	}
-	if sent.MessageID == "" {
-		return contracts.SentMessage{}, ErrMissingMessageID
-	}
-	return sent, nil
+// Restarting confirms a native bridge restart before the service tears down
+// its app-server child process. This path intentionally does not create a
+// Codex task or task card.
+func (n *Notifier) Restarting(ctx context.Context, chatID, replyToMessageID string) error {
+	_, err := n.sender.Send(ctx, contracts.OutboundMessage{
+		ChatID:           chatID,
+		ReplyToMessageID: replyToMessageID,
+		CardKind:         contracts.CardRestarting,
+		Status:           "restarting",
+		Title:            "服务正在重启",
+		Subtitle:         "正在重新连接 Feishu 与 Codex",
+		BodyMarkdown:     "已确认重启请求。服务将在片刻后恢复。",
+	})
+	return err
 }
 
 func (n *Notifier) ThreadSelection(ctx context.Context, in ThreadSelectionInput) (contracts.SentMessage, error) {
@@ -270,7 +230,7 @@ func normalizeTaskPresentation(kind contracts.CardKind, in TaskCardInput, displa
 			presentation.Activity = taskBody(in)
 		}
 		if displayMode != "preview" {
-			presentation.Draft = ""
+			presentation.ProcessingDetail = ""
 		}
 	}
 	return redactPresentation(presentation, limit)
@@ -279,9 +239,8 @@ func normalizeTaskPresentation(kind contracts.CardKind, in TaskCardInput, displa
 func redactPresentation(presentation contracts.TaskPresentation, limit int) contracts.TaskPresentation {
 	presentation.Stage = redact.FeishuText(strings.TrimSpace(presentation.Stage), 120)
 	presentation.Activity = redact.FeishuText(strings.TrimSpace(presentation.Activity), 240)
-	presentation.Draft = redact.FeishuText(strings.TrimSpace(presentation.Draft), 600)
+	presentation.ProcessingDetail = redact.FeishuText(strings.TrimSpace(presentation.ProcessingDetail), 600)
 	presentation.Conclusion = redact.FeishuText(strings.TrimSpace(presentation.Conclusion), limit)
-	presentation.DetailText = redact.FeishuText(strings.TrimSpace(presentation.DetailText), detailPageLimit)
 	presentation.Milestones = redactMilestones(presentation.Milestones)
 	presentation.Changes = redactItems(presentation.Changes, 5, 220)
 	presentation.Verification = redactItems(presentation.Verification, 5, 220)
@@ -350,25 +309,7 @@ func taskActions(status, taskID string) []contracts.Action {
 			{ID: "stop_task", Label: "停止", Style: "danger", Value: map[string]string{"action": "stop_task", "task_id": taskID}},
 		}
 	}
-	actions := []contracts.Action{{ID: continueActionID, Label: "继续跟进", Style: "primary", Value: map[string]string{"action": "continue", "task_id": taskID}}}
-	if status == "succeeded" || status == "failed" || status == "canceled" {
-		actions = append([]contracts.Action{{ID: viewDetailsActionID, Label: "查看详情", Value: map[string]string{"action": "view_details", "task_id": taskID}}}, actions...)
-	}
-	return actions
-}
-
-func detailActions(taskID string, page, pages int) []contracts.Action {
-	if pages <= 1 {
-		return nil
-	}
-	actions := make([]contracts.Action, 0, 2)
-	if page > 0 {
-		actions = append(actions, contracts.Action{ID: detailsPageActionID, Label: "上一页", Value: map[string]string{"action": "details_page", "task_id": taskID, "page": strconv.Itoa(page - 1)}})
-	}
-	if page+1 < pages {
-		actions = append(actions, contracts.Action{ID: detailsPageActionID, Label: "下一页", Style: "primary", Value: map[string]string{"action": "details_page", "task_id": taskID, "page": strconv.Itoa(page + 1)}})
-	}
-	return actions
+	return []contracts.Action{{ID: continueActionID, Label: "继续跟进", Style: "primary", Value: map[string]string{"action": "continue", "task_id": taskID}}}
 }
 
 func taskBody(in TaskCardInput) string {
@@ -452,33 +393,4 @@ func localizedStatus(status string) string {
 	default:
 		return status
 	}
-}
-
-func detailPages(text string) []string {
-	text = strings.TrimSpace(text)
-	if text == "" {
-		return []string{"暂无更完整的结果内容。"}
-	}
-	pages := make([]string, 0, 1)
-	remaining := []rune(text)
-	for len(remaining) > 0 && len(pages) < maxDetailPages {
-		end := detailPageLimit
-		if end >= len(remaining) {
-			pages = append(pages, strings.TrimSpace(string(remaining)))
-			break
-		}
-		for candidate := end; candidate > end-180 && candidate > 0; candidate-- {
-			if remaining[candidate] == '\n' {
-				end = candidate + 1
-				break
-			}
-		}
-		pages = append(pages, strings.TrimSpace(string(remaining[:end])))
-		remaining = remaining[end:]
-	}
-	if len(remaining) > 0 && len(pages) > 0 {
-		last := len(pages) - 1
-		pages[last] = strings.TrimSpace(pages[last]) + "\n\n内容较长，已截断。"
-	}
-	return pages
 }

@@ -7,6 +7,7 @@ const (
 	KindStartTask       Kind = "start_task"
 	KindUnknownProject  Kind = "unknown_project"
 	KindThreadSelection Kind = "thread_selection"
+	KindRestartService  Kind = "restart_service"
 )
 
 type ParseInput struct {

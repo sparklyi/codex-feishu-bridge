@@ -17,7 +17,7 @@ import (
 const (
 	defaultCommand               = "codex"
 	defaultStartupTimeoutSeconds = 15
-	defaultCardDisplayMode       = "concise"
+	defaultCardDisplayMode       = "preview"
 )
 
 type Config struct {

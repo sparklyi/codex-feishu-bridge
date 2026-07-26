@@ -117,6 +117,60 @@ func TestRecoverRunningMarksTasksTerminal(t *testing.T) {
 	}
 }
 
+func TestHasActiveTaskOnlyIncludesQueuedAndRunningTasks(t *testing.T) {
+	ctx := context.Background()
+	s := openTestStore(t)
+	defer func() { _ = s.Close() }()
+	active, err := s.HasActiveTask(ctx)
+	if err != nil || active {
+		t.Fatalf("fresh store active=%v err=%v", active, err)
+	}
+	now := time.Now().UTC()
+	admit, err := s.AdmitNewTask(ctx, "active", "message", CreateTaskInput{
+		TaskID: "active-task", RunID: "active-run", CWD: "/repo", CreatedBy: "ou_owner", ChatID: "chat", Prompt: "work", Now: now,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if active, err = s.HasActiveTask(ctx); err != nil || !active {
+		t.Fatalf("queued task active=%v err=%v", active, err)
+	}
+	if _, _, err := s.StartRun(ctx, StartRunInput{RunID: admit.Run.ID, ThreadID: "thread", TurnID: "turn", Now: now}); err != nil {
+		t.Fatal(err)
+	}
+	if active, err = s.HasActiveTask(ctx); err != nil || !active {
+		t.Fatalf("running task active=%v err=%v", active, err)
+	}
+	if err := s.FinishRun(ctx, "active", FinishRunInput{RunID: admit.Run.ID, ThreadID: "thread", TurnID: "turn", Status: "succeeded", ExitCode: 0, FinishedAt: now.Add(time.Second)}); err != nil {
+		t.Fatal(err)
+	}
+	if active, err = s.HasActiveTask(ctx); err != nil || active {
+		t.Fatalf("finished task active=%v err=%v", active, err)
+	}
+	if _, _, err := s.AttachThread(ctx, "idle", "message", AttachThreadInput{
+		TaskID: "idle-task", ThreadID: "thread-idle", CWD: "/repo", CreatedBy: "ou_owner", ChatID: "chat", Now: now,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if active, err = s.HasActiveTask(ctx); err != nil || active {
+		t.Fatalf("idle task active=%v err=%v", active, err)
+	}
+}
+
+func TestAdmitRestartDeduplicatesCompletedCommand(t *testing.T) {
+	ctx := context.Background()
+	s := openTestStore(t)
+	defer func() { _ = s.Close() }()
+	admitted, err := s.AdmitRestart(ctx, "restart-event", "message", time.Now())
+	if err != nil || !admitted {
+		t.Fatalf("first restart admission = %v, %v", admitted, err)
+	}
+	admitted, err = s.AdmitRestart(ctx, "restart-event", "message", time.Now())
+	if err != nil || admitted {
+		t.Fatalf("duplicate restart admission = %v, %v", admitted, err)
+	}
+}
+
 func TestRejectsUnsupportedMultiVersionDatabase(t *testing.T) {
 	ctx := context.Background()
 	path := filepath.Join(t.TempDir(), "legacy.db")

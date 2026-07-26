@@ -194,7 +194,7 @@ func TestCardDisplayModeDefaultsAndValidation(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if cfg.Feishu.CardDisplayMode != "concise" {
+	if cfg.Feishu.CardDisplayMode != "preview" {
 		t.Fatalf("default card display mode = %q", cfg.Feishu.CardDisplayMode)
 	}
 	invalid := Config{Feishu: FeishuConfig{CardDisplayMode: "terminal"}}

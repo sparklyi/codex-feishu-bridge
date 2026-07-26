@@ -162,11 +162,11 @@ func TestBuildInteractiveCardRendersDeveloperRunningWorkspace(t *testing.T) {
 		Title:    "正在处理",
 		Subtitle: "项目：backend",
 		Presentation: &contracts.TaskPresentation{
-			Layout:     contracts.TaskCardRunning,
-			Stage:      "验证",
-			Activity:   "正在执行测试。",
-			Milestones: []contracts.TaskMilestone{{Label: "已读取代码", Kind: "read"}, {Label: "已修改 2 个文件", Kind: "change"}},
-			Draft:      "正在整理可读的回复草稿。",
+			Layout:           contracts.TaskCardRunning,
+			Stage:            "验证",
+			Activity:         "正在执行测试。",
+			Milestones:       []contracts.TaskMilestone{{Label: "已读取代码", Kind: "read"}, {Label: "已修改 2 个文件", Kind: "change"}},
+			ProcessingDetail: "正在整理可读的处理详情。",
 		},
 		Actions: []contracts.Action{
 			{ID: "steer_submit", Label: "补充到本轮", Style: "primary", Value: map[string]string{"action": "steer", "task_id": "task-1"}},
@@ -177,7 +177,7 @@ func TestBuildInteractiveCardRendersDeveloperRunningWorkspace(t *testing.T) {
 		t.Fatal(err)
 	}
 	body := string(card)
-	for _, want := range []string{"阶段", "验证", "里程碑", "当前活动", "关键里程碑", "回复草稿", "补充到本轮", "正在执行测试。"} {
+	for _, want := range []string{"阶段", "验证", "里程碑", "当前活动", "关键里程碑", "处理详情", "补充到本轮", "正在执行测试。"} {
 		if !jsonContains(body, want) {
 			t.Fatalf("running workspace missing %q: %s", want, body)
 		}
@@ -198,7 +198,7 @@ func TestBuildInteractiveCardRendersDeveloperRunningWorkspace(t *testing.T) {
 	}
 }
 
-func TestBuildInteractiveCardRendersResultAndDetailsLayouts(t *testing.T) {
+func TestBuildInteractiveCardRendersInlineResultLayout(t *testing.T) {
 	result, err := BuildInteractiveCard(contracts.OutboundMessage{
 		CardKind: contracts.CardSuccess,
 		Status:   "succeeded",
@@ -206,40 +206,19 @@ func TestBuildInteractiveCardRendersResultAndDetailsLayouts(t *testing.T) {
 		Subtitle: "项目：backend",
 		Presentation: &contracts.TaskPresentation{
 			Layout:       contracts.TaskCardResult,
-			Conclusion:   "已完成卡片展示改造。",
+			Conclusion:   "最终 AI 回复内容。",
 			Changes:      []string{"新增事件归类"},
 			Verification: []string{"go test ./... 已通过"},
 		},
-		Actions: []contracts.Action{
-			{ID: "view_details", Label: "查看详情", Value: map[string]string{"action": "view_details", "task_id": "task-1"}},
-			{ID: "continue_submit", Label: "继续跟进", Style: "primary", Value: map[string]string{"action": "continue", "task_id": "task-1"}},
-		},
+		Actions: []contracts.Action{{ID: "continue_submit", Label: "继续跟进", Style: "primary", Value: map[string]string{"action": "continue", "task_id": "task-1"}}},
 	})
 	if err != nil {
 		t.Fatal(err)
 	}
-	for _, want := range []string{"结论", "改动", "验证", "查看详情", "继续跟进"} {
+	for _, want := range []string{"结论", "最终 AI 回复内容。", "改动", "验证", "继续跟进"} {
 		if !jsonContains(string(result), want) {
 			t.Fatalf("result card missing %q: %s", want, string(result))
 		}
-	}
-	details, err := BuildInteractiveCard(contracts.OutboundMessage{
-		CardKind: contracts.CardDetails,
-		Status:   "succeeded",
-		Title:    "任务详情",
-		Presentation: &contracts.TaskPresentation{
-			Layout:      contracts.TaskCardDetails,
-			DetailText:  "完整最终回复。",
-			DetailPage:  2,
-			DetailPages: 3,
-		},
-		Actions: []contracts.Action{{ID: "details_page", Label: "下一页", Style: "primary", Value: map[string]string{"action": "details_page", "page": "2", "task_id": "task-1"}}},
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if !jsonContains(string(details), "第 2 / 3 页") || !jsonContains(string(details), "完整最终回复") || !jsonContains(string(details), "下一页") {
-		t.Fatalf("details layout malformed: %s", string(details))
 	}
 }
 

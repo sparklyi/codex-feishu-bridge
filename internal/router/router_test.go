@@ -64,7 +64,7 @@ func TestRouterListsAndAttachesDesktopThread(t *testing.T) {
 	}
 }
 
-func TestRouterResumesAttachedThreadAndHandlesStop(t *testing.T) {
+func TestRouterResumesAttachedThreadFromContinueActionAndHandlesStop(t *testing.T) {
 	ctx := context.Background()
 	router, st, controller, notes := newTestRouter(t)
 	defer func() { _ = st.Close() }()
@@ -79,7 +79,7 @@ func TestRouterResumesAttachedThreadAndHandlesStop(t *testing.T) {
 	if err := st.InsertMessageRoute(ctx, "task-card", task.ID, "start_card"); err != nil {
 		t.Fatal(err)
 	}
-	if err := router.Handle(ctx, contracts.InboundEvent{Kind: contracts.InboundReply, DedupKey: "resume", ChatType: "private", ChatID: "chat", SenderOpenID: "ou_owner", MessageID: "reply", RootMessageID: "task-card", Text: "continue from desktop"}); err != nil {
+	if err := router.Handle(ctx, contracts.InboundEvent{Kind: contracts.InboundCardAction, DedupKey: "resume", ChatType: "private", ChatID: "chat", SenderOpenID: "ou_owner", MessageID: "task-card", RootMessageID: "task-card", Text: "continue from desktop", ActionValue: map[string]string{"action": "continue", "task_id": task.ID}}); err != nil {
 		t.Fatal(err)
 	}
 	if len(controller.enqueues) != 1 || controller.enqueues[0].Run.Kind != "resume" || controller.enqueues[0].Task.CodexThreadID != "desktop-thread" || controller.enqueues[0].Project.CWD != "/repo/backend" {
@@ -124,35 +124,23 @@ func TestRouterSteersActiveTaskWithoutCreatingAnotherRun(t *testing.T) {
 	}
 }
 
-func TestRouterSendsAndPatchesDetailsCard(t *testing.T) {
+func TestRouterRejectsUnsupportedCardAction(t *testing.T) {
 	ctx := context.Background()
-	router, st, _, notes := newTestRouter(t)
+	router, st, controller, notes := newTestRouter(t)
 	defer func() { _ = st.Close() }()
-	task := newFinishedTask(t, ctx, st)
 	if err := router.Handle(ctx, contracts.InboundEvent{
 		Kind: contracts.InboundCardAction, ChatType: "private", ChatID: "chat", SenderOpenID: "ou_owner", MessageID: "result-card", RootMessageID: "result-card",
-		ActionValue: map[string]string{"action": "view_details", "task_id": task.ID},
+		Text:        "continue this task",
+		ActionValue: map[string]string{"action": "unsupported_action", "task_id": "task-1"},
 	}); err != nil {
 		t.Fatal(err)
 	}
-	if len(notes.details) != 1 || notes.details[0].ReplyToMessageID != "result-card" || notes.details[0].UpdateMessageID != "" || notes.details[0].FinalText != "final result" {
-		t.Fatalf("details card was not sent from the persisted result: %+v", notes.details)
-	}
-	if routed, err := st.ResolveMessageRoute(ctx, "details"); err != nil || routed.ID != task.ID {
-		t.Fatalf("details route missing: task=%+v err=%v", routed, err)
-	}
-	if err := router.Handle(ctx, contracts.InboundEvent{
-		Kind: contracts.InboundCardAction, ChatType: "private", ChatID: "chat", SenderOpenID: "ou_owner", MessageID: "details",
-		ActionValue: map[string]string{"action": "details_page", "task_id": task.ID, "page": "1"},
-	}); err != nil {
-		t.Fatal(err)
-	}
-	if len(notes.details) != 2 || notes.details[1].UpdateMessageID != "details" || notes.details[1].Page != 1 {
-		t.Fatalf("details page should patch its existing card: %+v", notes.details)
+	if len(notes.rejections) != 1 || notes.rejections[0] != "该卡片操作已不再支持。" || len(controller.enqueues) != 0 {
+		t.Fatalf("unsupported action should be rejected without continuing: rejections=%+v enqueues=%+v", notes.rejections, controller.enqueues)
 	}
 }
 
-func TestRouterRejectsSteerAndDetailsOutsideTaskOwnership(t *testing.T) {
+func TestRouterRejectsSteerOutsideTaskOwnership(t *testing.T) {
 	ctx := context.Background()
 	router, st, controller, notes := newTestRouter(t)
 	defer func() { _ = st.Close() }()
@@ -168,14 +156,8 @@ func TestRouterRejectsSteerAndDetailsOutsideTaskOwnership(t *testing.T) {
 	}); err != nil {
 		t.Fatal(err)
 	}
-	if err := router.Handle(ctx, contracts.InboundEvent{
-		Kind: contracts.InboundCardAction, ChatType: "private", ChatID: "other-chat", SenderOpenID: "ou_owner", MessageID: "card",
-		ActionValue: map[string]string{"action": "view_details", "task_id": task.ID},
-	}); err != nil {
-		t.Fatal(err)
-	}
-	if len(controller.steers) != 0 || len(notes.details) != 0 || len(notes.rejections) != 2 {
-		t.Fatalf("out-of-scope actions must be rejected: steers=%+v details=%+v rejections=%+v", controller.steers, notes.details, notes.rejections)
+	if len(controller.steers) != 0 || len(notes.rejections) != 1 {
+		t.Fatalf("out-of-scope steer must be rejected: steers=%+v rejections=%+v", controller.steers, notes.rejections)
 	}
 }
 
@@ -215,6 +197,86 @@ func TestRouterIgnoresNonPrivateEventsBeforeAuthorization(t *testing.T) {
 	}
 	if len(controller.enqueues) != 0 || len(notes.rejections) != 0 || len(notes.starts) != 0 {
 		t.Fatalf("non-private event must be ignored: controller=%+v notes=%+v", controller, notes)
+	}
+}
+
+func TestRouterRestartsIdleServiceWithoutCreatingCodexTask(t *testing.T) {
+	ctx := context.Background()
+	router, st, controller, notes := newTestRouter(t)
+	defer func() { _ = st.Close() }()
+	restarts := 0
+	router.restart = func() { restarts++ }
+	if err := router.Handle(ctx, contracts.InboundEvent{
+		DedupKey:     "restart-event",
+		Kind:         contracts.InboundNewTask,
+		ChatType:     "private",
+		ChatID:       "chat",
+		SenderOpenID: "ou_owner",
+		MessageID:    "restart",
+		Text:         "重启服务",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := router.Handle(ctx, contracts.InboundEvent{
+		DedupKey:     "restart-event",
+		Kind:         contracts.InboundNewTask,
+		ChatType:     "private",
+		ChatID:       "chat",
+		SenderOpenID: "ou_owner",
+		MessageID:    "restart",
+		Text:         "重启服务",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if restarts != 1 || len(notes.restarts) != 1 || len(controller.enqueues) != 0 || len(notes.rejections) != 0 {
+		t.Fatalf("restart handling = restarts:%d cards:%+v enqueues:%+v rejections:%+v", restarts, notes.restarts, controller.enqueues, notes.rejections)
+	}
+}
+
+func TestRouterRejectsRestartWhileTaskIsActive(t *testing.T) {
+	ctx := context.Background()
+	router, st, _, notes := newTestRouter(t)
+	defer func() { _ = st.Close() }()
+	if _, err := st.AdmitNewTask(ctx, "active", "message", store.CreateTaskInput{
+		TaskID: "active-task", RunID: "active-run", CWD: "/repo/default", CreatedBy: "ou_owner", ChatID: "chat", Prompt: "work", Now: time.Now(),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	restarts := 0
+	router.restart = func() { restarts++ }
+	if err := router.Handle(ctx, contracts.InboundEvent{
+		DedupKey:     "restart-active",
+		Kind:         contracts.InboundNewTask,
+		ChatType:     "private",
+		ChatID:       "chat",
+		SenderOpenID: "ou_owner",
+		MessageID:    "restart",
+		Text:         "/restart",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if restarts != 0 || len(notes.restarts) != 0 || len(notes.rejections) != 1 {
+		t.Fatalf("active restart should be rejected: restarts=%d cards=%+v rejections=%+v", restarts, notes.restarts, notes.rejections)
+	}
+}
+
+func TestRouterRejectsRestartWithoutSupervisor(t *testing.T) {
+	ctx := context.Background()
+	router, st, _, notes := newTestRouter(t)
+	defer func() { _ = st.Close() }()
+	if err := router.Handle(ctx, contracts.InboundEvent{
+		DedupKey:     "restart-unsupervised",
+		Kind:         contracts.InboundNewTask,
+		ChatType:     "private",
+		ChatID:       "chat",
+		SenderOpenID: "ou_owner",
+		MessageID:    "restart",
+		Text:         "restart service",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if len(notes.restarts) != 0 || len(notes.rejections) != 1 {
+		t.Fatalf("unsupervised restart should be rejected: cards=%+v rejections=%+v", notes.restarts, notes.rejections)
 	}
 }
 
@@ -274,28 +336,6 @@ type steerCall struct {
 	Text   string
 }
 
-func newFinishedTask(t *testing.T, ctx context.Context, st *store.Store) store.Task {
-	t.Helper()
-	admit, err := st.AdmitNewTask(ctx, "finished", "message", store.CreateTaskInput{
-		TaskID: "finished", RunID: "finished-run", CWD: "/repo/default", CreatedBy: "ou_owner", ChatID: "chat", Prompt: "work", Now: time.Now(),
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if _, _, err := st.StartRun(ctx, store.StartRunInput{RunID: admit.Run.ID, ThreadID: "thread-1", TurnID: "turn-1", Now: time.Now()}); err != nil {
-		t.Fatal(err)
-	}
-	if err := st.FinishRun(ctx, "finished", store.FinishRunInput{
-		RunID: admit.Run.ID, ThreadID: "thread-1", TurnID: "turn-1", Status: "succeeded", ExitCode: 0, FinalText: "final result", FinishedAt: time.Now(),
-	}); err != nil {
-		t.Fatal(err)
-	}
-	task, _, err := st.GetTask(ctx, admit.Task.ID)
-	if err != nil {
-		t.Fatal(err)
-	}
-	return task
-}
 func (f *fakeController) Stop(_ context.Context, taskID string) error {
 	f.stops = append(f.stops, taskID)
 	return f.err
@@ -304,10 +344,15 @@ func (f *fakeController) Stop(_ context.Context, taskID string) error {
 type fakeNotifier struct {
 	startIDs         []string
 	starts           []notifier.TaskCardInput
-	details          []notifier.DetailsInput
 	threadSelections []notifier.ThreadSelectionInput
 	routingErrors    []string
 	rejections       []string
+	restarts         []restartCall
+}
+
+type restartCall struct {
+	ChatID           string
+	ReplyToMessageID string
 }
 
 func (f *fakeNotifier) Start(_ context.Context, input notifier.TaskCardInput) (contracts.SentMessage, error) {
@@ -322,10 +367,6 @@ func (f *fakeNotifier) Start(_ context.Context, input notifier.TaskCardInput) (c
 func (f *fakeNotifier) Failure(context.Context, notifier.TaskCardInput) (contracts.SentMessage, error) {
 	return contracts.SentMessage{MessageID: "failure"}, nil
 }
-func (f *fakeNotifier) Details(_ context.Context, input notifier.DetailsInput) (contracts.SentMessage, error) {
-	f.details = append(f.details, input)
-	return contracts.SentMessage{MessageID: "details"}, nil
-}
 func (f *fakeNotifier) ThreadSelection(_ context.Context, input notifier.ThreadSelectionInput) (contracts.SentMessage, error) {
 	f.threadSelections = append(f.threadSelections, input)
 	return contracts.SentMessage{MessageID: "threads"}, nil
@@ -339,6 +380,10 @@ func (f *fakeNotifier) Rejection(_ context.Context, _ string, _ string, body str
 	return nil
 }
 func (f *fakeNotifier) RunningConflict(context.Context, notifier.RunningConflictInput) error {
+	return nil
+}
+func (f *fakeNotifier) Restarting(_ context.Context, chatID, replyToMessageID string) error {
+	f.restarts = append(f.restarts, restartCall{ChatID: chatID, ReplyToMessageID: replyToMessageID})
 	return nil
 }
 

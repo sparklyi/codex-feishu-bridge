@@ -78,13 +78,13 @@ func TestControllerCoalescesSlowProgressCardUpdates(t *testing.T) {
 	if active == nil {
 		t.Fatal("active run was not registered")
 	}
-	api.events <- appserver.Event{Method: "item/agentMessage/delta", Params: json.RawMessage(`{"threadId":"thread-1","turnId":"turn-1","itemId":"item-1","delta":"first preview fragment "}`)}
-	api.events <- appserver.Event{Method: "item/agentMessage/delta", Params: json.RawMessage(`{"threadId":"thread-1","turnId":"turn-1","itemId":"item-1","delta":"second preview fragment "}`)}
-	api.events <- appserver.Event{Method: "item/agentMessage/delta", Params: json.RawMessage(`{"threadId":"thread-1","turnId":"turn-1","itemId":"item-1","delta":"latest preview fragment is complete."}`)}
-	waitUntil(t, func() bool { return strings.Contains(active.text(), "latest preview fragment") })
+	api.events <- appserver.Event{Method: "item/agentMessage/delta", Params: json.RawMessage(`{"threadId":"thread-1","turnId":"turn-1","itemId":"item-1","delta":"first processing detail fragment "}`)}
+	api.events <- appserver.Event{Method: "item/agentMessage/delta", Params: json.RawMessage(`{"threadId":"thread-1","turnId":"turn-1","itemId":"item-1","delta":"second processing detail fragment "}`)}
+	api.events <- appserver.Event{Method: "item/agentMessage/delta", Params: json.RawMessage(`{"threadId":"thread-1","turnId":"turn-1","itemId":"item-1","delta":"latest processing detail fragment is complete."}`)}
+	waitUntil(t, func() bool { return strings.Contains(active.text(), "latest processing detail fragment") })
 
 	// Keep the first Patch in flight longer than one update interval. The stream
-	// must collapse to one latest-preview update instead of replaying each delta.
+	// must collapse to one latest processing-detail update instead of replaying each delta.
 	time.Sleep(progressUpdateInterval + 50*time.Millisecond)
 	notes.release()
 	waitUntil(t, func() bool { return notes.progressCount() >= 2 })
@@ -92,8 +92,8 @@ func TestControllerCoalescesSlowProgressCardUpdates(t *testing.T) {
 	if len(updates) != 2 {
 		t.Fatalf("progress updates = %d, want 2: %+v", len(updates), updates)
 	}
-	if !strings.Contains(updates[1].Presentation.Draft, "latest preview fragment") {
-		t.Fatalf("latest preview draft was not sent: %+v", updates[1].Presentation)
+	if !strings.Contains(updates[1].Presentation.ProcessingDetail, "latest processing detail fragment") {
+		t.Fatalf("latest processing detail was not sent: %+v", updates[1].Presentation)
 	}
 	time.Sleep(progressUpdateInterval + 50*time.Millisecond)
 	if count := notes.progressCount(); count != 2 {
@@ -115,7 +115,7 @@ func TestControllerRetriesTransientProgressPatch(t *testing.T) {
 	}
 	waitFor(t, api.startedTurn)
 	waitUntil(t, func() bool { return controller.activeFor("thread-1", "turn-1") != nil })
-	api.events <- appserver.Event{Method: "item/agentMessage/delta", Params: json.RawMessage(`{"threadId":"thread-1","turnId":"turn-1","itemId":"item-1","delta":"retry-this-progress contains enough text to update the preview."}`)}
+	api.events <- appserver.Event{Method: "item/agentMessage/delta", Params: json.RawMessage(`{"threadId":"thread-1","turnId":"turn-1","itemId":"item-1","delta":"retry-this-progress contains enough text to update the processing detail."}`)}
 
 	waitUntilFor(t, 4*time.Second, func() bool { return notes.matchCount() == 2 })
 	for _, update := range notes.matchingUpdates() {
@@ -125,13 +125,13 @@ func TestControllerRetriesTransientProgressPatch(t *testing.T) {
 	}
 }
 
-func TestControllerUsesItemEventsAndKeepsConciseCardsFreeOfDeltas(t *testing.T) {
+func TestControllerUsesItemEventsAndKeepsConciseCardsFreeOfProcessingDetails(t *testing.T) {
 	ctx := context.Background()
 	st, task, run := newQueuedTask(t, ctx)
 	defer func() { _ = st.Close() }()
 	api := newFakeAPI()
 	notes := &recordingNotifier{}
-	controller := New(ControllerOptions{AppServer: api, Store: st, Notifier: notes})
+	controller := New(ControllerOptions{AppServer: api, Store: st, Notifier: notes, CardDisplayMode: "concise"})
 	defer controller.Close()
 	if err := controller.Enqueue(ctx, StartInput{Task: task, Run: run, Project: config.ResolvedProject{CWD: task.CWD}, CardMessageID: "card", DedupKey: "new"}); err != nil {
 		t.Fatal(err)
@@ -152,8 +152,8 @@ func TestControllerUsesItemEventsAndKeepsConciseCardsFreeOfDeltas(t *testing.T) 
 		return len(presentation.Milestones) >= 2 && len(active.resultPresentation("succeeded", "").Changes) > 0
 	})
 	presentation := active.progressPresentation()
-	if presentation.Draft != "" || strings.Contains(presentation.Stage+presentation.Activity+milestoneText(presentation.Milestones), "go test") {
-		t.Fatalf("concise presentation leaked draft or raw command: %+v", presentation)
+	if presentation.ProcessingDetail != "" || strings.Contains(presentation.Stage+presentation.Activity+milestoneText(presentation.Milestones), "go test") {
+		t.Fatalf("concise presentation leaked processing detail or raw command: %+v", presentation)
 	}
 	waitUntil(t, func() bool {
 		return notes.hasProgress(func(input notifier.TaskCardInput) bool {
@@ -161,7 +161,7 @@ func TestControllerUsesItemEventsAndKeepsConciseCardsFreeOfDeltas(t *testing.T) 
 		})
 	})
 	before := notes.progressCount()
-	api.events <- appserver.Event{Method: "item/agentMessage/delta", Params: json.RawMessage(`{"threadId":"thread-1","turnId":"turn-1","itemId":"item-1","delta":"this draft must stay local in concise mode."}`)}
+	api.events <- appserver.Event{Method: "item/agentMessage/delta", Params: json.RawMessage(`{"threadId":"thread-1","turnId":"turn-1","itemId":"item-1","delta":"this processing detail must stay local in concise mode."}`)}
 	time.Sleep(progressUpdateInterval + 100*time.Millisecond)
 	if after := notes.progressCount(); after != before {
 		t.Fatalf("concise mode patched card for a delta: before=%d after=%d", before, after)
@@ -218,23 +218,52 @@ func TestClassifyDisplayItemOmitsCommandAndOutputDetails(t *testing.T) {
 }
 
 func TestActiveRunUsesCompletedAgentMessageAsAuthoritativeText(t *testing.T) {
-	active := &activeRun{draftText: "stale streamed draft"}
-	active.setFinalText("")
-	if got := active.text(); got != "" {
-		t.Fatalf("completed agent message must replace a draft even when empty, got %q", got)
+	active := &activeRun{processingDetail: "stale streamed processing detail"}
+	active.setFinalText("authoritative final reply")
+	if got := active.text(); got != "authoritative final reply" {
+		t.Fatalf("completed agent message must replace processing detail, got %q", got)
 	}
 }
 
-func TestSummarizeFinalTextUsesStructuredDeveloperSections(t *testing.T) {
-	conclusion, changes, verification := summarizeFinalText("## Summary\n完成任务卡改造。\n\n## Changes\n- 新增事件归类\n\n## 验证\n- go test ./... 已通过")
-	if conclusion != "完成任务卡改造。" {
-		t.Fatalf("conclusion = %q", conclusion)
+func TestActiveRunRetainsStreamedProcessingDetailWhenCompletionHasNoText(t *testing.T) {
+	active := &activeRun{processingDetail: "streamed final reply"}
+	active.setFinalText("")
+	if got := active.text(); got != "streamed final reply" {
+		t.Fatalf("empty completed item must retain the streamed reply, got %q", got)
 	}
+	if got := active.resultPresentation("succeeded", "").Conclusion; got != "streamed final reply" {
+		t.Fatalf("result card conclusion lost the streamed reply, got %q", got)
+	}
+}
+
+func TestResultPresentationUsesFinalReplyAsConclusion(t *testing.T) {
+	finalReply := "## Summary\n完成任务卡改造。\n\n## Changes\n- 删除重复结果区块\n\n## 验证\n- go test ./... 已通过"
+	presentation := (&activeRun{finalText: finalReply}).resultPresentation("succeeded", "")
+	if presentation.Conclusion != finalReply {
+		t.Fatalf("conclusion should retain the final reply, got %q", presentation.Conclusion)
+	}
+	if len(presentation.Changes) != 1 || presentation.Changes[0] != "删除重复结果区块" {
+		t.Fatalf("changes = %+v", presentation.Changes)
+	}
+	if len(presentation.Verification) != 1 || presentation.Verification[0] != "go test ./... 已通过" {
+		t.Fatalf("verification = %+v", presentation.Verification)
+	}
+}
+
+func TestExtractResultDetailsUsesStructuredDeveloperSections(t *testing.T) {
+	changes, verification := extractResultDetails("## Summary\n完成任务卡改造。\n\n## Changes\n- 新增事件归类\n\n## 验证\n- go test ./... 已通过")
 	if len(changes) != 1 || changes[0] != "新增事件归类" {
 		t.Fatalf("changes = %+v", changes)
 	}
 	if len(verification) != 1 || verification[0] != "go test ./... 已通过" {
 		t.Fatalf("verification = %+v", verification)
+	}
+}
+
+func TestExtractResultDetailsKeepsMarkdownInChangeItems(t *testing.T) {
+	changes, _ := extractResultDetails("## Changes\n- **高优先级**：完成卡片没有最终回复")
+	if len(changes) != 1 || changes[0] != "**高优先级**：完成卡片没有最终回复" {
+		t.Fatalf("changes = %+v", changes)
 	}
 }
 
@@ -720,7 +749,7 @@ type transientProgressNotifier struct {
 func (n *transientProgressNotifier) Progress(_ context.Context, input notifier.TaskCardInput) (contracts.SentMessage, error) {
 	n.mu.Lock()
 	defer n.mu.Unlock()
-	if strings.Contains(input.Presentation.Draft, n.needle) {
+	if strings.Contains(input.Presentation.ProcessingDetail, n.needle) {
 		n.matched = append(n.matched, input)
 		if !n.failed {
 			n.failed = true

@@ -247,8 +247,6 @@ func buildTaskPresentationCard(msg contracts.OutboundMessage) ([]byte, error) {
 	switch presentation.Layout {
 	case contracts.TaskCardResult:
 		elements = append(elements, resultCardElements(msg, presentation)...)
-	case contracts.TaskCardDetails:
-		elements = append(elements, detailCardElements(msg, presentation)...)
 	default:
 		elements = append(elements, runningCardElements(msg, presentation)...)
 	}
@@ -300,8 +298,8 @@ func runningCardElements(msg contracts.OutboundMessage, presentation contracts.T
 	if len(presentation.Milestones) > 0 {
 		elements = append(elements, sectionMarkdown("关键里程碑", markdownList(presentation.Milestones)))
 	}
-	if presentation.Draft != "" {
-		elements = append(elements, sectionMarkdown("回复草稿", presentation.Draft))
+	if presentation.ProcessingDetail != "" {
+		elements = append(elements, sectionMarkdown("处理详情", presentation.ProcessingDetail))
 	}
 	return elements
 }
@@ -324,28 +322,6 @@ func resultCardElements(msg contracts.OutboundMessage, presentation contracts.Ta
 		elements = append(elements, sectionMarkdown("验证", markdownStrings(presentation.Verification)))
 	}
 	return elements
-}
-
-func detailCardElements(msg contracts.OutboundMessage, presentation contracts.TaskPresentation) []any {
-	page := presentation.DetailPage
-	if page <= 0 {
-		page = 1
-	}
-	pages := presentation.DetailPages
-	if pages <= 0 {
-		pages = 1
-	}
-	text := presentation.DetailText
-	if text == "" {
-		text = "暂无更完整的结果内容。"
-	}
-	return []any{
-		metadataGrid([]contracts.Field{
-			{Title: "内容", Value: fmt.Sprintf("第 %d / %d 页", page, pages)},
-			{Title: "状态", Value: statusLabel(msg)},
-		}),
-		sectionMarkdown("完整回复", text),
-	}
 }
 
 func sectionMarkdown(title, content string) map[string]any {
@@ -587,8 +563,8 @@ func templateFor(msg contracts.OutboundMessage) string {
 	switch msg.CardKind {
 	case contracts.CardSuccess:
 		return "green"
-	case contracts.CardDetails:
-		return "blue"
+	case contracts.CardRestarting:
+		return "orange"
 	case contracts.CardFailure:
 		if msg.Status == "canceled" {
 			return "grey"
@@ -636,8 +612,8 @@ func cardSubtitle(msg contracts.OutboundMessage) string {
 	switch msg.CardKind {
 	case contracts.CardSuccess:
 		return "本机 Codex 已完成执行"
-	case contracts.CardDetails:
-		return "分页查看最终回复"
+	case contracts.CardRestarting:
+		return "正在重新连接 Feishu 与 Codex"
 	case contracts.CardFailure:
 		return "本机 Codex 需要你的处理"
 	case contracts.CardThreadSelection:
@@ -656,8 +632,8 @@ func headerIcon(msg contracts.OutboundMessage) map[string]any {
 	switch msg.CardKind {
 	case contracts.CardSuccess:
 		token, color = "thumbsup_outlined", "green"
-	case contracts.CardDetails:
-		token, color = "chat-history_outlined", "blue"
+	case contracts.CardRestarting:
+		token, color = "chat_outlined", "orange"
 	case contracts.CardFailure:
 		if msg.Status == "canceled" {
 			token, color = "chat_outlined", "grey"
@@ -710,6 +686,8 @@ func statusLabel(msg contracts.OutboundMessage) string {
 		return "待处理"
 	case contracts.CardThreadSelection:
 		return "选择会话"
+	case contracts.CardRestarting:
+		return "重启中"
 	case contracts.CardRunningConflict:
 		return "运行中"
 	}
@@ -746,6 +724,8 @@ func statusColor(msg contracts.OutboundMessage) string {
 		return "orange"
 	case contracts.CardThreadSelection:
 		return "blue"
+	case contracts.CardRestarting:
+		return "orange"
 	}
 	switch msg.Status {
 	case "idle", "succeeded":

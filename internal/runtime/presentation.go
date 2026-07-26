@@ -237,7 +237,7 @@ func (a *activeRun) setActivity(stage, activity string) bool {
 	return true
 }
 
-func (a *activeRun) appendDraft(delta string) bool {
+func (a *activeRun) appendProcessingDetail(delta string) bool {
 	if strings.TrimSpace(delta) == "" {
 		return false
 	}
@@ -246,19 +246,19 @@ func (a *activeRun) appendDraft(delta string) bool {
 	if a.terminal {
 		return false
 	}
-	a.draftText = trimDraftText(a.draftText + delta)
+	a.processingDetail = trimProcessingDetail(a.processingDetail + delta)
 	if a.displayMode != "preview" {
 		return false
 	}
-	current := strings.TrimSpace(a.draftText)
-	if !substantiveDraftDelta(a.lastDraftPreview, current) {
+	current := strings.TrimSpace(a.processingDetail)
+	if !substantiveProcessingDetailDelta(a.lastDetailPreview, current) {
 		return false
 	}
-	a.lastDraftPreview = current
+	a.lastDetailPreview = current
 	return true
 }
 
-func trimDraftText(text string) string {
+func trimProcessingDetail(text string) string {
 	const limit = 1200
 	if utf8.RuneCountInString(text) <= limit {
 		return text
@@ -267,7 +267,7 @@ func trimDraftText(text string) string {
 	return "..." + string(runes[len(runes)-limit:])
 }
 
-func substantiveDraftDelta(previous, current string) bool {
+func substantiveProcessingDetailDelta(previous, current string) bool {
 	if current == "" || current == previous {
 		return false
 	}
@@ -291,7 +291,7 @@ func (a *activeRun) progressPresentation() contracts.TaskPresentation {
 		Milestones: append([]contracts.TaskMilestone(nil), a.milestones...),
 	}
 	if a.displayMode == "preview" {
-		presentation.Draft = strings.TrimSpace(a.draftText)
+		presentation.ProcessingDetail = strings.TrimSpace(a.processingDetail)
 	}
 	return presentation
 }
@@ -300,22 +300,23 @@ func (a *activeRun) resultPresentation(status, fallback string) contracts.TaskPr
 	a.mu.Lock()
 	finalText := strings.TrimSpace(a.finalText)
 	if finalText == "" {
+		finalText = strings.TrimSpace(a.processingDetail)
+	}
+	if finalText == "" {
 		finalText = strings.TrimSpace(fallback)
 	}
 	changes := append([]string(nil), a.changes...)
 	verification := append([]string(nil), a.verification...)
 	a.mu.Unlock()
 
-	conclusion, responseChanges, responseVerification := summarizeFinalText(finalText)
+	responseChanges, responseVerification := extractResultDetails(finalText)
 	for _, value := range responseChanges {
 		changes = appendBoundedUnique(changes, value, 5)
 	}
 	for _, value := range responseVerification {
 		verification = appendBoundedUnique(verification, value, 5)
 	}
-	if conclusion == "" {
-		conclusion = finalText
-	}
+	conclusion := finalText
 	if conclusion == "" {
 		conclusion = terminalConclusion(status)
 	}
@@ -338,8 +339,7 @@ func terminalConclusion(status string) string {
 	}
 }
 
-func summarizeFinalText(text string) (string, []string, []string) {
-	var conclusion string
+func extractResultDetails(text string) ([]string, []string) {
 	changes := make([]string, 0, 3)
 	verification := make([]string, 0, 3)
 	section := ""
@@ -352,26 +352,18 @@ func summarizeFinalText(text string) (string, []string, []string) {
 			section = next
 			continue
 		}
-		line = strings.TrimSpace(strings.TrimLeft(line, "-*0123456789. "))
+		line = trimSummaryPrefix(line)
 		if line == "" {
 			continue
 		}
 		switch section {
-		case "conclusion":
-			if conclusion == "" {
-				conclusion = shortDisplayText(line, 420)
-			}
 		case "change":
 			changes = appendBoundedUnique(changes, shortDisplayText(line, 220), 5)
 		case "verification":
 			verification = appendBoundedUnique(verification, shortDisplayText(line, 220), 5)
-		default:
-			if conclusion == "" {
-				conclusion = shortDisplayText(line, 420)
-			}
 		}
 	}
-	return conclusion, changes, verification
+	return changes, verification
 }
 
 func finalSection(line string) string {
@@ -382,7 +374,9 @@ func finalSection(line string) string {
 	}
 	switch {
 	case containsAny(value, "结论", "总结", "结果", "summary", "result"):
-		return "conclusion"
+		return "skip"
+	case equalsAny(value, "发现", "问题", "发现的问题", "问题清单", "findings", "issues", "risks", "风险"):
+		return "skip"
 	case containsAny(value, "改动", "修改", "changes", "changed", "implementation"):
 		return "change"
 	case containsAny(value, "验证", "测试", "检查", "verification", "tests", "test", "checks"):
@@ -390,6 +384,48 @@ func finalSection(line string) string {
 	default:
 		return ""
 	}
+}
+
+// trimSummaryPrefix removes only structural Markdown prefixes. In particular,
+// it leaves paired emphasis markers intact so a line such as "**发现**" is
+// rendered correctly instead of becoming the malformed "发现**".
+func trimSummaryPrefix(line string) string {
+	line = strings.TrimSpace(line)
+	if len(line) == 0 {
+		return ""
+	}
+
+	if line[0] == '#' {
+		index := 0
+		for index < len(line) && line[index] == '#' {
+			index++
+		}
+		if index <= 6 && index < len(line) && (line[index] == ' ' || line[index] == '\t') {
+			line = strings.TrimSpace(line[index:])
+		}
+	}
+
+	if len(line) >= 2 && (line[0] == '-' || line[0] == '+' || line[0] == '*') && (line[1] == ' ' || line[1] == '\t') {
+		return strings.TrimSpace(line[2:])
+	}
+
+	index := 0
+	for index < len(line) && line[index] >= '0' && line[index] <= '9' {
+		index++
+	}
+	if index > 0 && index+1 < len(line) && (line[index] == '.' || line[index] == ')') && (line[index+1] == ' ' || line[index+1] == '\t') {
+		return strings.TrimSpace(line[index+2:])
+	}
+	return line
+}
+
+func equalsAny(value string, values ...string) bool {
+	for _, candidate := range values {
+		if value == candidate {
+			return true
+		}
+	}
+	return false
 }
 
 func sectionHeading(raw, value string) bool {

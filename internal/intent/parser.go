@@ -10,6 +10,9 @@ func ParseStart(input ParseInput) Intent {
 	if text == "/sessions" {
 		return Intent{Kind: KindThreadSelection}
 	}
+	if IsRestartService(text) {
+		return Intent{Kind: KindRestartService}
+	}
 	alias, prompt, hasAlias := leadingProjectAlias(text)
 	if hasAlias {
 		if !hasProjectAlias(input.ProjectAliases, alias) {
@@ -18,6 +21,18 @@ func ParseStart(input ParseInput) Intent {
 		return Intent{Kind: KindStartTask, ProjectAlias: alias, Prompt: prompt}
 	}
 	return Intent{Kind: KindStartTask, Prompt: text}
+}
+
+// IsRestartService recognizes the intentionally narrow, native service
+// restart command. It must not be sent to a Codex turn because the bridge owns
+// that turn's app-server process.
+func IsRestartService(text string) bool {
+	switch strings.ToLower(strings.TrimSpace(text)) {
+	case "/restart", "restart service", "重启服务":
+		return true
+	default:
+		return false
+	}
 }
 
 func leadingProjectAlias(text string) (string, string, bool) {

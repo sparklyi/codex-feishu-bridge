@@ -117,10 +117,9 @@ type activeRun struct {
 	milestones         []contracts.TaskMilestone
 	changes            []string
 	verification       []string
-	draftText          string
-	lastDraftPreview   string
+	processingDetail   string
+	lastDetailPreview  string
 	finalText          string
-	finalReceived      bool
 	lastProgress       time.Time
 	progressRetryAfter time.Time
 	pendingProgress    contracts.TaskPresentation
@@ -150,8 +149,8 @@ func New(opts ControllerOptions) *Controller {
 		appServerTimeout = defaultAppServerTimeout
 	}
 	displayMode := opts.CardDisplayMode
-	if displayMode != "preview" {
-		displayMode = "concise"
+	if displayMode != "concise" {
+		displayMode = "preview"
 	}
 	ctx, cancel := context.WithCancel(context.Background())
 	c := &Controller{
@@ -479,7 +478,7 @@ func (c *Controller) handleEvent(event appserver.Event) {
 			return
 		}
 		if active := c.activeFor(params.ThreadID, params.TurnID); active != nil {
-			if active.appendDraft(params.Delta) {
+			if active.appendProcessingDetail(params.Delta) {
 				c.sendProgress(active, false)
 			}
 		}
@@ -941,19 +940,21 @@ func (a *activeRun) stopPending() bool {
 }
 
 func (a *activeRun) setFinalText(text string) {
+	if strings.TrimSpace(text) == "" {
+		return
+	}
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	a.finalText = text
-	a.finalReceived = true
 }
 
 func (a *activeRun) text() string {
 	a.mu.Lock()
 	defer a.mu.Unlock()
-	if a.finalReceived {
+	if strings.TrimSpace(a.finalText) != "" {
 		return strings.TrimSpace(a.finalText)
 	}
-	return strings.TrimSpace(a.draftText)
+	return strings.TrimSpace(a.processingDetail)
 }
 
 func (a *activeRun) queueProgress(presentation contracts.TaskPresentation, force bool) bool {

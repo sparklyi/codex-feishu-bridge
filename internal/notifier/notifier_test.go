@@ -38,45 +38,37 @@ func TestTaskCardsStreamAndExposeStopOnlyWhileActive(t *testing.T) {
 	if _, err := n.Success(context.Background(), TaskCardInput{ChatID: "chat", UpdateMessageID: "message-1", TaskID: "task-1", Status: "succeeded", Body: "done"}); err != nil {
 		t.Fatal(err)
 	}
-	if hasAction(sender.messages[2], "stop_task") || !hasAction(sender.messages[2], "continue_submit") || !hasAction(sender.messages[2], "view_details") || sender.messages[2].Presentation == nil || sender.messages[2].Presentation.Layout != contracts.TaskCardResult {
+	if hasAction(sender.messages[2], "stop_task") || !hasAction(sender.messages[2], "continue_submit") || sender.messages[2].Presentation == nil || sender.messages[2].Presentation.Layout != contracts.TaskCardResult || sender.messages[2].Presentation.Conclusion != "done" {
 		t.Fatalf("terminal card actions incorrect: %+v", sender.messages[2].Actions)
 	}
 }
 
-func TestTaskCardDisplayModesAndDetailsPaging(t *testing.T) {
+func TestTaskCardDisplayModesKeepProcessingDetailOnTaskCard(t *testing.T) {
 	input := TaskCardInput{
 		ChatID: "chat", TaskID: "task-1", Status: "running",
-		Presentation: contracts.TaskPresentation{Stage: "整理结果", Activity: "正在整理回复。", Draft: "This is a reply draft that should only appear in preview mode."},
+		Presentation: contracts.TaskPresentation{Stage: "整理结果", Activity: "正在整理回复。", ProcessingDetail: "This processing detail should only appear in preview mode."},
 	}
 	conciseSender := &fakeSender{ids: []string{"concise"}}
-	if _, err := New(conciseSender).Progress(context.Background(), input); err != nil {
+	if _, err := New(conciseSender, Options{CardDisplayMode: "concise"}).Progress(context.Background(), input); err != nil {
 		t.Fatal(err)
 	}
-	if got := conciseSender.messages[0].Presentation.Draft; got != "" {
-		t.Fatalf("concise mode exposed reply draft: %q", got)
+	if got := conciseSender.messages[0].Presentation.ProcessingDetail; got != "" {
+		t.Fatalf("concise mode exposed processing detail: %q", got)
 	}
-	previewSender := &fakeSender{ids: []string{"preview", "details"}}
-	preview := New(previewSender, Options{CardDisplayMode: "preview"})
+	previewSender := &fakeSender{ids: []string{"preview", "detail"}}
+	preview := New(previewSender)
 	if _, err := preview.Progress(context.Background(), input); err != nil {
 		t.Fatal(err)
 	}
-	if got := previewSender.messages[0].Presentation.Draft; got == "" {
-		t.Fatal("preview mode removed reply draft")
+	if got := previewSender.messages[0].Presentation.ProcessingDetail; got == "" {
+		t.Fatal("preview mode removed processing detail")
 	}
-	longDraft := strings.Repeat("草稿", 400)
-	if _, err := preview.Progress(context.Background(), TaskCardInput{ChatID: "chat", TaskID: "task-1", Status: "running", Presentation: contracts.TaskPresentation{Draft: longDraft}}); err != nil {
+	longDetail := strings.Repeat("处理详情", 400)
+	if _, err := preview.Progress(context.Background(), TaskCardInput{ChatID: "chat", TaskID: "task-1", Status: "running", Presentation: contracts.TaskPresentation{ProcessingDetail: longDetail}}); err != nil {
 		t.Fatal(err)
 	}
-	if got := []rune(previewSender.messages[1].Presentation.Draft); len(got) > 600 {
-		t.Fatalf("preview draft should stay compact, got %d runes", len(got))
-	}
-	longResult := strings.Repeat("详细结果内容。", 400)
-	if _, err := preview.Details(context.Background(), DetailsInput{ChatID: "chat", TaskID: "task-1", Status: "succeeded", FinalText: longResult, Page: 1}); err != nil {
-		t.Fatal(err)
-	}
-	details := previewSender.messages[2]
-	if details.CardKind != contracts.CardDetails || details.Presentation == nil || details.Presentation.Layout != contracts.TaskCardDetails || details.Presentation.DetailPages < 2 || !hasAction(details, "details_page") {
-		t.Fatalf("details card did not expose paged result: %+v", details)
+	if got := []rune(previewSender.messages[1].Presentation.ProcessingDetail); len(got) > 600 {
+		t.Fatalf("processing detail should stay compact, got %d runes", len(got))
 	}
 }
 
@@ -102,6 +94,16 @@ func TestRejectionCard(t *testing.T) {
 	}
 	if sender.messages[0].CardKind != contracts.CardRoutingError {
 		t.Fatalf("unexpected rejection: %+v", sender.messages[0])
+	}
+}
+
+func TestRestartingSendsDedicatedConfirmationCard(t *testing.T) {
+	sender := &fakeSender{ids: []string{"restart"}}
+	if err := New(sender).Restarting(context.Background(), "chat", "input"); err != nil {
+		t.Fatal(err)
+	}
+	if len(sender.messages) != 1 || sender.messages[0].CardKind != contracts.CardRestarting || sender.messages[0].Status != "restarting" {
+		t.Fatalf("unexpected restart card: %+v", sender.messages)
 	}
 }
 

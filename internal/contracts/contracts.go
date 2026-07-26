@@ -30,7 +30,7 @@ const (
 	CardStart           CardKind = "start"
 	CardSuccess         CardKind = "success"
 	CardFailure         CardKind = "failure"
-	CardDetails         CardKind = "details"
+	CardRestarting      CardKind = "restarting"
 	CardRoutingError    CardKind = "routing_error"
 	CardThreadSelection CardKind = "thread_selection"
 	CardRunningConflict CardKind = "running_conflict"
@@ -43,7 +43,6 @@ type TaskCardLayout string
 const (
 	TaskCardRunning TaskCardLayout = "running"
 	TaskCardResult  TaskCardLayout = "result"
-	TaskCardDetails TaskCardLayout = "details"
 )
 
 // TaskMilestone is a bounded, user-facing event summary. It intentionally
@@ -53,21 +52,17 @@ type TaskMilestone struct {
 	Kind  string
 }
 
-// TaskPresentation contains the structured information needed by the three
-// task-card layouts. The final response itself remains available only through
-// the paged details layout when it does not fit in the result summary.
+// TaskPresentation contains the structured information needed by task cards.
+// Result cards expose the bounded final AI response as their conclusion.
 type TaskPresentation struct {
-	Layout       TaskCardLayout
-	Stage        string
-	Activity     string
-	Milestones   []TaskMilestone
-	Draft        string
-	Conclusion   string
-	Changes      []string
-	Verification []string
-	DetailText   string
-	DetailPage   int
-	DetailPages  int
+	Layout           TaskCardLayout
+	Stage            string
+	Activity         string
+	Milestones       []TaskMilestone
+	ProcessingDetail string
+	Conclusion       string
+	Changes          []string
+	Verification     []string
 }
 
 type OutboundMessage struct {

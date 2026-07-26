@@ -3,6 +3,7 @@ package notifier
 import (
 	"context"
 	"errors"
+	"path/filepath"
 	"strings"
 
 	"github.com/sparklyi/codex-feishu-bridge/internal/contracts"
@@ -218,15 +219,25 @@ func (n *Notifier) sendTask(ctx context.Context, kind contracts.CardKind, in Tas
 }
 
 func taskFields(in TaskCardInput) []contracts.Field {
-	project := in.ProjectAlias
-	if project == "" {
-		project = "default"
-	}
+	project := projectLabel(in.ProjectAlias, in.CWDLabel)
 	return []contracts.Field{
 		{Title: "状态", Value: localizedStatus(in.Status)},
 		{Title: "项目", Value: project},
 		{Title: "工作区", Value: redact.FeishuText(in.CWDLabel, 200)},
 	}
+}
+
+func projectLabel(alias, cwd string) string {
+	if alias = strings.TrimSpace(alias); alias != "" {
+		return alias
+	}
+	if cwd = strings.TrimSpace(cwd); cwd != "" {
+		base := filepath.Base(filepath.Clean(cwd))
+		if base != "." && base != string(filepath.Separator) {
+			return redact.FeishuText(base, 80)
+		}
+	}
+	return "default"
 }
 
 func taskActions(status, taskID string) []contracts.Action {

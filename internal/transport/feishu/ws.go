@@ -18,7 +18,6 @@ import (
 const (
 	RawEventMessage    = "message"
 	RawEventCardAction = "card_action"
-	sourceCloseTimeout = 5 * time.Second
 )
 
 var errMessageQueueFull = errors.New("feishu message queue is full")
@@ -35,13 +34,14 @@ type EventSource interface {
 }
 
 type SDKEventSource struct {
-	client      *feishuWSClient
-	events      chan sourceEvent
-	cardActions chan sourceEvent
-	failures    chan error
-	startOnce   sync.Once
-	mu          sync.Mutex
-	done        chan struct{}
+	client       *feishuWSClient
+	events       chan sourceEvent
+	cardActions  chan sourceEvent
+	failures     chan error
+	closeTimeout time.Duration
+	startOnce    sync.Once
+	mu           sync.Mutex
+	done         chan struct{}
 }
 
 type sourceEvent struct {
@@ -49,10 +49,16 @@ type sourceEvent struct {
 }
 
 func NewSDKEventSource(appID, appSecret string, proxyURL *url.URL) *SDKEventSource {
+	return NewSDKEventSourceWithOptions(appID, appSecret, proxyURL, NetworkOptions{})
+}
+
+func NewSDKEventSourceWithOptions(appID, appSecret string, proxyURL *url.URL, options NetworkOptions) *SDKEventSource {
+	options = normalizeNetworkOptions(options)
 	source := &SDKEventSource{
-		events:      make(chan sourceEvent, 64),
-		cardActions: make(chan sourceEvent, 64),
-		failures:    make(chan error, 1),
+		events:       make(chan sourceEvent, options.EventQueueCapacity),
+		cardActions:  make(chan sourceEvent, options.CardActionQueueCapacity),
+		failures:     make(chan error, options.FailureQueueCapacity),
+		closeTimeout: options.SourceCloseTimeout,
 	}
 	eventDispatcher := dispatcher.NewEventDispatcher("", "")
 	eventDispatcher.OnP2MessageReceiveV1(func(ctx context.Context, event *larkim.P2MessageReceiveV1) error {
@@ -71,7 +77,7 @@ func NewSDKEventSource(appID, appSecret string, proxyURL *url.URL) *SDKEventSour
 		slog.Info("Feishu card action received")
 		return cardActionResponse("success", "操作已收到。"), nil
 	})
-	source.client = newFeishuWSClient(appID, appSecret, eventDispatcher, proxyURL)
+	source.client = newFeishuWSClientWithOptions(appID, appSecret, eventDispatcher, proxyURL, options)
 	return source
 }
 
@@ -125,7 +131,11 @@ func (s *SDKEventSource) Close() error {
 	if done == nil {
 		return closeErr
 	}
-	timer := time.NewTimer(sourceCloseTimeout)
+	timeout := s.closeTimeout
+	if timeout <= 0 {
+		timeout = sourceCloseTimeout
+	}
+	timer := time.NewTimer(timeout)
 	defer timer.Stop()
 	select {
 	case <-done:

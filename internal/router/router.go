@@ -188,7 +188,7 @@ func (r *Router) sendThreadSelection(ctx context.Context, ev contracts.InboundEv
 	if r.controller == nil {
 		return errors.New("runtime controller is not configured")
 	}
-	threads, err := r.controller.Threads(ctx, 8)
+	threads, err := r.controller.Threads(ctx, r.cfg.Runtime.ThreadSelectionLimitValue())
 	if err != nil {
 		return r.notifier.Rejection(ctx, ev.ChatID, ev.MessageID, "无法发现桌面 Codex 会话："+err.Error())
 	}
@@ -211,7 +211,7 @@ func (r *Router) handleAttachThread(ctx context.Context, ev contracts.InboundEve
 	if threadID == "" {
 		return r.notifier.Rejection(ctx, ev.ChatID, ev.MessageID, "会话标识缺失。")
 	}
-	threads, err := r.controller.Threads(ctx, 32)
+	threads, err := r.controller.Threads(ctx, r.cfg.Runtime.ThreadLookupLimitValue())
 	if err != nil {
 		return r.notifier.Rejection(ctx, ev.ChatID, ev.MessageID, "无法验证桌面 Codex 会话："+err.Error())
 	}
@@ -448,7 +448,7 @@ func (r *Router) failQueuedRun(task store.Task, run store.Run, dedupKey string, 
 	if cause == nil {
 		return nil
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), r.cfg.Runtime.NotificationTimeout())
 	defer cancel()
 	if err := r.store.FinishRun(ctx, dedupKey, store.FinishRunInput{
 		RunID:      run.ID,
@@ -464,10 +464,18 @@ func (r *Router) failQueuedRun(task store.Task, run store.Run, dedupKey string, 
 }
 
 func (r *Router) insertRouteWithRetry(ctx context.Context, messageID, taskID, routeType string) error {
-	if err := r.store.InsertMessageRoute(ctx, messageID, taskID, routeType); err != nil {
-		return r.store.InsertMessageRoute(ctx, messageID, taskID, routeType)
+	var err error
+	attempts := r.cfg.Runtime.RouteInsertAttemptsValue()
+	if attempts <= 0 {
+		attempts = 1
 	}
-	return nil
+	for attempt := 0; attempt < attempts; attempt++ {
+		err = r.store.InsertMessageRoute(ctx, messageID, taskID, routeType)
+		if err == nil {
+			return nil
+		}
+	}
+	return err
 }
 
 func (r *Router) authorized(ctx context.Context, openID string) (bool, error) {

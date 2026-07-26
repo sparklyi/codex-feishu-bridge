@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/sparklyi/codex-feishu-bridge/internal/appserver"
+	"github.com/sparklyi/codex-feishu-bridge/internal/config"
 	"github.com/sparklyi/codex-feishu-bridge/internal/contracts"
 	"github.com/sparklyi/codex-feishu-bridge/internal/store"
 	"github.com/sparklyi/codex-feishu-bridge/internal/transport"
@@ -83,8 +84,31 @@ func TestServeRecoversStaleRunAndInitConfigUsesAppServer(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(string(data), "app_server:") || !strings.Contains(string(data), "startup_timeout_seconds: 15") || !strings.Contains(string(data), "card_display_mode: preview") || strings.Contains(string(data), "approval:") || strings.Contains(string(data), "sandbox:") || strings.Contains(string(data), "bot_open_id:") || strings.Contains(string(data), "connection:") || strings.Contains(string(data), "projects:") {
+	if !strings.Contains(string(data), "app_server:") || !strings.Contains(string(data), "startup_timeout_seconds: 15") || !strings.Contains(string(data), "card_display_mode: preview") || !strings.Contains(string(data), "network:") || !strings.Contains(string(data), "stream_update_interval_milliseconds: 200") || strings.Contains(string(data), "approval:") || strings.Contains(string(data), "sandbox:") || strings.Contains(string(data), "bot_open_id:") || strings.Contains(string(data), "connection:") || strings.Contains(string(data), "projects:") {
 		t.Fatalf("unexpected generated config:\n%s", data)
+	}
+}
+
+func TestFeishuNetworkOptionsMapsConfig(t *testing.T) {
+	opts := feishuNetworkOptions(config.FeishuNetworkConfig{
+		HTTPTimeoutSeconds:                31,
+		BootstrapTimeoutSeconds:           7,
+		WebSocketFallbackHeartbeatSeconds: 9,
+		WebSocketMaxHeartbeatSeconds:      11,
+		ReconnectDelayMilliseconds:        13,
+		WriteTimeoutSeconds:               17,
+		FragmentTTLSeconds:                19,
+		SourceCloseTimeoutSeconds:         23,
+		MaxIdleConnections:                29,
+		MaxIdleConnectionsPerHost:         5,
+		IdleConnectionTimeoutSeconds:      37,
+		DialKeepAliveSeconds:              41,
+		EventQueueCapacity:                43,
+		CardActionQueueCapacity:           47,
+		FailureQueueCapacity:              3,
+	})
+	if opts.HTTPTimeout != 31*time.Second || opts.BootstrapTimeout != 7*time.Second || opts.WebSocketFallbackHeartbeat != 9*time.Second || opts.WebSocketMaxHeartbeat != 11*time.Second || opts.ReconnectDelay != 13*time.Millisecond || opts.WriteTimeout != 17*time.Second || opts.FragmentTTL != 19*time.Second || opts.SourceCloseTimeout != 23*time.Second || opts.MaxIdleConnections != 29 || opts.MaxIdleConnectionsPerHost != 5 || opts.IdleConnectionTimeout != 37*time.Second || opts.DialKeepAlive != 41*time.Second || opts.EventQueueCapacity != 43 || opts.CardActionQueueCapacity != 47 || opts.FailureQueueCapacity != 3 {
+		t.Fatalf("network options were not mapped: %+v", opts)
 	}
 }
 

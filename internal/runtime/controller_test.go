@@ -16,6 +16,21 @@ import (
 	"github.com/sparklyi/codex-feishu-bridge/internal/store"
 )
 
+func TestControllerUsesConfiguredOperationalValues(t *testing.T) {
+	controller := New(ControllerOptions{
+		ProgressUpdateInterval: 200 * time.Millisecond,
+		ProgressRetryDelay:     17 * time.Millisecond,
+		NotificationTimeout:    19 * time.Millisecond,
+		AppServerTimeout:       23 * time.Millisecond,
+		TerminalRetryAttempts:  4,
+		TerminalRetryDelay:     29 * time.Millisecond,
+	})
+	defer controller.Close()
+	if controller.progressUpdateInterval != 200*time.Millisecond || controller.progressRetryDelay != 17*time.Millisecond || controller.notificationTimeout != 19*time.Millisecond || controller.appServerTimeout != 23*time.Millisecond || controller.terminalRetryAttempts != 4 || controller.terminalRetryDelay != 29*time.Millisecond {
+		t.Fatalf("configured controller values were not retained: %+v", controller)
+	}
+}
+
 func TestControllerRunsTurnStreamsResultAndPersistsState(t *testing.T) {
 	ctx := context.Background()
 	st, task, run := newQueuedTask(t, ctx)

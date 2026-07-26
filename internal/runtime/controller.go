@@ -23,7 +23,7 @@ import (
 var ErrNotRunning = errors.New("task has no running bridge turn")
 
 const (
-	progressUpdateInterval    = 1500 * time.Millisecond
+	progressUpdateInterval    = 200 * time.Millisecond
 	progressRetryDelay        = 800 * time.Millisecond
 	notificationTimeout       = 20 * time.Second
 	defaultAppServerTimeout   = 30 * time.Second
@@ -65,23 +65,31 @@ type StartInput struct {
 }
 
 type ControllerOptions struct {
-	AppServer          AppServer
-	Store              TaskStore
-	Notifier           CardNotifier
-	CardDisplayMode    string
-	Now                func() time.Time
-	AppServerTimeout   time.Duration
-	TerminalRetryDelay time.Duration
+	AppServer              AppServer
+	Store                  TaskStore
+	Notifier               CardNotifier
+	CardDisplayMode        string
+	Now                    func() time.Time
+	ProgressUpdateInterval time.Duration
+	ProgressRetryDelay     time.Duration
+	NotificationTimeout    time.Duration
+	AppServerTimeout       time.Duration
+	TerminalRetryAttempts  int
+	TerminalRetryDelay     time.Duration
 }
 
 type Controller struct {
-	api                AppServer
-	store              TaskStore
-	notifier           CardNotifier
-	now                func() time.Time
-	appServerTimeout   time.Duration
-	terminalRetryDelay time.Duration
-	cardDisplayMode    string
+	api                    AppServer
+	store                  TaskStore
+	notifier               CardNotifier
+	now                    func() time.Time
+	progressUpdateInterval time.Duration
+	progressRetryDelay     time.Duration
+	notificationTimeout    time.Duration
+	appServerTimeout       time.Duration
+	terminalRetryAttempts  int
+	terminalRetryDelay     time.Duration
+	cardDisplayMode        string
 
 	ctx    context.Context
 	cancel context.CancelFunc
@@ -140,9 +148,25 @@ func New(opts ControllerOptions) *Controller {
 	if now == nil {
 		now = func() time.Time { return time.Now().UTC() }
 	}
+	progressInterval := opts.ProgressUpdateInterval
+	if progressInterval <= 0 {
+		progressInterval = progressUpdateInterval
+	}
+	progressRetry := opts.ProgressRetryDelay
+	if progressRetry <= 0 {
+		progressRetry = progressRetryDelay
+	}
+	notifyTimeout := opts.NotificationTimeout
+	if notifyTimeout <= 0 {
+		notifyTimeout = notificationTimeout
+	}
 	retryDelay := opts.TerminalRetryDelay
 	if retryDelay <= 0 {
 		retryDelay = defaultTerminalRetryDelay
+	}
+	terminalRetries := opts.TerminalRetryAttempts
+	if terminalRetries <= 0 {
+		terminalRetries = terminalRetryAttempts
 	}
 	appServerTimeout := opts.AppServerTimeout
 	if appServerTimeout <= 0 {
@@ -154,19 +178,23 @@ func New(opts ControllerOptions) *Controller {
 	}
 	ctx, cancel := context.WithCancel(context.Background())
 	c := &Controller{
-		api:                opts.AppServer,
-		store:              opts.Store,
-		notifier:           opts.Notifier,
-		now:                now,
-		appServerTimeout:   appServerTimeout,
-		terminalRetryDelay: retryDelay,
-		cardDisplayMode:    displayMode,
-		ctx:                ctx,
-		cancel:             cancel,
-		byRun:              make(map[string]*activeRun),
-		byTask:             make(map[string]*activeRun),
-		byThread:           make(map[string]*activeRun),
-		byTurn:             make(map[string]*activeRun),
+		api:                    opts.AppServer,
+		store:                  opts.Store,
+		notifier:               opts.Notifier,
+		now:                    now,
+		progressUpdateInterval: progressInterval,
+		progressRetryDelay:     progressRetry,
+		notificationTimeout:    notifyTimeout,
+		appServerTimeout:       appServerTimeout,
+		terminalRetryAttempts:  terminalRetries,
+		terminalRetryDelay:     retryDelay,
+		cardDisplayMode:        displayMode,
+		ctx:                    ctx,
+		cancel:                 cancel,
+		byRun:                  make(map[string]*activeRun),
+		byTask:                 make(map[string]*activeRun),
+		byThread:               make(map[string]*activeRun),
+		byTurn:                 make(map[string]*activeRun),
 	}
 	if c.api != nil {
 		c.start(c.eventLoop)
@@ -636,7 +664,7 @@ func (c *Controller) sendTerminal(ctx context.Context, status string, input noti
 func (c *Controller) retryTerminalPatch(active *activeRun, status string, input notifier.TaskCardInput) {
 	if !c.start(func() {
 		var lastErr error
-		for attempt := 1; attempt <= terminalRetryAttempts; attempt++ {
+		for attempt := 1; attempt <= c.terminalRetryAttempts; attempt++ {
 			if !c.waitForTerminalRetry(attempt) {
 				return
 			}
@@ -724,7 +752,7 @@ func (c *Controller) flushProgress(active *activeRun) {
 		default:
 		}
 
-		presentation, wait, ok := active.nextProgress(c.now())
+		presentation, wait, ok := active.nextProgress(c.now(), c.progressUpdateInterval)
 		if !ok {
 			return
 		}
@@ -772,14 +800,14 @@ func (c *Controller) flushProgress(active *activeRun) {
 			transient := transport.IsTransientError(notifyErr)
 			slog.Warn("Feishu progress card patch failed", "task_id", active.taskID(), "transient", transient, "error", notifyErr)
 			if transient {
-				active.retryProgress(presentation, c.now().Add(progressRetryDelay))
+				active.retryProgress(presentation, c.now().Add(c.progressRetryDelay))
 			}
 		}
 	}
 }
 
 func (c *Controller) notificationContext() (context.Context, context.CancelFunc) {
-	return context.WithTimeout(context.Background(), notificationTimeout)
+	return context.WithTimeout(context.Background(), c.notificationTimeout)
 }
 
 func (c *Controller) appServerContext(parent context.Context) (context.Context, context.CancelFunc) {
@@ -987,7 +1015,7 @@ func (a *activeRun) queueProgress(presentation contracts.TaskPresentation, force
 	return true
 }
 
-func (a *activeRun) nextProgress(now time.Time) (presentation contracts.TaskPresentation, wait time.Duration, ok bool) {
+func (a *activeRun) nextProgress(now time.Time, interval time.Duration) (presentation contracts.TaskPresentation, wait time.Duration, ok bool) {
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	if a.terminal || !a.progressDirty {
@@ -1001,7 +1029,7 @@ func (a *activeRun) nextProgress(now time.Time) (presentation contracts.TaskPres
 		a.progressRetryAfter = time.Time{}
 	}
 	if !a.progressForce && !a.lastProgress.IsZero() {
-		if remaining := progressUpdateInterval - now.Sub(a.lastProgress); remaining > 0 {
+		if remaining := interval - now.Sub(a.lastProgress); remaining > 0 {
 			return contracts.TaskPresentation{}, remaining, true
 		}
 	}

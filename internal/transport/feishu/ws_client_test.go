@@ -128,6 +128,47 @@ func TestFeishuTransportsDefaultDirect(t *testing.T) {
 	}
 }
 
+func TestFeishuNetworkOptionsControlSourceAndClient(t *testing.T) {
+	options := NetworkOptions{
+		HTTPTimeout:                31 * time.Millisecond,
+		BootstrapTimeout:           7 * time.Millisecond,
+		WebSocketFallbackHeartbeat: 9 * time.Millisecond,
+		WebSocketMaxHeartbeat:      13 * time.Millisecond,
+		ReconnectDelay:             17 * time.Millisecond,
+		WriteTimeout:               19 * time.Millisecond,
+		FragmentTTL:                23 * time.Millisecond,
+		SourceCloseTimeout:         29 * time.Millisecond,
+		MaxIdleConnections:         12,
+		MaxIdleConnectionsPerHost:  4,
+		IdleConnectionTimeout:      37 * time.Millisecond,
+		DialKeepAlive:              41 * time.Millisecond,
+		EventQueueCapacity:         2,
+		CardActionQueueCapacity:    3,
+		FailureQueueCapacity:       4,
+	}
+	source := NewSDKEventSourceWithOptions("cli_test", "secret", nil, options)
+	if cap(source.events) != 2 || cap(source.cardActions) != 3 || cap(source.failures) != 4 || source.closeTimeout != 29*time.Millisecond {
+		t.Fatalf("event-source options were not applied: events=%d actions=%d failures=%d close=%s", cap(source.events), cap(source.cardActions), cap(source.failures), source.closeTimeout)
+	}
+	client := source.client
+	if client.bootstrapTimeout != 7*time.Millisecond || client.fallbackHeartbeatInterval != 9*time.Millisecond || client.maxHeartbeatInterval != 13*time.Millisecond || client.reconnectDelay != 17*time.Millisecond || client.writeTimeout != 19*time.Millisecond || client.fragmentTTL != 23*time.Millisecond {
+		t.Fatalf("websocket options were not applied: %+v", client)
+	}
+	if got := client.heartbeatFromConfig(&larkws.ClientConfig{PingInterval: 60}); got != 13*time.Millisecond {
+		t.Fatalf("configured heartbeat cap = %s, want %s", got, 13*time.Millisecond)
+	}
+	if client.httpClient.Timeout != 31*time.Millisecond || client.dialer.HandshakeTimeout != 7*time.Millisecond {
+		t.Fatalf("client timeouts were not applied: http=%s handshake=%s", client.httpClient.Timeout, client.dialer.HandshakeTimeout)
+	}
+	transport, ok := client.httpClient.Transport.(*http.Transport)
+	if !ok {
+		t.Fatalf("transport type = %T, want *http.Transport", client.httpClient.Transport)
+	}
+	if transport.MaxIdleConns != 12 || transport.MaxIdleConnsPerHost != 4 || transport.IdleConnTimeout != 37*time.Millisecond {
+		t.Fatalf("connection-pool options were not applied: %+v", transport)
+	}
+}
+
 func TestFeishuWSClientSendsProtocolHeartbeat(t *testing.T) {
 	upgrader := websocket.Upgrader{}
 	frames := make(chan larkws.Frame, 1)

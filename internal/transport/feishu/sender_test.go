@@ -495,6 +495,26 @@ func TestSenderRetriesUnexpectedEOF(t *testing.T) {
 	}
 }
 
+func TestSenderOptionsControlAttemptLimitAndRetryDelay(t *testing.T) {
+	api := &fakeCardAPI{results: []sendResult{{err: temporarySendError{}}, {err: temporarySendError{}}, {messageID: "unexpected"}}}
+	var delays []time.Duration
+	s := &Sender{
+		API:         api,
+		MaxAttempts: 2,
+		RetryDelay:  17 * time.Millisecond,
+		Sleep: func(_ context.Context, delay time.Duration) error {
+			delays = append(delays, delay)
+			return nil
+		},
+	}
+	if _, err := s.Send(context.Background(), contracts.OutboundMessage{ChatID: "chat", CardKind: contracts.CardStart, TaskID: "cx", Title: "title", BodyMarkdown: "body"}); err == nil {
+		t.Fatal("expected the configured attempt limit to stop retries")
+	}
+	if api.calls != 2 || len(delays) != 1 || delays[0] != 17*time.Millisecond {
+		t.Fatalf("sender options were not applied: calls=%d delays=%v", api.calls, delays)
+	}
+}
+
 func TestRateLimitedResponsesAreTransient(t *testing.T) {
 	err := feishuResponseError("patch", 99991400, "too frequent")
 	if !errors.Is(err, ErrRateLimited) || !transport.IsTransientError(err) {
@@ -579,6 +599,22 @@ func TestNewSenderFromEnv(t *testing.T) {
 	}
 	if _, err := NewSenderFromEnv("cli_test", "MISSING", func(string) string { return "" }, api); err == nil {
 		t.Fatal("expected missing secret error")
+	}
+}
+
+func TestNewSenderFromEnvWithOptions(t *testing.T) {
+	api := &fakeCardAPI{}
+	s, err := NewSenderFromEnvWithOptions("cli_test", "FEISHU_APP_SECRET", func(key string) string {
+		if key == "FEISHU_APP_SECRET" {
+			return "secret"
+		}
+		return ""
+	}, api, SenderOptions{MaxAttempts: 4, AttemptTimeout: 5 * time.Millisecond, RetryDelay: 6 * time.Millisecond})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if s.MaxAttempts != 4 || s.AttemptTimeout != 5*time.Millisecond || s.RetryDelay != 6*time.Millisecond {
+		t.Fatalf("sender options were not retained: %+v", s)
 	}
 }
 

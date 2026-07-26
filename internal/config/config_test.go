@@ -109,6 +109,124 @@ paths:
 	}
 }
 
+func TestLoadConfiguresRuntimeAndFeishuNetwork(t *testing.T) {
+	dir := t.TempDir()
+	workspace := filepath.Join(dir, "workspace")
+	if err := os.MkdirAll(workspace, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(dir, "config.yaml")
+	data := `
+feishu:
+  app_id: cli_test
+  app_secret_env: FEISHU_APP_SECRET
+  network:
+    http_timeout_seconds: 31
+    bootstrap_timeout_seconds: 7
+    websocket_fallback_heartbeat_seconds: 9
+    websocket_max_heartbeat_seconds: 11
+    reconnect_delay_milliseconds: 120
+    write_timeout_seconds: 6
+    fragment_ttl_seconds: 4
+    source_close_timeout_seconds: 3
+    max_idle_connections: 12
+    max_idle_connections_per_host: 4
+    idle_connection_timeout_seconds: 18
+    dial_keep_alive_seconds: 13
+    delivery_attempt_timeout_seconds: 14
+    delivery_max_attempts: 5
+    delivery_retry_delay_milliseconds: 25
+    event_queue_capacity: 15
+    card_action_queue_capacity: 16
+    failure_queue_capacity: 2
+security:
+  allowed_open_ids: [ou_owner]
+app_server:
+  command: codex
+workspace:
+  default: "` + workspace + `"
+runtime:
+  stream_update_interval_milliseconds: 200
+  stream_retry_delay_milliseconds: 17
+  notification_timeout_seconds: 19
+  app_server_timeout_seconds: 23
+  terminal_retry_attempts: 4
+  terminal_retry_delay_milliseconds: 29
+  route_insert_attempts: 3
+  thread_selection_limit: 6
+  thread_lookup_limit: 10
+`
+	if err := os.WriteFile(path, []byte(data), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := Load(path, func(key string) string {
+		if key == "FEISHU_APP_SECRET" {
+			return "secret"
+		}
+		return dir
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got, want := cfg.Runtime.StreamUpdateInterval(), 200*time.Millisecond; got != want {
+		t.Fatalf("stream update interval = %s, want %s", got, want)
+	}
+	if got, want := cfg.Runtime.StreamRetryDelay(), 17*time.Millisecond; got != want {
+		t.Fatalf("stream retry delay = %s, want %s", got, want)
+	}
+	if got, want := cfg.Runtime.NotificationTimeout(), 19*time.Second; got != want {
+		t.Fatalf("notification timeout = %s, want %s", got, want)
+	}
+	if got, want := cfg.Runtime.AppServerTimeout(), 23*time.Second; got != want {
+		t.Fatalf("app-server timeout = %s, want %s", got, want)
+	}
+	if cfg.Runtime.TerminalRetryAttempts != 4 || cfg.Runtime.RouteInsertAttemptsValue() != 3 || cfg.Runtime.ThreadSelectionLimitValue() != 6 || cfg.Runtime.ThreadLookupLimitValue() != 10 {
+		t.Fatalf("runtime limits not loaded: %+v", cfg.Runtime)
+	}
+	network := cfg.Feishu.Network
+	if network.HTTPTimeout() != 31*time.Second || network.BootstrapTimeout() != 7*time.Second || network.WebSocketFallbackHeartbeat() != 9*time.Second || network.WebSocketMaxHeartbeat() != 11*time.Second || network.ReconnectDelay() != 120*time.Millisecond || network.WriteTimeout() != 6*time.Second || network.FragmentTTL() != 4*time.Second || network.SourceCloseTimeout() != 3*time.Second || network.IdleConnectionTimeout() != 18*time.Second || network.DialKeepAlive() != 13*time.Second || network.DeliveryAttemptTimeout() != 14*time.Second || network.DeliveryRetryDelay() != 25*time.Millisecond {
+		t.Fatalf("network durations not loaded: %+v", network)
+	}
+	if network.MaxIdleConnections != 12 || network.MaxIdleConnectionsPerHost != 4 || network.DeliveryMaxAttempts != 5 || network.EventQueueCapacity != 15 || network.CardActionQueueCapacity != 16 || network.FailureQueueCapacity != 2 {
+		t.Fatalf("network limits not loaded: %+v", network)
+	}
+	if hasError(cfg.Validate(func(key string) string {
+		if key == "FEISHU_APP_SECRET" {
+			return "secret"
+		}
+		return ""
+	}, func(path string) error {
+		_, err := os.Stat(path)
+		return err
+	})) {
+		t.Fatal("expected custom runtime and network configuration to be valid")
+	}
+}
+
+func TestValidateRejectsInvalidRuntimeAndNetworkSettings(t *testing.T) {
+	cfg := Config{
+		Runtime: RuntimeConfig{StreamUpdateIntervalMilliseconds: -1},
+		Feishu: FeishuConfig{Network: FeishuNetworkConfig{
+			HTTPTimeoutSeconds:                -1,
+			WebSocketFallbackHeartbeatSeconds: 31,
+			WebSocketMaxHeartbeatSeconds:      30,
+			MaxIdleConnections:                2,
+			MaxIdleConnectionsPerHost:         3,
+		}},
+	}
+	diags := cfg.Validate(func(string) string { return "" }, nil)
+	for _, code := range []string{
+		"runtime.stream_update_interval_milliseconds",
+		"feishu.network.http_timeout_seconds",
+		"feishu.network.websocket_max_heartbeat_seconds",
+		"feishu.network.max_idle_connections_per_host",
+	} {
+		if !hasDiagnostic(diags, LevelError, code) {
+			t.Fatalf("missing validation diagnostic %s in %+v", code, diags)
+		}
+	}
+}
+
 func TestProjectAliasForCWDAndAliases(t *testing.T) {
 	cfg := Config{
 		Workspace: WorkspaceConfig{Default: "/repo/default"},
@@ -242,6 +360,9 @@ func TestDefaultPathAndExampleConfig(t *testing.T) {
 	}
 	if cfg.AppServer.Command != "codex" || cfg.StartupTimeout() != 15*time.Second {
 		t.Fatalf("unexpected example config: %+v", cfg.AppServer)
+	}
+	if cfg.Runtime.StreamUpdateInterval() != 200*time.Millisecond || cfg.Feishu.Network.DeliveryMaxAttempts != 3 || cfg.Feishu.Network.EventQueueCapacity != 64 {
+		t.Fatalf("unexpected runtime defaults: runtime=%+v network=%+v", cfg.Runtime, cfg.Feishu.Network)
 	}
 }
 

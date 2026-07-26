@@ -16,7 +16,6 @@ import (
 
 const (
 	defaultCommand               = "codex"
-	defaultConnection            = "websocket"
 	defaultStartupTimeoutSeconds = 15
 )
 
@@ -32,8 +31,6 @@ type Config struct {
 type FeishuConfig struct {
 	AppID        string `yaml:"app_id"`
 	AppSecretEnv string `yaml:"app_secret_env"`
-	Connection   string `yaml:"connection"`
-	BotOpenID    string `yaml:"bot_open_id"`
 	ProxyURL     string `yaml:"proxy_url"`
 }
 
@@ -222,9 +219,6 @@ func (cfg Config) ProjectAliases() []string {
 }
 
 func (cfg *Config) applyDefaults(home string) {
-	if cfg.Feishu.Connection == "" {
-		cfg.Feishu.Connection = defaultConnection
-	}
 	if cfg.AppServer.Command == "" {
 		cfg.AppServer.Command = defaultCommand
 	}

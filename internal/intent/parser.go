@@ -3,17 +3,11 @@ package intent
 import "strings"
 
 func ParseStart(input ParseInput) Intent {
-	text := strings.TrimSpace(input.Event.Text)
+	text := strings.TrimSpace(input.Text)
 	if text == "" {
 		return Intent{Kind: KindIgnored}
 	}
-	if input.Event.ChatType == "group" && !input.Event.BotMentioned {
-		return Intent{Kind: KindIgnored}
-	}
 	if text == "/sessions" {
-		if input.Event.ChatType != "private" {
-			return Intent{Kind: KindIgnored}
-		}
 		return Intent{Kind: KindThreadSelection}
 	}
 	alias, prompt, hasAlias := leadingProjectAlias(text)
@@ -22,9 +16,6 @@ func ParseStart(input ParseInput) Intent {
 			return Intent{Kind: KindUnknownProject, ProjectAlias: alias, Prompt: prompt}
 		}
 		return Intent{Kind: KindStartTask, ProjectAlias: alias, Prompt: prompt}
-	}
-	if input.Event.ChatType == "group" {
-		return Intent{Kind: KindProjectSelection, Prompt: text}
 	}
 	return Intent{Kind: KindStartTask, Prompt: text}
 }

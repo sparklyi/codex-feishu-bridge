@@ -11,7 +11,6 @@ Usage:
     [--config ~/.codex-feishu-bridge/config.yaml] \
     [--app-secret-env FEISHU_APP_SECRET] \
     [--state-db ~/.codex-feishu-bridge/state.db] \
-    [--project-alias default] \
     [--codex-command codex] \
     [--model gpt-5] \
     [--create-workspace] \
@@ -50,7 +49,6 @@ APP_SECRET_ENV="FEISHU_APP_SECRET"
 ALLOWED_OPEN_IDS=()
 WORKSPACE=""
 STATE_DB="${HOME}/.codex-feishu-bridge/state.db"
-PROJECT_ALIAS="default"
 CODEX_COMMAND="codex"
 MODEL=""
 CREATE_WORKSPACE=0
@@ -80,10 +78,6 @@ while [[ $# -gt 0 ]]; do
       ;;
     --state-db)
       STATE_DB="$2"
-      shift 2
-      ;;
-    --project-alias)
-      PROJECT_ALIAS="$2"
       shift 2
       ;;
     --codex-command)
@@ -147,7 +141,6 @@ chmod 600 "$tmp"
   printf 'feishu:\n'
   printf '  app_id: %s\n' "$(yaml_quote "$APP_ID")"
   printf '  app_secret_env: %s\n' "$(yaml_quote "$APP_SECRET_ENV")"
-  printf '  connection: websocket\n'
   printf 'security:\n'
   printf '  allowed_open_ids:\n'
   for open_id in "${ALLOWED_OPEN_IDS[@]}"; do
@@ -161,10 +154,6 @@ chmod 600 "$tmp"
   printf '  default: %s\n' "$(yaml_quote "$WORKSPACE")"
   printf 'paths:\n'
   printf '  state_db: %s\n' "$(yaml_quote "$STATE_DB")"
-  printf 'projects:\n'
-  printf '  %s:\n' "$PROJECT_ALIAS"
-  printf '    cwd: %s\n' "$(yaml_quote "$WORKSPACE")"
-  printf '    model: %s\n' "$(yaml_quote "$MODEL")"
 } >"$tmp"
 mv "$tmp" "$CONFIG_PATH"
 chmod 600 "$CONFIG_PATH"

@@ -14,10 +14,17 @@ func TestFreshSchemaAndTaskLifecycle(t *testing.T) {
 	ctx := context.Background()
 	s := openTestStore(t)
 	defer s.Close()
-	for _, table := range []string{"schema_migrations", "tasks", "runs", "message_routes", "event_dedup", "users", "pending_intents"} {
+	for _, table := range []string{"schema_migrations", "tasks", "runs", "message_routes", "event_dedup", "users"} {
 		if !tableExists(t, s.db, table) {
 			t.Fatalf("missing table %s", table)
 		}
+	}
+	if tableExists(t, s.db, "pending_intents") {
+		t.Fatal("fresh schema must not contain retired pending_intents table")
+	}
+	var version int
+	if err := s.db.QueryRow(`SELECT version FROM schema_migrations`).Scan(&version); err != nil || version != migrationVersion {
+		t.Fatalf("schema migration version = %d, want %d (err=%v)", version, migrationVersion, err)
 	}
 	for _, column := range []string{"codex_thread_id", "status", "root_message_id"} {
 		if !columnExists(t, s.db, "tasks", column) {
@@ -110,10 +117,10 @@ func TestRecoverRunningMarksTasksTerminal(t *testing.T) {
 	}
 }
 
-func TestRejectsLegacyV2Database(t *testing.T) {
+func TestRejectsUnsupportedMultiVersionDatabase(t *testing.T) {
 	ctx := context.Background()
 	path := filepath.Join(t.TempDir(), "legacy.db")
-	createLegacyV2(t, path)
+	createUnsupportedMultiVersionDatabase(t, path)
 	if _, err := Open(ctx, path); err == nil || !strings.Contains(err.Error(), "existing state database is not supported") {
 		t.Fatalf("legacy state should be rejected, got %v", err)
 	}
@@ -124,6 +131,25 @@ func TestRejectsLegacyV2Database(t *testing.T) {
 	defer db.Close()
 	if tableExists(t, db, "pending_intents") {
 		t.Fatal("legacy database should be rejected before new tables are created")
+	}
+}
+
+func TestRejectsPreviousStateSchema(t *testing.T) {
+	ctx := context.Background()
+	path := filepath.Join(t.TempDir(), "previous.db")
+	db, err := sql.Open("sqlite", path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(`CREATE TABLE schema_migrations (version INTEGER PRIMARY KEY, applied_at TEXT NOT NULL); INSERT INTO schema_migrations(version,applied_at) VALUES(1,'2026-01-01T00:00:00Z');`); err != nil {
+		_ = db.Close()
+		t.Fatal(err)
+	}
+	if err := db.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := Open(ctx, path); err == nil || !strings.Contains(err.Error(), "existing state database is not supported") {
+		t.Fatalf("previous state schema should be rejected, got %v", err)
 	}
 }
 
@@ -150,7 +176,7 @@ func openRunningTask(t *testing.T, ctx context.Context) *Store {
 	return s
 }
 
-func createLegacyV2(t *testing.T, path string) {
+func createUnsupportedMultiVersionDatabase(t *testing.T, path string) {
 	t.Helper()
 	db, err := sql.Open("sqlite", path)
 	if err != nil {

@@ -7,15 +7,12 @@ import (
 	"log/slog"
 	"net/url"
 	"sync"
-	"time"
 
 	"github.com/larksuite/oapi-sdk-go/v3/event/dispatcher"
 	"github.com/larksuite/oapi-sdk-go/v3/event/dispatcher/callback"
 	larkim "github.com/larksuite/oapi-sdk-go/v3/service/im/v1"
 	"github.com/sparklyi/codex-feishu-bridge/internal/contracts"
 )
-
-var ErrDisconnected = errors.New("feishu websocket disconnected")
 
 const (
 	RawEventMessage    = "message"
@@ -45,12 +42,12 @@ type sourceEvent struct {
 	err error
 }
 
-func NewSDKEventSource(appID, appSecret, verificationToken string, proxyURL *url.URL) *SDKEventSource {
+func NewSDKEventSource(appID, appSecret string, proxyURL *url.URL) *SDKEventSource {
 	source := &SDKEventSource{
 		events:      make(chan sourceEvent, 64),
 		cardActions: make(chan sourceEvent, 64),
 	}
-	eventDispatcher := dispatcher.NewEventDispatcher(verificationToken, "")
+	eventDispatcher := dispatcher.NewEventDispatcher("", "")
 	eventDispatcher.OnP2MessageReceiveV1(func(ctx context.Context, event *larkim.P2MessageReceiveV1) error {
 		slog.Info("Feishu message received")
 		source.publish(ctx, RawEvent{Kind: RawEventMessage, Data: mustMarshal(event)})
@@ -143,8 +140,6 @@ func cardActionResponse(kind, content string) *callback.CardActionTriggerRespons
 type Receiver struct {
 	Source        EventSource
 	Verify        VerifyOptions
-	Backoff       time.Duration
-	Sleep         func(context.Context, time.Duration) error
 	OnHandleError func(context.Context, contracts.InboundEvent, error)
 }
 
@@ -153,40 +148,28 @@ func (r Receiver) Receive(ctx context.Context, handle func(context.Context, cont
 		return errors.New("feishu event source is nil")
 	}
 	defer r.Source.Close()
-	backoff := r.Backoff
-	if backoff == 0 {
-		backoff = 500 * time.Millisecond
+	if err := r.Source.Connect(ctx); err != nil {
+		return err
 	}
 	for {
-		if err := r.Source.Connect(ctx); err != nil {
+		raw, err := r.Source.Receive(ctx)
+		if err != nil {
 			return err
 		}
-		for {
-			raw, err := r.Source.Receive(ctx)
-			if err != nil {
-				if errors.Is(err, ErrDisconnected) {
-					if sleepErr := r.sleep(ctx, backoff); sleepErr != nil {
-						return sleepErr
-					}
-					break
-				}
-				return err
+		ev, err := r.normalize(raw)
+		if err != nil {
+			if raw.Kind == RawEventCardAction {
+				slog.Warn("Feishu card action rejected", "error", err)
 			}
-			ev, err := r.normalize(raw)
-			if err != nil {
-				if raw.Kind == RawEventCardAction {
-					slog.Warn("Feishu card action rejected", "error", err)
-				}
-				continue
+			continue
+		}
+		slog.Info("Feishu inbound event dispatched", "kind", ev.Kind)
+		if err := handle(ctx, ev); err != nil {
+			if errors.Is(err, context.Canceled) && ctx.Err() != nil {
+				return ctx.Err()
 			}
-			slog.Info("Feishu inbound event dispatched", "kind", ev.Kind)
-			if err := handle(ctx, ev); err != nil {
-				if errors.Is(err, context.Canceled) && ctx.Err() != nil {
-					return ctx.Err()
-				}
-				if r.OnHandleError != nil {
-					r.OnHandleError(ctx, ev, err)
-				}
+			if r.OnHandleError != nil {
+				r.OnHandleError(ctx, ev, err)
 			}
 		}
 	}
@@ -200,20 +183,6 @@ func (r Receiver) normalize(raw RawEvent) (contracts.InboundEvent, error) {
 		return NormalizeCardActionJSON(raw.Data, r.Verify)
 	default:
 		return contracts.InboundEvent{}, errors.New("unknown raw Feishu event kind")
-	}
-}
-
-func (r Receiver) sleep(ctx context.Context, d time.Duration) error {
-	if r.Sleep != nil {
-		return r.Sleep(ctx, d)
-	}
-	timer := time.NewTimer(d)
-	defer timer.Stop()
-	select {
-	case <-ctx.Done():
-		return ctx.Err()
-	case <-timer.C:
-		return nil
 	}
 }
 
@@ -268,10 +237,13 @@ func cardCallbackEnvelope(event *callback.CardActionTriggerEvent) map[string]any
 			contextMap["open_chat_id"] = req.Context.OpenChatID
 		}
 	}
+	// Feishu card callbacks do not include the chat type. The bridge only emits
+	// actionable cards from private-chat paths, and task actions additionally
+	// validate the stored chat ID and task creator in the router.
 	message := map[string]any{
 		"message_id": contextMap["open_message_id"],
 		"chat_id":    contextMap["open_chat_id"],
-		"chat_type":  "unknown",
+		"chat_type":  "private",
 	}
 	return map[string]any{
 		"header": header,

@@ -257,7 +257,7 @@ func TestFeishuWSClientDispatchesEventAndReplies(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	source := NewSDKEventSource("cli_test", "secret", "", nil)
+	source := NewSDKEventSource("cli_test", "secret", nil)
 	source.client.heartbeatInterval = time.Hour
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -356,7 +356,7 @@ func TestFeishuWSClientAcknowledgesCardActions(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	source := NewSDKEventSource("cli_test", "secret", "", nil)
+	source := NewSDKEventSource("cli_test", "secret", nil)
 	source.client.heartbeatInterval = time.Hour
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()

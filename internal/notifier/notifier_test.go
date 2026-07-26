@@ -51,20 +51,14 @@ func TestThreadSelectionCard(t *testing.T) {
 	}
 }
 
-func TestProjectAndErrorCards(t *testing.T) {
-	sender := &fakeSender{ids: []string{"project", "error"}}
+func TestRejectionCard(t *testing.T) {
+	sender := &fakeSender{ids: []string{"error"}}
 	n := New(sender)
-	if _, err := n.ProjectSelection(context.Background(), ProjectSelectionInput{ChatID: "chat", PendingID: "pending", Prompt: "fix", ProjectAliases: []string{"backend"}}); err != nil {
-		t.Fatal(err)
-	}
-	if sender.messages[0].CardKind != contracts.CardProjectSelection || optionActionValue(sender.messages[0], "project_select", "project") != "backend" {
-		t.Fatalf("unexpected project card: %+v", sender.messages[0])
-	}
 	if err := n.Rejection(context.Background(), "chat", "input", "bad request"); err != nil {
 		t.Fatal(err)
 	}
-	if sender.messages[1].CardKind != contracts.CardRoutingError {
-		t.Fatalf("unexpected rejection: %+v", sender.messages[1])
+	if sender.messages[0].CardKind != contracts.CardRoutingError {
+		t.Fatalf("unexpected rejection: %+v", sender.messages[0])
 	}
 }
 
@@ -121,15 +115,6 @@ func fieldValue(message contracts.OutboundMessage, title string) string {
 	for _, field := range message.Fields {
 		if field.Title == title {
 			return field.Value
-		}
-	}
-	return ""
-}
-
-func optionActionValue(message contracts.OutboundMessage, id, key string) string {
-	for _, option := range message.Options {
-		if option.Action.ID == id {
-			return option.Action.Value[key]
 		}
 	}
 	return ""

@@ -34,6 +34,16 @@ if grep -qE '^[[:space:]]*(sandbox|approval|force_full_access|approval_timeout_s
   exit 1
 fi
 
+if grep -qE '^[[:space:]]*(connection|bot_open_id):' "$CONFIG_PATH"; then
+  echo "config must not contain retired Feishu fields" >&2
+  exit 1
+fi
+
+if grep -q '^projects:' "$CONFIG_PATH"; then
+  echo "generated config must not duplicate the default workspace as a project" >&2
+  exit 1
+fi
+
 if grep -q 'dummy-secret' "$CONFIG_PATH"; then
   echo "config must not contain app secrets" >&2
   exit 1

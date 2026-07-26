@@ -2,7 +2,7 @@
 
 [English](README.md) | [简体中文](README.zh-CN.md)
 
-`codex-feishu-bridge` is a personal local daemon for using Codex from Feishu. It uses Codex `app-server` over local stdio, so it can create new work or take over a thread already visible in Codex Desktop.
+`codex-feishu-bridge` is a personal local daemon for controlling Codex from a trusted Feishu private chat. It uses Codex `app-server` over local stdio, so it can create new work or take over a thread already visible in Codex Desktop. Events from non-private chats are ignored.
 
 ## Quick Start
 
@@ -36,11 +36,7 @@ explain this repository
 @backend fix the failing test
 ```
 
-In group chats, mention the bot and include a project:
-
-```text
-@Codex @backend fix the failing test
-```
+Use `@backend` only when `projects.backend` is configured; omit the prefix to use `workspace.default`.
 
 To continue an existing Codex Desktop thread, send `/sessions` in a private chat, select a thread, then use the attached task card to send a follow-up. The bridge keeps the Codex thread id locally and resumes it through app-server.
 
@@ -58,9 +54,9 @@ codex-feishu-bridge tasks show [--config path] <task_id>
 
 ## Security Model
 
-Only `security.allowed_open_ids` can use the bridge. Private-chat unauthorized requests receive a rejection; group-chat unauthorized requests are ignored. Task continuation and stopping are creator-only.
+Only `security.allowed_open_ids` can use the bridge. Unauthorized private-chat requests receive a rejection, and all non-private events are ignored. Task continuation and stopping are creator-only.
 
-Feishu cards redact local absolute paths, secrets, proxy credentials, and full Codex thread ids. SQLite stores the local task-to-thread and task-to-turn mapping under `~/.codex-feishu-bridge/state.db`.
+Feishu cards are sent only to private chats and redact local absolute paths, secrets, proxy credentials, and full Codex thread ids. SQLite stores the local task-to-thread and task-to-turn mapping under `~/.codex-feishu-bridge/state.db`.
 
 ## Local Permissions
 

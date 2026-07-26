@@ -2,13 +2,11 @@ package intent
 
 import (
 	"testing"
-
-	"github.com/sparklyi/codex-feishu-bridge/internal/contracts"
 )
 
 func TestPrivatePlainTextStartsDefaultTask(t *testing.T) {
 	got := ParseStart(ParseInput{
-		Event:          contracts.InboundEvent{ChatType: "private", Text: "fix tests"},
+		Text:           "fix tests",
 		ProjectAliases: []string{"backend"},
 	})
 	if got.Kind != KindStartTask || got.Prompt != "fix tests" || got.ProjectAlias != "" {
@@ -18,7 +16,7 @@ func TestPrivatePlainTextStartsDefaultTask(t *testing.T) {
 
 func TestPrivateProjectPrefix(t *testing.T) {
 	got := ParseStart(ParseInput{
-		Event:          contracts.InboundEvent{ChatType: "private", Text: "@backend fix tests"},
+		Text:           "@backend fix tests",
 		ProjectAliases: []string{"backend"},
 	})
 	if got.Kind != KindStartTask || got.ProjectAlias != "backend" || got.Prompt != "fix tests" {
@@ -28,7 +26,7 @@ func TestPrivateProjectPrefix(t *testing.T) {
 
 func TestPrivateUnknownProject(t *testing.T) {
 	got := ParseStart(ParseInput{
-		Event:          contracts.InboundEvent{ChatType: "private", Text: "@missing fix tests"},
+		Text:           "@missing fix tests",
 		ProjectAliases: []string{"backend"},
 	})
 	if got.Kind != KindUnknownProject || got.ProjectAlias != "missing" {
@@ -38,7 +36,7 @@ func TestPrivateUnknownProject(t *testing.T) {
 
 func TestSlashPrefixedPromptStartsTask(t *testing.T) {
 	got := ParseStart(ParseInput{
-		Event:          contracts.InboundEvent{ChatType: "private", Text: "/plan fix tests"},
+		Text:           "/plan fix tests",
 		ProjectAliases: []string{"backend"},
 	})
 	if got.Kind != KindStartTask || got.Prompt != "/plan fix tests" {
@@ -46,26 +44,9 @@ func TestSlashPrefixedPromptStartsTask(t *testing.T) {
 	}
 }
 
-func TestGroupRequiresBotMentionAndProject(t *testing.T) {
-	plain := ParseStart(ParseInput{
-		Event:          contracts.InboundEvent{ChatType: "group", Text: "@backend fix tests"},
-		ProjectAliases: []string{"backend"},
-	})
-	if plain.Kind != KindIgnored {
-		t.Fatalf("plain group message should be ignored: %+v", plain)
-	}
-	missingProject := ParseStart(ParseInput{
-		Event:          contracts.InboundEvent{ChatType: "group", Text: "fix tests", BotMentioned: true},
-		ProjectAliases: []string{"backend"},
-	})
-	if missingProject.Kind != KindProjectSelection {
-		t.Fatalf("group mention without project should select project: %+v", missingProject)
-	}
-	start := ParseStart(ParseInput{
-		Event:          contracts.InboundEvent{ChatType: "group", Text: "@backend fix tests", BotMentioned: true},
-		ProjectAliases: []string{"backend"},
-	})
-	if start.Kind != KindStartTask || start.ProjectAlias != "backend" || start.Prompt != "fix tests" {
-		t.Fatalf("unexpected start intent: %+v", start)
+func TestBlankTextIsIgnored(t *testing.T) {
+	got := ParseStart(ParseInput{Text: "   ", ProjectAliases: []string{"backend"}})
+	if got.Kind != KindIgnored {
+		t.Fatalf("blank text should be ignored: %+v", got)
 	}
 }

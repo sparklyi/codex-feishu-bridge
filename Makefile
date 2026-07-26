@@ -14,4 +14,5 @@ lint:
 	go vet ./...
 
 doctor:
-	go run ./cmd/codex-feishu-bridge doctor --config config.example.yaml
+	@test -n "$(CONFIG)" || { echo "usage: make doctor CONFIG=/path/to/config.yaml" >&2; exit 2; }
+	go run ./cmd/codex-feishu-bridge doctor --config "$(CONFIG)"

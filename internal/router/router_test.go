@@ -114,6 +114,27 @@ func TestRouterRejectsUnauthorizedAndRouteMiss(t *testing.T) {
 	}
 }
 
+func TestRouterIgnoresNonPrivateEventsBeforeAuthorization(t *testing.T) {
+	ctx := context.Background()
+	router, st, controller, notes := newTestRouter(t)
+	defer st.Close()
+	err := router.Handle(ctx, contracts.InboundEvent{
+		Kind:         contracts.InboundNewTask,
+		DedupKey:     "non-private",
+		ChatType:     "non_private",
+		ChatID:       "non-private-chat",
+		SenderOpenID: "ou_bad",
+		MessageID:    "input",
+		Text:         "@backend fix tests",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(controller.enqueues) != 0 || len(notes.rejections) != 0 || len(notes.starts) != 0 {
+		t.Fatalf("non-private event must be ignored: controller=%+v notes=%+v", controller, notes)
+	}
+}
+
 func newTestRouter(t *testing.T) (*Router, *store.Store, *fakeController, *fakeNotifier) {
 	t.Helper()
 	st, err := store.Open(context.Background(), filepath.Join(t.TempDir(), "state.db"))
@@ -131,13 +152,12 @@ func newTestRouter(t *testing.T) (*Router, *store.Store, *fakeController, *fakeN
 			Workspace: config.WorkspaceConfig{Default: "/repo/default"},
 			Projects:  map[string]config.ProjectConfig{"backend": {CWD: "/repo/backend"}},
 		},
-		Store:        st,
-		Controller:   controller,
-		Notifier:     notes,
-		Now:          func() time.Time { return time.Date(2026, 7, 25, 12, 0, 0, 0, time.UTC) },
-		NewTaskID:    nextTask,
-		NewRunID:     func() string { return "run-1" },
-		NewPendingID: func() string { return "pending-1" },
+		Store:      st,
+		Controller: controller,
+		Notifier:   notes,
+		Now:        func() time.Time { return time.Date(2026, 7, 25, 12, 0, 0, 0, time.UTC) },
+		NewTaskID:  nextTask,
+		NewRunID:   func() string { return "run-1" },
 	})
 	return router, st, controller, notes
 }
@@ -192,9 +212,6 @@ func (f *fakeNotifier) RoutingError(_ context.Context, _ string, replyTo string)
 func (f *fakeNotifier) Rejection(_ context.Context, _ string, _ string, body string) error {
 	f.rejections = append(f.rejections, body)
 	return nil
-}
-func (f *fakeNotifier) ProjectSelection(context.Context, notifier.ProjectSelectionInput) (contracts.SentMessage, error) {
-	return contracts.SentMessage{MessageID: "project"}, nil
 }
 func (f *fakeNotifier) RunningConflict(context.Context, notifier.RunningConflictInput) error {
 	return nil

@@ -3,7 +3,6 @@ package store
 import (
 	"context"
 	"database/sql"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
@@ -81,16 +80,6 @@ type FinishRunInput struct {
 	FinishedAt time.Time
 }
 
-type CreatePendingIntentInput struct {
-	ID             string
-	ChatID         string
-	CreatedBy      string
-	Prompt         string
-	ProjectAliases []string
-	Now            time.Time
-	ExpiresAt      time.Time
-}
-
 type AdmitResult struct {
 	Replay bool
 	Reason RejectionReason
@@ -119,14 +108,6 @@ type Run struct {
 	CodexTurnID   string
 	ExitCode      int
 	FinalText     string
-}
-
-type PendingIntent struct {
-	ID             string
-	ChatID         string
-	CreatedBy      string
-	Prompt         string
-	ProjectAliases []string
 }
 
 func Open(ctx context.Context, path string) (*Store, error) {
@@ -201,6 +182,8 @@ func (s *Store) migrate(ctx context.Context) error {
 
 func (s *Store) hasState(ctx context.Context) (bool, error) {
 	var name string
+	// Include retired tables so an older state database is rejected rather than
+	// being mistaken for a fresh database.
 	err := s.db.QueryRowContext(ctx, `SELECT name FROM sqlite_master WHERE type='table' AND name IN ('tasks','runs','message_routes','event_dedup','users','pending_intents','approvals') LIMIT 1`).Scan(&name)
 	if errors.Is(err, sql.ErrNoRows) {
 		return false, nil
@@ -501,51 +484,6 @@ func (s *Store) ResolveMessageRoute(ctx context.Context, messageID string) (Task
 	return s.getTask(ctx, taskID)
 }
 
-func (s *Store) CreatePendingIntent(ctx context.Context, in CreatePendingIntentInput) (PendingIntent, error) {
-	now := normalizeTime(in.Now)
-	expiresAt := normalizeTime(in.ExpiresAt)
-	aliases, err := json.Marshal(in.ProjectAliases)
-	if err != nil {
-		return PendingIntent{}, err
-	}
-	_, err = s.db.ExecContext(ctx, `
-INSERT INTO pending_intents(id,chat_id,created_by,prompt,project_aliases_json,status,created_at,expires_at)
-VALUES(?,?,?,?,?,'pending',?,?)`, in.ID, in.ChatID, in.CreatedBy, in.Prompt, string(aliases), formatTime(now), formatTime(expiresAt))
-	if err != nil {
-		return PendingIntent{}, err
-	}
-	return PendingIntent{ID: in.ID, ChatID: in.ChatID, CreatedBy: in.CreatedBy, Prompt: in.Prompt, ProjectAliases: append([]string(nil), in.ProjectAliases...)}, nil
-}
-
-func (s *Store) ConsumePendingIntent(ctx context.Context, id, createdBy string, now time.Time) (PendingIntent, error) {
-	now = normalizeTime(now)
-	tx, err := s.db.BeginTx(ctx, nil)
-	if err != nil {
-		return PendingIntent{}, err
-	}
-	defer rollback(tx)
-	pending, expiresAt, err := getPendingIntentTx(ctx, tx, id, createdBy)
-	if errors.Is(err, sql.ErrNoRows) {
-		return PendingIntent{}, ErrNotFound
-	}
-	if err != nil {
-		return PendingIntent{}, err
-	}
-	if !expiresAt.After(now) {
-		if _, err := tx.ExecContext(ctx, `UPDATE pending_intents SET status='expired' WHERE id=?`, id); err != nil {
-			return PendingIntent{}, err
-		}
-		if err := tx.Commit(); err != nil {
-			return PendingIntent{}, err
-		}
-		return PendingIntent{}, ErrNotFound
-	}
-	if _, err := tx.ExecContext(ctx, `UPDATE pending_intents SET status='consumed',consumed_at=? WHERE id=? AND status='pending'`, formatTime(now), id); err != nil {
-		return PendingIntent{}, err
-	}
-	return pending, tx.Commit()
-}
-
 func (s *Store) ListTasks(ctx context.Context, limit int) ([]Task, error) {
 	if limit <= 0 {
 		limit = 50
@@ -658,29 +596,6 @@ func getTaskQuery(ctx context.Context, q interface {
 
 func getRunTx(ctx context.Context, tx *sql.Tx, runID string) (Run, error) {
 	return scanRun(tx.QueryRowContext(ctx, `SELECT `+runColumns+` FROM runs WHERE id=?`, runID))
-}
-
-func getPendingIntentTx(ctx context.Context, tx *sql.Tx, id, createdBy string) (PendingIntent, time.Time, error) {
-	var pending PendingIntent
-	var aliasesJSON, expiresAtRaw string
-	err := tx.QueryRowContext(ctx, `
-SELECT id,chat_id,created_by,prompt,project_aliases_json,expires_at
-FROM pending_intents WHERE id=? AND created_by=? AND status='pending'`, id, createdBy).
-		Scan(&pending.ID, &pending.ChatID, &pending.CreatedBy, &pending.Prompt, &aliasesJSON, &expiresAtRaw)
-	if err != nil {
-		return PendingIntent{}, time.Time{}, err
-	}
-	if aliasesJSON == "" {
-		aliasesJSON = "[]"
-	}
-	if err := json.Unmarshal([]byte(aliasesJSON), &pending.ProjectAliases); err != nil {
-		return PendingIntent{}, time.Time{}, err
-	}
-	expiresAt, err := time.Parse(time.RFC3339Nano, expiresAtRaw)
-	if err != nil {
-		return PendingIntent{}, time.Time{}, err
-	}
-	return pending, expiresAt, nil
 }
 
 func scanTask(scanner taskScanner) (Task, error) {

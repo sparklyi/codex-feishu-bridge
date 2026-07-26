@@ -48,14 +48,6 @@ type ThreadSelectionInput struct {
 	Threads          []ThreadOption
 }
 
-type ProjectSelectionInput struct {
-	ChatID           string
-	ReplyToMessageID string
-	PendingID        string
-	Prompt           string
-	ProjectAliases   []string
-}
-
 type RunningConflictInput struct {
 	ChatID           string
 	ReplyToMessageID string
@@ -133,31 +125,6 @@ func (n *Notifier) RoutingError(ctx context.Context, chatID, replyToMessageID st
 		Status:           "routing_error",
 		Title:            "无法定位任务",
 		BodyMarkdown:     "请从任务卡片继续，或重新发起一个任务。",
-	})
-}
-
-func (n *Notifier) ProjectSelection(ctx context.Context, in ProjectSelectionInput) (contracts.SentMessage, error) {
-	body := "任务：" + redact.FeishuText(in.Prompt, 500)
-	options := make([]contracts.CardOption, 0, len(in.ProjectAliases))
-	for _, alias := range in.ProjectAliases {
-		options = append(options, contracts.CardOption{
-			Title: alias,
-			Action: contracts.Action{
-				ID:    "project_select",
-				Label: "选择",
-				Style: "primary",
-				Value: map[string]string{"action": "select_project", "pending_id": in.PendingID, "project": alias},
-			},
-		})
-	}
-	return n.sender.Send(ctx, contracts.OutboundMessage{
-		ChatID:           in.ChatID,
-		ReplyToMessageID: in.ReplyToMessageID,
-		CardKind:         contracts.CardProjectSelection,
-		Status:           "project_selection",
-		Title:            "选择项目",
-		BodyMarkdown:     body,
-		Options:          options,
 	})
 }
 

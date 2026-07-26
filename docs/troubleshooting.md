@@ -16,8 +16,9 @@ Common failures:
 - SQLite errors: check `~/.codex-feishu-bridge/state.db` and its parent directory permissions.
 - Missing continuation: confirm Feishu returned a task-card message id and reply to that card.
 - `/sessions` is empty: open or create a Codex Desktop thread first, then retry from a private chat.
-- Group messages are ignored: mention the bot and include a project, for example `@Codex @backend fix the failing router test`.
+- Non-private messages are ignored by design: start a direct chat with the bot before sending a task or `/sessions`.
 - Configuration rejects an old permission field: remove `sandbox`, `approval`, `force_full_access`, and `approval_timeout_seconds`; those settings are no longer supported.
-- State database is unsupported: stop the bridge and recreate `~/.codex-feishu-bridge/state.db`; the old approval-state schema is intentionally not migrated.
+- Configuration rejects `feishu.connection` or `feishu.bot_open_id`: remove those retired fields from the configuration.
+- State database is unsupported: stop the bridge and recreate `~/.codex-feishu-bridge/state.db`; pre-private-chat schemas are intentionally not migrated.
 
 After a bridge restart, in-flight tasks are marked failed. Attached tasks remain resumable because their Codex thread id is retained in SQLite.

@@ -1,6 +1,6 @@
 package store
 
-const migrationVersion = 1
+const migrationVersion = 2
 
 // schema is intentionally installed only for a fresh state database. This
 // bridge does not migrate old state because its task and permission model is a
@@ -62,23 +62,10 @@ CREATE TABLE users (
 	enabled INTEGER NOT NULL CHECK (enabled IN (0,1))
 );
 
-CREATE TABLE pending_intents (
-	id TEXT PRIMARY KEY,
-	chat_id TEXT NOT NULL,
-	created_by TEXT NOT NULL,
-	prompt TEXT NOT NULL,
-	project_aliases_json TEXT NOT NULL DEFAULT '[]',
-	status TEXT NOT NULL CHECK (status IN ('pending','consumed','expired')),
-	created_at TEXT NOT NULL,
-	expires_at TEXT NOT NULL,
-	consumed_at TEXT
-);
-
 CREATE INDEX idx_tasks_codex_thread_id ON tasks(codex_thread_id);
 CREATE INDEX idx_runs_task_id ON runs(task_id);
 CREATE INDEX idx_runs_status ON runs(status);
 CREATE INDEX idx_message_routes_task_id ON message_routes(task_id);
-CREATE INDEX idx_pending_intents_chat_creator ON pending_intents(chat_id, created_by, status);
 CREATE UNIQUE INDEX runs_one_active_per_task
 	ON runs(task_id) WHERE status IN ('queued','running');
 `

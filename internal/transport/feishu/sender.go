@@ -417,7 +417,7 @@ func templateFor(msg contracts.OutboundMessage) string {
 		return "red"
 	case contracts.CardRunningConflict:
 		return "orange"
-	case contracts.CardProjectSelection, contracts.CardThreadSelection:
+	case contracts.CardThreadSelection:
 		return "blue"
 	default:
 		if msg.Status == "failed" {
@@ -440,8 +440,6 @@ func cardSubtitle(msg contracts.OutboundMessage) string {
 		return "本机 Codex 已完成执行"
 	case contracts.CardFailure:
 		return "本机 Codex 需要你的处理"
-	case contracts.CardProjectSelection:
-		return "选择工作区后立即执行"
 	case contracts.CardThreadSelection:
 		return "从桌面 Codex 会话继续"
 	case contracts.CardRunningConflict:
@@ -469,8 +467,6 @@ func statusLabel(msg contracts.OutboundMessage) string {
 		return "未完成"
 	case contracts.CardRoutingError:
 		return "待处理"
-	case contracts.CardProjectSelection:
-		return "选择项目"
 	case contracts.CardThreadSelection:
 		return "选择会话"
 	case contracts.CardRunningConflict:
@@ -502,7 +498,7 @@ func statusColor(msg contracts.OutboundMessage) string {
 		return "red"
 	case contracts.CardRunningConflict:
 		return "orange"
-	case contracts.CardProjectSelection, contracts.CardThreadSelection:
+	case contracts.CardThreadSelection:
 		return "blue"
 	}
 	switch msg.Status {

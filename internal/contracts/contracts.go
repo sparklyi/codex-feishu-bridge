@@ -13,12 +13,11 @@ const (
 type InboundEvent struct {
 	DedupKey      string
 	Kind          InboundKind
-	ChatType      string // "private", "group", or "unknown"
+	ChatType      string // "private" or "non_private"
 	ChatID        string
 	SenderOpenID  string
 	MessageID     string
 	RootMessageID string
-	BotMentioned  bool
 	ActionID      string
 	ActionValue   map[string]string
 	Text          string
@@ -28,13 +27,12 @@ type InboundEvent struct {
 type CardKind string
 
 const (
-	CardStart            CardKind = "start"
-	CardSuccess          CardKind = "success"
-	CardFailure          CardKind = "failure"
-	CardRoutingError     CardKind = "routing_error"
-	CardProjectSelection CardKind = "project_selection"
-	CardThreadSelection  CardKind = "thread_selection"
-	CardRunningConflict  CardKind = "running_conflict"
+	CardStart           CardKind = "start"
+	CardSuccess         CardKind = "success"
+	CardFailure         CardKind = "failure"
+	CardRoutingError    CardKind = "routing_error"
+	CardThreadSelection CardKind = "thread_selection"
+	CardRunningConflict CardKind = "running_conflict"
 )
 
 type OutboundMessage struct {

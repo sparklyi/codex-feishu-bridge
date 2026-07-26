@@ -48,14 +48,14 @@ func TestBuildInteractiveCardUsesCardJSONV2(t *testing.T) {
 	}
 }
 
-func TestBuildInteractiveCardRendersStructuredOptionsWithCallbackBehaviors(t *testing.T) {
+func TestBuildInteractiveCardRendersThreadOptionsWithCallbackBehaviors(t *testing.T) {
 	card, err := BuildInteractiveCard(contracts.OutboundMessage{
-		CardKind:     contracts.CardProjectSelection,
-		Title:        "Choose project",
-		BodyMarkdown: "Select a project.",
+		CardKind:     contracts.CardThreadSelection,
+		Title:        "Choose thread",
+		BodyMarkdown: "Select a desktop thread.",
 		Options: []contracts.CardOption{
-			{Title: "backend", Detail: "Fix the failing tests", Action: contracts.Action{ID: "project_select", Label: "选择", Style: "primary", Value: map[string]string{"action": "select_project", "project": "backend", "pending_id": "pi_1"}}},
-			{Title: "frontend", Detail: "Polish the card", Action: contracts.Action{ID: "project_select", Label: "选择", Style: "primary", Value: map[string]string{"action": "select_project", "project": "frontend", "pending_id": "pi_1"}}},
+			{Title: "Fix login", Detail: "Investigate the failing test", Action: contracts.Action{ID: "attach_thread", Label: "接管", Style: "primary", Value: map[string]string{"action": "attach_thread", "thread_id": "desktop-1"}}},
+			{Title: "Polish card", Detail: "Review the latest card layout", Action: contracts.Action{ID: "attach_thread", Label: "接管", Style: "primary", Value: map[string]string{"action": "attach_thread", "thread_id": "desktop-2"}}},
 		},
 	})
 	if err != nil {
@@ -63,10 +63,10 @@ func TestBuildInteractiveCardRendersStructuredOptionsWithCallbackBehaviors(t *te
 	}
 	decoded := decodeCard(t, card)
 	buttons := taggedElements(decoded["body"], "button")
-	if len(buttons) != 2 || !jsonContains(string(card), "backend") || !jsonContains(string(card), "frontend") {
+	if len(buttons) != 2 || !jsonContains(string(card), "Fix login") || !jsonContains(string(card), "Polish card") {
 		t.Fatalf("structured options missing: %s", string(card))
 	}
-	projects := make(map[string]bool, len(buttons))
+	threads := make(map[string]bool, len(buttons))
 	for _, button := range buttons {
 		if _, legacyValue := button["value"]; legacyValue {
 			t.Fatalf("V2 buttons must use callback behaviors instead of value: %s", string(card))
@@ -75,17 +75,17 @@ func TestBuildInteractiveCardRendersStructuredOptionsWithCallbackBehaviors(t *te
 			t.Fatalf("option button should use the primary V2 visual treatment: %s", string(card))
 		}
 		value := callbackValue(t, button, card)
-		if value["action_id"] != "project_select" || value["action"] != "select_project" {
+		if value["action_id"] != "attach_thread" || value["action"] != "attach_thread" {
 			t.Fatalf("option callback malformed: %s", string(card))
 		}
-		project, ok := value["project"].(string)
+		threadID, ok := value["thread_id"].(string)
 		if !ok {
-			t.Fatalf("option callback missing project: %s", string(card))
+			t.Fatalf("option callback missing thread id: %s", string(card))
 		}
-		projects[project] = true
+		threads[threadID] = true
 	}
-	if !projects["backend"] || !projects["frontend"] {
-		t.Fatalf("option callbacks lost project values: %s", string(card))
+	if !threads["desktop-1"] || !threads["desktop-2"] {
+		t.Fatalf("option callbacks lost thread values: %s", string(card))
 	}
 }
 
@@ -247,13 +247,12 @@ func callbackValue(t *testing.T, button map[string]any, card []byte) map[string]
 
 func TestBuildInteractiveCardWithActionValues(t *testing.T) {
 	card, err := BuildInteractiveCard(contracts.OutboundMessage{
-		CardKind:     contracts.CardProjectSelection,
-		Title:        "Choose project",
-		BodyMarkdown: "Select a project.",
-		Fields:       []contracts.Field{{Title: "Prompt", Value: "fix tests"}},
+		CardKind:     contracts.CardThreadSelection,
+		Title:        "Choose thread",
+		BodyMarkdown: "Select a desktop thread.",
+		Fields:       []contracts.Field{{Title: "Thread", Value: "desktop-1"}},
 		Actions: []contracts.Action{
-			{ID: "project_select", Label: "backend", Value: map[string]string{"action": "select_project", "project": "backend", "pending_id": "pi_1"}},
-			{ID: "project_select", Label: "frontend", Value: map[string]string{"action": "select_project", "project": "frontend", "pending_id": "pi_1"}},
+			{ID: "attach_thread", Label: "接管", Value: map[string]string{"action": "attach_thread", "thread_id": "desktop-1"}},
 		},
 	})
 	if err != nil {
@@ -263,7 +262,7 @@ func TestBuildInteractiveCardWithActionValues(t *testing.T) {
 	if err := json.Unmarshal(card, &decoded); err != nil {
 		t.Fatalf("invalid card json: %v", err)
 	}
-	if !jsonContains(string(card), "select_project") || !jsonContains(string(card), "backend") || !jsonContains(string(card), "Prompt") {
+	if !jsonContains(string(card), "attach_thread") || !jsonContains(string(card), "desktop-1") || !jsonContains(string(card), "Thread") {
 		t.Fatalf("card missing action values or fields: %s", string(card))
 	}
 	header := decoded["header"].(map[string]any)

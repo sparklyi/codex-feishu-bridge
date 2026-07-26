@@ -80,10 +80,10 @@ func Serve(ctx context.Context, opts ServeOptions) error {
 		if secret == "" {
 			return errors.New("missing Feishu app secret")
 		}
-		source := feishu.NewSDKEventSource(cfg.Feishu.AppID, secret, "", proxyURL)
+		source := feishu.NewSDKEventSource(cfg.Feishu.AppID, secret, proxyURL)
 		receiver = feishu.Receiver{
 			Source: source,
-			Verify: feishu.VerifyOptions{AppID: cfg.Feishu.AppID, BotOpenID: cfg.Feishu.BotOpenID},
+			Verify: feishu.VerifyOptions{AppID: cfg.Feishu.AppID},
 			OnHandleError: func(_ context.Context, event contracts.InboundEvent, err error) {
 				slog.Error("Feishu event handling failed", "kind", event.Kind, "action_id", event.ActionID, "error", err)
 			},
@@ -187,8 +187,6 @@ func openStoreFromConfig(ctx context.Context, configPath string, getenv func(str
 const defaultConfig = `feishu:
   app_id: cli_xxx
   app_secret_env: FEISHU_APP_SECRET
-  bot_open_id: ou_bot_xxx
-  connection: websocket
   # proxy_url: http://127.0.0.1:7890
 security:
   allowed_open_ids:
@@ -199,8 +197,4 @@ app_server:
   startup_timeout_seconds: 15
 workspace:
   default: /path/to/default/repo
-projects:
-  backend:
-    cwd: /path/to/backend
-    model: ""
 `

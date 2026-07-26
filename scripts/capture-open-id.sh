@@ -95,7 +95,7 @@ func main() {
 	ctx, cancel := context.WithTimeout(context.Background(), *timeout)
 	defer cancel()
 	captured := errors.New("captured")
-	source := feishu.NewSDKEventSource(*appID, secret, "")
+	source := feishu.NewSDKEventSource(*appID, secret, nil)
 	receiver := feishu.Receiver{Source: source, Verify: feishu.VerifyOptions{AppID: *appID}}
 	fmt.Fprintln(os.Stderr, "Waiting for a Feishu message. Send any message to the bot now.")
 	err := receiver.Receive(ctx, func(ctx context.Context, ev contracts.InboundEvent) error {

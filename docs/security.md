@@ -6,10 +6,10 @@ Controls:
 
 - User allowlist: `security.allowed_open_ids`.
 - Unknown users never invoke Codex.
-- Private unauthorized requests get a short rejection.
-- Group unauthorized requests are silent.
+- Private chat is the only ingress; all non-private events are ignored before authorization and routing.
+- Unauthorized private-chat requests get a short rejection.
 - Continuations and stop requests require the original task creator.
-- Card replies route through stored `message_routes`; card actions validate task ownership.
+- Task cards are emitted only for private-chat requests. Card replies route through stored `message_routes`; card actions validate task ownership.
 - Feishu-visible text is redacted and truncated.
 - SQLite stores only bridge task state and the corresponding Codex thread and turn identifiers.
 

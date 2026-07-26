@@ -29,8 +29,6 @@ type TaskStore interface {
 	SetTaskRootMessageID(ctx context.Context, taskID, messageID string, now time.Time) error
 	ResolveMessageRoute(ctx context.Context, messageID string) (store.Task, error)
 	GetTask(ctx context.Context, taskID string) (store.Task, []store.Run, error)
-	CreatePendingIntent(ctx context.Context, in store.CreatePendingIntentInput) (store.PendingIntent, error)
-	ConsumePendingIntent(ctx context.Context, id, createdBy string, now time.Time) (store.PendingIntent, error)
 }
 
 type Controller interface {
@@ -45,7 +43,6 @@ type Notifier interface {
 	ThreadSelection(ctx context.Context, in notifier.ThreadSelectionInput) (contracts.SentMessage, error)
 	RoutingError(ctx context.Context, chatID, replyToMessageID string) (contracts.SentMessage, error)
 	Rejection(ctx context.Context, chatID, replyToMessageID, body string) error
-	ProjectSelection(ctx context.Context, in notifier.ProjectSelectionInput) (contracts.SentMessage, error)
 	RunningConflict(ctx context.Context, in notifier.RunningConflictInput) error
 }
 
@@ -57,7 +54,6 @@ type RouterOptions struct {
 	Now          func() time.Time
 	NewTaskID    func() string
 	NewRunID     func() string
-	NewPendingID func() string
 }
 
 type Router struct {
@@ -68,7 +64,6 @@ type Router struct {
 	now          func() time.Time
 	newTaskID    func() string
 	newRunID     func() string
-	newPendingID func() string
 }
 
 func New(opts RouterOptions) *Router {
@@ -84,10 +79,6 @@ func New(opts RouterOptions) *Router {
 	if newRunID == nil {
 		newRunID = func() string { return randomID("run") }
 	}
-	newPendingID := opts.NewPendingID
-	if newPendingID == nil {
-		newPendingID = func() string { return randomID("pending") }
-	}
 	return &Router{
 		cfg:          opts.Config,
 		store:        opts.Store,
@@ -96,24 +87,21 @@ func New(opts RouterOptions) *Router {
 		now:          now,
 		newTaskID:    newTaskID,
 		newRunID:     newRunID,
-		newPendingID: newPendingID,
 	}
 }
 
 func (r *Router) Handle(ctx context.Context, ev contracts.InboundEvent) error {
-	if !r.authorized(ctx, ev.SenderOpenID) {
-		if ev.ChatType == "private" {
-			return r.notifier.Rejection(ctx, ev.ChatID, ev.MessageID, "当前用户未获授权使用 Codex Bridge。")
-		}
+	if ev.ChatType != "private" {
 		return nil
+	}
+	if !r.authorized(ctx, ev.SenderOpenID) {
+		return r.notifier.Rejection(ctx, ev.ChatID, ev.MessageID, "当前用户未获授权使用 Codex Bridge。")
 	}
 	switch ev.Kind {
 	case contracts.InboundNewTask:
 		return r.handleNewTask(ctx, ev)
 	case contracts.InboundCardAction:
 		switch ev.ActionValue["action"] {
-		case "select_project":
-			return r.handleProjectSelection(ctx, ev)
 		case "attach_thread":
 			return r.handleAttachThread(ctx, ev)
 		case "stop_task":
@@ -128,7 +116,7 @@ func (r *Router) Handle(ctx context.Context, ev contracts.InboundEvent) error {
 }
 
 func (r *Router) handleNewTask(ctx context.Context, ev contracts.InboundEvent) error {
-	parsed := intent.ParseStart(intent.ParseInput{Event: ev, ProjectAliases: r.cfg.ProjectAliases()})
+	parsed := intent.ParseStart(intent.ParseInput{Text: ev.Text, ProjectAliases: r.cfg.ProjectAliases()})
 	switch parsed.Kind {
 	case intent.KindIgnored:
 		return nil
@@ -136,8 +124,6 @@ func (r *Router) handleNewTask(ctx context.Context, ev contracts.InboundEvent) e
 		return r.sendThreadSelection(ctx, ev)
 	case intent.KindUnknownProject:
 		return r.notifier.Rejection(ctx, ev.ChatID, ev.MessageID, "项目配置错误：未找到项目 "+parsed.ProjectAlias)
-	case intent.KindProjectSelection:
-		return r.sendProjectSelection(ctx, ev, parsed.Prompt)
 	case intent.KindStartTask:
 		return r.startTask(ctx, ev, parsed.ProjectAlias, parsed.Prompt)
 	default:
@@ -211,44 +197,6 @@ func (r *Router) handleAttachThread(ctx context.Context, ev contracts.InboundEve
 		return err
 	}
 	return r.insertRouteWithRetry(ctx, sent.MessageID, task.ID, "start_card")
-}
-
-func (r *Router) sendProjectSelection(ctx context.Context, ev contracts.InboundEvent, prompt string) error {
-	pending, err := r.store.CreatePendingIntent(ctx, store.CreatePendingIntentInput{
-		ID:             r.newPendingID(),
-		ChatID:         ev.ChatID,
-		CreatedBy:      ev.SenderOpenID,
-		Prompt:         prompt,
-		ProjectAliases: r.cfg.ProjectAliases(),
-		Now:            r.now(),
-		ExpiresAt:      r.now().Add(10 * time.Minute),
-	})
-	if err != nil {
-		return err
-	}
-	_, err = r.notifier.ProjectSelection(ctx, notifier.ProjectSelectionInput{
-		ChatID:           ev.ChatID,
-		ReplyToMessageID: ev.MessageID,
-		PendingID:        pending.ID,
-		Prompt:           pending.Prompt,
-		ProjectAliases:   pending.ProjectAliases,
-	})
-	return err
-}
-
-func (r *Router) handleProjectSelection(ctx context.Context, ev contracts.InboundEvent) error {
-	pending, err := r.store.ConsumePendingIntent(ctx, ev.ActionValue["pending_id"], ev.SenderOpenID, r.now())
-	if errors.Is(err, store.ErrNotFound) {
-		return nil
-	}
-	if err != nil {
-		return err
-	}
-	alias := ev.ActionValue["project"]
-	if !containsProjectAlias(pending.ProjectAliases, alias) {
-		return r.notifier.Rejection(ctx, ev.ChatID, ev.MessageID, "项目选择已失效，请重新发送任务。")
-	}
-	return r.startTask(ctx, ev, alias, pending.Prompt)
 }
 
 func (r *Router) startTask(ctx context.Context, ev contracts.InboundEvent, alias, prompt string) error {
@@ -447,15 +395,6 @@ func sourceFor(ev contracts.InboundEvent) string {
 		return "card_callback"
 	}
 	return "message"
-}
-
-func containsProjectAlias(aliases []string, want string) bool {
-	for _, alias := range aliases {
-		if alias == want {
-			return true
-		}
-	}
-	return false
 }
 
 func findThread(threads []appserver.Thread, threadID string) (appserver.Thread, bool) {

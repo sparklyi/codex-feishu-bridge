@@ -47,9 +47,6 @@ export FEISHU_APP_SECRET='<your app secret>'
 | --- | --- |
 | 发送任务和进度卡片 | 以应用的身份发消息 |
 | 接收私聊消息 | 读取用户发给机器人的单聊消息 |
-| 接收群聊 @ 机器人消息 | 获取群组中用户 @ 当前机器人消息 |
-
-![飞书机器人能力](assets/feishu-bot-capability.jpg)
 
 ![飞书权限管理](assets/feishu-permissions.jpg)
 
@@ -109,6 +106,17 @@ scripts/init-local-config.sh \
 
 脚本会创建权限为 `0600` 的配置文件和 SQLite 目录，并写入 `app_server`、workspace 和 allowlist。App Secret 始终只以环境变量名保存。
 
+需要在多个本机工作区之间切换时，再向配置文件添加项目别名：
+
+```yaml
+projects:
+  backend:
+    cwd: /path/to/backend
+    model: ""
+```
+
+之后在机器人私聊中以 `@backend ` 作为任务前缀即可选择该工作区；没有前缀时使用 `workspace.default`。
+
 ## 8. 检查本机环境
 
 ```bash
@@ -161,11 +169,7 @@ Reply with exactly OK.
 
 选择需要接管的会话。服务会发送一个绑定任务卡片；在该卡片中输入后续任务，即可通过 app-server 恢复桌面线程。
 
-群聊需要 @ 机器人并指定项目：
-
-```text
-@Codex @backend fix the failing router test
-```
+服务只处理私聊消息和由私聊任务发出的卡片回调，所有非私聊事件都会被忽略。
 
 本机也可以确认任务状态：
 

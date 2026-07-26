@@ -131,37 +131,19 @@ func TestProjectAliasForCWDAndAliases(t *testing.T) {
 	}
 }
 
-func TestLoadFeishuBotOpenID(t *testing.T) {
-	dir := t.TempDir()
-	path := filepath.Join(dir, "config.yaml")
-	err := os.WriteFile(path, []byte(`
-feishu:
-  app_id: cli_test
-  app_secret_env: FEISHU_APP_SECRET
-  bot_open_id: ou_bot
-workspace:
-  default: /repo/default
-projects:
-  backend:
-    cwd: /repo/backend
-`), 0o600)
-	if err != nil {
-		t.Fatal(err)
-	}
-	cfg, err := Load(path, func(key string) string {
-		if key == "HOME" {
-			return dir
-		}
-		if key == "FEISHU_APP_SECRET" {
-			return "secret"
-		}
-		return ""
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if cfg.Feishu.BotOpenID != "ou_bot" {
-		t.Fatalf("bot open id = %q", cfg.Feishu.BotOpenID)
+func TestLoadRejectsRetiredFeishuFields(t *testing.T) {
+	for _, field := range []string{"bot_open_id: ou_bot", "connection: websocket"} {
+		t.Run(field, func(t *testing.T) {
+			path := filepath.Join(t.TempDir(), "config.yaml")
+			data := "feishu:\n  app_id: cli_test\n  app_secret_env: FEISHU_APP_SECRET\n  " + field + "\n"
+			if err := os.WriteFile(path, []byte(data), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			fieldName := strings.Split(field, ":")[0]
+			if _, err := Load(path, func(string) string { return "" }); err == nil || !strings.Contains(err.Error(), fieldName) {
+				t.Fatalf("retired field %q must be rejected, got %v", field, err)
+			}
+		})
 	}
 }
 

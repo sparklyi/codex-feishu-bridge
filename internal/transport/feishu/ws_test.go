@@ -4,7 +4,6 @@ import (
 	"context"
 	"errors"
 	"testing"
-	"time"
 
 	"github.com/larksuite/oapi-sdk-go/v3/event/dispatcher/callback"
 	"github.com/sparklyi/codex-feishu-bridge/internal/contracts"
@@ -15,7 +14,7 @@ func TestReceiverDeliversNormalizedEvents(t *testing.T) {
 		{event: RawEvent{Kind: RawEventMessage, Data: messageJSON(t, map[string]any{"text": "review current changes"}, "")}},
 		{err: context.Canceled},
 	}}
-	r := Receiver{Source: source, Verify: VerifyOptions{AppID: "cli_test", VerificationToken: "verify"}}
+	r := Receiver{Source: source, Verify: VerifyOptions{AppID: "cli_test"}}
 	var got []contracts.InboundEvent
 	err := r.Receive(context.Background(), func(ctx context.Context, ev contracts.InboundEvent) error {
 		got = append(got, ev)
@@ -27,6 +26,9 @@ func TestReceiverDeliversNormalizedEvents(t *testing.T) {
 	if len(got) != 1 || got[0].Kind != contracts.InboundNewTask || got[0].Text != "review current changes" {
 		t.Fatalf("unexpected delivered events: %+v", got)
 	}
+	if source.connects != 1 {
+		t.Fatalf("receiver should initialize its source once, connects=%d", source.connects)
+	}
 }
 
 func TestReceiverRejectsInvalidEvents(t *testing.T) {
@@ -34,7 +36,7 @@ func TestReceiverRejectsInvalidEvents(t *testing.T) {
 		{event: RawEvent{Kind: RawEventMessage, Data: messageJSON(t, map[string]any{"text": "review current changes"}, "")}},
 		{err: context.Canceled},
 	}}
-	r := Receiver{Source: source, Verify: VerifyOptions{AppID: "wrong", VerificationToken: "verify"}}
+	r := Receiver{Source: source, Verify: VerifyOptions{AppID: "wrong"}}
 	calls := 0
 	err := r.Receive(context.Background(), func(ctx context.Context, ev contracts.InboundEvent) error {
 		calls++
@@ -48,36 +50,9 @@ func TestReceiverRejectsInvalidEvents(t *testing.T) {
 	}
 }
 
-func TestReceiverReconnectsAfterDisconnect(t *testing.T) {
-	source := &fakeEventSource{events: []sourceResult{
-		{err: ErrDisconnected},
-		{event: RawEvent{Kind: RawEventCardAction, Data: cardJSON(t, "continue", "")}},
-		{err: context.Canceled},
-	}}
-	r := Receiver{
-		Source: source,
-		Verify: VerifyOptions{AppID: "cli_test", VerificationToken: "verify"},
-		Sleep:  func(ctx context.Context, d time.Duration) error { return nil },
-	}
-	var got []contracts.InboundEvent
-	err := r.Receive(context.Background(), func(ctx context.Context, ev contracts.InboundEvent) error {
-		got = append(got, ev)
-		return nil
-	})
-	if !errors.Is(err, context.Canceled) {
-		t.Fatalf("expected context canceled, got %v", err)
-	}
-	if source.connects != 2 {
-		t.Fatalf("expected reconnect, connects=%d", source.connects)
-	}
-	if len(got) != 1 || got[0].Kind != contracts.InboundCardAction {
-		t.Fatalf("unexpected events: %+v", got)
-	}
-}
-
 func TestReceiverClosesSourceWhenItStops(t *testing.T) {
 	source := &fakeEventSource{events: []sourceResult{{err: context.Canceled}}}
-	r := Receiver{Source: source, Verify: VerifyOptions{AppID: "cli_test", VerificationToken: "verify"}}
+	r := Receiver{Source: source, Verify: VerifyOptions{AppID: "cli_test"}}
 	if err := r.Receive(context.Background(), func(context.Context, contracts.InboundEvent) error { return nil }); !errors.Is(err, context.Canceled) {
 		t.Fatalf("expected context canceled, got %v", err)
 	}
@@ -95,7 +70,7 @@ func TestReceiverContinuesAfterHandlerError(t *testing.T) {
 	var handled, reported int
 	r := Receiver{
 		Source: source,
-		Verify: VerifyOptions{AppID: "cli_test", VerificationToken: "verify"},
+		Verify: VerifyOptions{AppID: "cli_test"},
 		OnHandleError: func(context.Context, contracts.InboundEvent, error) {
 			reported++
 		},
@@ -179,6 +154,9 @@ func TestCardCallbackEnvelopePreservesButtonActionValue(t *testing.T) {
 	}
 	if ev.Text != "" {
 		t.Fatalf("button callback without form input should not synthesize text, got %q", ev.Text)
+	}
+	if ev.ChatType != "private" {
+		t.Fatalf("bridge card callback must preserve private scope, got %q", ev.ChatType)
 	}
 }
 

@@ -2,7 +2,7 @@
 
 [English](README.md) | 简体中文
 
-`codex-feishu-bridge` 是一个供个人远程开发使用的本地守护进程。它通过本机 Codex 的 `app-server` 标准输入输出协议与飞书连接，既能启动新任务，也能从飞书接管桌面 Codex 中已打开的会话。
+`codex-feishu-bridge` 是一个供个人远程开发使用、仅接受可信飞书私聊指令的本地守护进程。它通过本机 Codex 的 `app-server` 标准输入输出协议与飞书连接，既能启动新任务，也能从飞书接管桌面 Codex 中已打开的会话；所有非私聊事件都会被忽略。
 
 ## 快速开始
 
@@ -32,11 +32,7 @@ explain this repository
 @backend fix the failing test
 ```
 
-群聊中需要 @ 机器人并指定项目：
-
-```text
-@Codex @backend fix the failing test
-```
+仅在配置了 `projects.backend` 时使用 `@backend`；省略前缀会使用 `workspace.default`。
 
 在私聊中发送 `/sessions` 可以列出本机桌面 Codex 会话。选择一个会话后，桥接服务会创建绑定任务；在该任务卡片中继续输入内容，就会通过 app-server 恢复该会话。
 
@@ -66,9 +62,9 @@ codex-feishu-bridge tasks show [--config path] <task_id>
 
 ## 安全模型
 
-只有 `security.allowed_open_ids` 中的飞书用户可以使用桥接服务。未授权用户在私聊中会收到拒绝提示，在群聊中会被静默忽略。继续任务和停止任务都必须由任务创建者本人触发。
+只有 `security.allowed_open_ids` 中的飞书用户可以使用桥接服务。未授权用户在私聊中会收到拒绝提示，所有非私聊事件都会被忽略。继续任务和停止任务都必须由任务创建者本人触发。
 
-飞书卡片会隐藏本地绝对路径、secret、代理凭据和完整 Codex thread id。本机 SQLite 会在 `~/.codex-feishu-bridge/state.db` 保存任务与 Codex thread/turn 的关联。
+任务卡片只会发送到私聊，并会隐藏本地绝对路径、secret、代理凭据和完整 Codex thread id。本机 SQLite 会在 `~/.codex-feishu-bridge/state.db` 保存任务与 Codex thread/turn 的关联。
 
 ## 本地权限
 
@@ -77,7 +73,6 @@ codex-feishu-bridge tasks show [--config path] <task_id>
 ## 更多文档
 
 - [飞书机器人接入教程](docs/feishu-quickstart.zh-CN.md)
-- [飞书配置](docs/feishu-setup.md)
 - [安全模型](docs/security.md)
 - [本地开发](docs/development.md)
 - [故障排查](docs/troubleshooting.md)

@@ -22,7 +22,7 @@ func TestControllerRunsTurnStreamsResultAndPersistsState(t *testing.T) {
 	defer func() { _ = st.Close() }()
 	api := newFakeAPI()
 	notes := &fakeNotifier{}
-	controller := New(ControllerOptions{AppServer: api, Store: st, Notifier: notes})
+	controller := New(ControllerOptions{AppServer: api, Store: st, Notifier: notes, CardDisplayMode: "preview"})
 	defer controller.Close()
 	if err := controller.Enqueue(ctx, StartInput{Task: task, Run: run, Project: config.ResolvedProject{CWD: task.CWD}, CardMessageID: "card", DedupKey: "new"}); err != nil {
 		t.Fatal(err)
@@ -62,7 +62,7 @@ func TestControllerCoalescesSlowProgressCardUpdates(t *testing.T) {
 	defer func() { _ = st.Close() }()
 	api := newFakeAPI()
 	notes := newBlockingProgressNotifier()
-	controller := New(ControllerOptions{AppServer: api, Store: st, Notifier: notes})
+	controller := New(ControllerOptions{AppServer: api, Store: st, Notifier: notes, CardDisplayMode: "preview"})
 	defer controller.Close()
 	defer notes.release()
 
@@ -78,13 +78,13 @@ func TestControllerCoalescesSlowProgressCardUpdates(t *testing.T) {
 	if active == nil {
 		t.Fatal("active run was not registered")
 	}
-	api.events <- appserver.Event{Method: "item/agentMessage/delta", Params: json.RawMessage(`{"threadId":"thread-1","turnId":"turn-1","itemId":"item-1","delta":"first "}`)}
-	api.events <- appserver.Event{Method: "item/agentMessage/delta", Params: json.RawMessage(`{"threadId":"thread-1","turnId":"turn-1","itemId":"item-1","delta":"second "}`)}
-	api.events <- appserver.Event{Method: "item/agentMessage/delta", Params: json.RawMessage(`{"threadId":"thread-1","turnId":"turn-1","itemId":"item-1","delta":"latest"}`)}
-	waitUntil(t, func() bool { return strings.Contains(active.text(), "first second latest") })
+	api.events <- appserver.Event{Method: "item/agentMessage/delta", Params: json.RawMessage(`{"threadId":"thread-1","turnId":"turn-1","itemId":"item-1","delta":"first preview fragment "}`)}
+	api.events <- appserver.Event{Method: "item/agentMessage/delta", Params: json.RawMessage(`{"threadId":"thread-1","turnId":"turn-1","itemId":"item-1","delta":"second preview fragment "}`)}
+	api.events <- appserver.Event{Method: "item/agentMessage/delta", Params: json.RawMessage(`{"threadId":"thread-1","turnId":"turn-1","itemId":"item-1","delta":"latest preview fragment is complete."}`)}
+	waitUntil(t, func() bool { return strings.Contains(active.text(), "latest preview fragment") })
 
 	// Keep the first Patch in flight longer than one update interval. The stream
-	// must collapse to one latest-body update instead of replaying each delta.
+	// must collapse to one latest-preview update instead of replaying each delta.
 	time.Sleep(progressUpdateInterval + 50*time.Millisecond)
 	notes.release()
 	waitUntil(t, func() bool { return notes.progressCount() >= 2 })
@@ -92,8 +92,8 @@ func TestControllerCoalescesSlowProgressCardUpdates(t *testing.T) {
 	if len(updates) != 2 {
 		t.Fatalf("progress updates = %d, want 2: %+v", len(updates), updates)
 	}
-	if !strings.Contains(updates[1].Body, "first second latest") {
-		t.Fatalf("latest stream body was not sent: %q", updates[1].Body)
+	if !strings.Contains(updates[1].Presentation.Draft, "latest preview fragment") {
+		t.Fatalf("latest preview draft was not sent: %+v", updates[1].Presentation)
 	}
 	time.Sleep(progressUpdateInterval + 50*time.Millisecond)
 	if count := notes.progressCount(); count != 2 {
@@ -107,7 +107,7 @@ func TestControllerRetriesTransientProgressPatch(t *testing.T) {
 	defer func() { _ = st.Close() }()
 	api := newFakeAPI()
 	notes := &transientProgressNotifier{needle: "retry-this-progress"}
-	controller := New(ControllerOptions{AppServer: api, Store: st, Notifier: notes})
+	controller := New(ControllerOptions{AppServer: api, Store: st, Notifier: notes, CardDisplayMode: "preview"})
 	defer controller.Close()
 
 	if err := controller.Enqueue(ctx, StartInput{Task: task, Run: run, Project: config.ResolvedProject{CWD: task.CWD}, CardMessageID: "card", DedupKey: "new"}); err != nil {
@@ -115,15 +115,138 @@ func TestControllerRetriesTransientProgressPatch(t *testing.T) {
 	}
 	waitFor(t, api.startedTurn)
 	waitUntil(t, func() bool { return controller.activeFor("thread-1", "turn-1") != nil })
-	api.events <- appserver.Event{Method: "item/agentMessage/delta", Params: json.RawMessage(`{"threadId":"thread-1","turnId":"turn-1","itemId":"item-1","delta":"retry-this-progress"}`)}
+	api.events <- appserver.Event{Method: "item/agentMessage/delta", Params: json.RawMessage(`{"threadId":"thread-1","turnId":"turn-1","itemId":"item-1","delta":"retry-this-progress contains enough text to update the preview."}`)}
 
-	waitUntil(t, func() bool { return notes.matchCount() == 2 })
+	waitUntilFor(t, 4*time.Second, func() bool { return notes.matchCount() == 2 })
 	for _, update := range notes.matchingUpdates() {
 		if update.UpdateMessageID != "card" {
 			t.Fatalf("retry must patch the original card: %+v", update)
 		}
 	}
 }
+
+func TestControllerUsesItemEventsAndKeepsConciseCardsFreeOfDeltas(t *testing.T) {
+	ctx := context.Background()
+	st, task, run := newQueuedTask(t, ctx)
+	defer func() { _ = st.Close() }()
+	api := newFakeAPI()
+	notes := &recordingNotifier{}
+	controller := New(ControllerOptions{AppServer: api, Store: st, Notifier: notes})
+	defer controller.Close()
+	if err := controller.Enqueue(ctx, StartInput{Task: task, Run: run, Project: config.ResolvedProject{CWD: task.CWD}, CardMessageID: "card", DedupKey: "new"}); err != nil {
+		t.Fatal(err)
+	}
+	waitFor(t, api.startedTurn)
+	waitUntil(t, func() bool { return notes.progressCount() > 0 })
+	controller.mu.Lock()
+	active := controller.byTask[task.ID]
+	controller.mu.Unlock()
+	if active == nil {
+		t.Fatal("active run missing")
+	}
+	api.events <- appserver.Event{Method: "item/started", Params: json.RawMessage(`{"threadId":"thread-1","turnId":"turn-1","item":{"type":"commandExecution","command":"go test ./..."}}`)}
+	api.events <- appserver.Event{Method: "item/completed", Params: json.RawMessage(`{"threadId":"thread-1","turnId":"turn-1","item":{"type":"commandExecution","command":"go test ./...","exitCode":0}}`)}
+	api.events <- appserver.Event{Method: "item/completed", Params: json.RawMessage(`{"threadId":"thread-1","turnId":"turn-1","item":{"type":"fileChange","changes":[{"path":"internal/runtime/controller.go"},{"path":"internal/router/router.go"}]}}`)}
+	waitUntil(t, func() bool {
+		presentation := active.progressPresentation()
+		return len(presentation.Milestones) >= 2 && len(active.resultPresentation("succeeded", "").Changes) > 0
+	})
+	presentation := active.progressPresentation()
+	if presentation.Draft != "" || strings.Contains(presentation.Stage+presentation.Activity+milestoneText(presentation.Milestones), "go test") {
+		t.Fatalf("concise presentation leaked draft or raw command: %+v", presentation)
+	}
+	waitUntil(t, func() bool {
+		return notes.hasProgress(func(input notifier.TaskCardInput) bool {
+			return len(input.Presentation.Milestones) >= 2
+		})
+	})
+	before := notes.progressCount()
+	api.events <- appserver.Event{Method: "item/agentMessage/delta", Params: json.RawMessage(`{"threadId":"thread-1","turnId":"turn-1","itemId":"item-1","delta":"this draft must stay local in concise mode."}`)}
+	time.Sleep(progressUpdateInterval + 100*time.Millisecond)
+	if after := notes.progressCount(); after != before {
+		t.Fatalf("concise mode patched card for a delta: before=%d after=%d", before, after)
+	}
+}
+
+func TestControllerSteersSameActiveTurn(t *testing.T) {
+	ctx := context.Background()
+	st, task, run := newQueuedTask(t, ctx)
+	defer func() { _ = st.Close() }()
+	api := newFakeAPI()
+	controller := New(ControllerOptions{AppServer: api, Store: st, Notifier: &fakeNotifier{}})
+	defer controller.Close()
+	if err := controller.Enqueue(ctx, StartInput{Task: task, Run: run, Project: config.ResolvedProject{CWD: task.CWD}, CardMessageID: "card", DedupKey: "new"}); err != nil {
+		t.Fatal(err)
+	}
+	waitFor(t, api.startedTurn)
+	waitUntil(t, func() bool {
+		if controller.activeFor("thread-1", "turn-1") == nil {
+			return false
+		}
+		_, runs, err := st.GetTask(ctx, task.ID)
+		return err == nil && len(runs) == 1 && runs[0].Status == "running" && runs[0].CodexTurnID == "turn-1"
+	})
+	if err := controller.Steer(ctx, task.ID, "also verify the test result"); err != nil {
+		t.Fatal(err)
+	}
+	steers := api.steers()
+	if len(steers) != 1 || steers[0].ThreadID != "thread-1" || steers[0].ExpectedTurnID != "turn-1" || steers[0].Text != "also verify the test result" {
+		t.Fatalf("steer did not target the active turn: %+v", steers)
+	}
+	_, runs, err := st.GetTask(ctx, task.ID)
+	if err != nil || len(runs) != 1 || runs[0].Kind != "new" {
+		t.Fatalf("steer should not create a new run: runs=%+v err=%v", runs, err)
+	}
+}
+
+func TestClassifyDisplayItemOmitsCommandAndOutputDetails(t *testing.T) {
+	started, ok := classifyDisplayItem(appServerItem{Type: "commandExecution", Command: "go test ./..."}, false)
+	if !ok || started.stage != "验证" || started.activity != "正在执行测试。" || strings.Contains(started.activity, "go test") {
+		t.Fatalf("unexpected started display item: %+v", started)
+	}
+	completed, ok := classifyDisplayItem(appServerItem{Type: "commandExecution", Command: "go test ./...", ExitCode: intPtr(0)}, true)
+	if !ok || completed.milestone != "已完成测试" || completed.verification != "测试已完成" {
+		t.Fatalf("unexpected completed display item: %+v", completed)
+	}
+	if _, ok := classifyDisplayItem(appServerItem{Type: "reasoning"}, false); ok {
+		t.Fatal("reasoning must not be rendered")
+	}
+	failed, ok := classifyDisplayItem(appServerItem{Type: "commandExecution", Command: "go test ./...", Status: "failed"}, true)
+	if !ok || failed.verification != "测试发现问题" {
+		t.Fatalf("item status should mark a command failure: %+v", failed)
+	}
+}
+
+func TestActiveRunUsesCompletedAgentMessageAsAuthoritativeText(t *testing.T) {
+	active := &activeRun{draftText: "stale streamed draft"}
+	active.setFinalText("")
+	if got := active.text(); got != "" {
+		t.Fatalf("completed agent message must replace a draft even when empty, got %q", got)
+	}
+}
+
+func TestSummarizeFinalTextUsesStructuredDeveloperSections(t *testing.T) {
+	conclusion, changes, verification := summarizeFinalText("## Summary\n完成任务卡改造。\n\n## Changes\n- 新增事件归类\n\n## 验证\n- go test ./... 已通过")
+	if conclusion != "完成任务卡改造。" {
+		t.Fatalf("conclusion = %q", conclusion)
+	}
+	if len(changes) != 1 || changes[0] != "新增事件归类" {
+		t.Fatalf("changes = %+v", changes)
+	}
+	if len(verification) != 1 || verification[0] != "go test ./... 已通过" {
+		t.Fatalf("verification = %+v", verification)
+	}
+}
+
+func milestoneText(values []contracts.TaskMilestone) string {
+	parts := make([]string, 0, len(values))
+	for _, value := range values {
+		parts = append(parts, value.Label)
+	}
+	return strings.Join(parts, "\n")
+}
+
+func intPtr(value int) *int { return &value }
 
 func TestControllerKeepsOriginalTerminalCardForTransientPatchFailure(t *testing.T) {
 	ctx := context.Background()
@@ -467,10 +590,12 @@ type fakeAPI struct {
 	requests    chan appserver.ServerRequest
 	startedTurn chan struct{}
 	startTurn   func(context.Context, appserver.TurnStartInput) (appserver.Turn, error)
+	steerTurn   func(context.Context, appserver.TurnSteerInput) (string, error)
 	interruptFn func(context.Context, string, string) error
 
 	mu          sync.Mutex
 	responseLog []fakeResponse
+	steerLog    []appserver.TurnSteerInput
 	interrupt   int
 }
 
@@ -498,6 +623,15 @@ func (f *fakeAPI) StartTurn(ctx context.Context, input appserver.TurnStartInput)
 		return f.startTurn(ctx, input)
 	}
 	return appserver.Turn{ID: "turn-1", Status: "inProgress"}, nil
+}
+func (f *fakeAPI) SteerTurn(ctx context.Context, input appserver.TurnSteerInput) (string, error) {
+	f.mu.Lock()
+	f.steerLog = append(f.steerLog, input)
+	f.mu.Unlock()
+	if f.steerTurn != nil {
+		return f.steerTurn(ctx, input)
+	}
+	return input.ExpectedTurnID, nil
 }
 func (f *fakeAPI) Interrupt(ctx context.Context, threadID, turnID string) error {
 	f.mu.Lock()
@@ -527,11 +661,53 @@ func (f *fakeAPI) responses() []fakeResponse {
 	defer f.mu.Unlock()
 	return append([]fakeResponse(nil), f.responseLog...)
 }
+func (f *fakeAPI) steers() []appserver.TurnSteerInput {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return append([]appserver.TurnSteerInput(nil), f.steerLog...)
+}
 func (f *fakeAPI) interrupts() int { f.mu.Lock(); defer f.mu.Unlock(); return f.interrupt }
 
 type fakeNotifier struct {
 	mu    sync.Mutex
 	calls []string
+}
+
+type recordingNotifier struct {
+	mu       sync.Mutex
+	progress []notifier.TaskCardInput
+}
+
+func (n *recordingNotifier) Progress(_ context.Context, input notifier.TaskCardInput) (contracts.SentMessage, error) {
+	n.mu.Lock()
+	n.progress = append(n.progress, input)
+	n.mu.Unlock()
+	return contracts.SentMessage{MessageID: "card"}, nil
+}
+
+func (n *recordingNotifier) Success(context.Context, notifier.TaskCardInput) (contracts.SentMessage, error) {
+	return contracts.SentMessage{MessageID: "card"}, nil
+}
+
+func (n *recordingNotifier) Failure(context.Context, notifier.TaskCardInput) (contracts.SentMessage, error) {
+	return contracts.SentMessage{MessageID: "card"}, nil
+}
+
+func (n *recordingNotifier) progressCount() int {
+	n.mu.Lock()
+	defer n.mu.Unlock()
+	return len(n.progress)
+}
+
+func (n *recordingNotifier) hasProgress(match func(notifier.TaskCardInput) bool) bool {
+	n.mu.Lock()
+	defer n.mu.Unlock()
+	for _, input := range n.progress {
+		if match(input) {
+			return true
+		}
+	}
+	return false
 }
 
 type transientProgressNotifier struct {
@@ -544,7 +720,7 @@ type transientProgressNotifier struct {
 func (n *transientProgressNotifier) Progress(_ context.Context, input notifier.TaskCardInput) (contracts.SentMessage, error) {
 	n.mu.Lock()
 	defer n.mu.Unlock()
-	if strings.Contains(input.Body, n.needle) {
+	if strings.Contains(input.Presentation.Draft, n.needle) {
 		n.matched = append(n.matched, input)
 		if !n.failed {
 			n.failed = true
@@ -743,8 +919,12 @@ func waitFor(t *testing.T, ch <-chan struct{}) {
 }
 
 func waitUntil(t *testing.T, check func() bool) {
+	waitUntilFor(t, 2*time.Second, check)
+}
+
+func waitUntilFor(t *testing.T, timeout time.Duration, check func() bool) {
 	t.Helper()
-	deadline := time.Now().Add(2 * time.Second)
+	deadline := time.Now().Add(timeout)
 	for time.Now().Before(deadline) {
 		if check() {
 			return

@@ -82,3 +82,11 @@ type TurnStartInput struct {
 	CWD      string
 	Model    string
 }
+
+// TurnSteerInput appends user input to an in-flight turn. It must reference
+// the turn the client observed so a stale card action cannot steer another one.
+type TurnSteerInput struct {
+	ThreadID       string
+	ExpectedTurnID string
+	Text           string
+}

@@ -23,7 +23,7 @@ import (
 var ErrNotRunning = errors.New("task has no running bridge turn")
 
 const (
-	progressUpdateInterval    = 400 * time.Millisecond
+	progressUpdateInterval    = 1500 * time.Millisecond
 	progressRetryDelay        = 800 * time.Millisecond
 	notificationTimeout       = 20 * time.Second
 	defaultAppServerTimeout   = 30 * time.Second
@@ -49,6 +49,7 @@ type AppServer interface {
 	StartThread(ctx context.Context, in appserver.ThreadStartInput) (appserver.Thread, error)
 	ResumeThread(ctx context.Context, in appserver.ThreadResumeInput) (appserver.Thread, error)
 	StartTurn(ctx context.Context, in appserver.TurnStartInput) (appserver.Turn, error)
+	SteerTurn(ctx context.Context, in appserver.TurnSteerInput) (string, error)
 	Interrupt(ctx context.Context, threadID, turnID string) error
 	Respond(ctx context.Context, id json.RawMessage, result any) error
 	Events() <-chan appserver.Event
@@ -67,6 +68,7 @@ type ControllerOptions struct {
 	AppServer          AppServer
 	Store              TaskStore
 	Notifier           CardNotifier
+	CardDisplayMode    string
 	Now                func() time.Time
 	AppServerTimeout   time.Duration
 	TerminalRetryDelay time.Duration
@@ -79,6 +81,7 @@ type Controller struct {
 	now                func() time.Time
 	appServerTimeout   time.Duration
 	terminalRetryDelay time.Duration
+	cardDisplayMode    string
 
 	ctx    context.Context
 	cancel context.CancelFunc
@@ -102,24 +105,35 @@ type activeRun struct {
 	project  config.ResolvedProject
 	dedupKey string
 
-	mu                  sync.Mutex
-	task                store.Task
-	run                 store.Run
-	cardMessage         string
-	threadID            string
-	turnID              string
-	finalText           string
-	lastProgress        time.Time
-	progressRetryAfter  time.Time
-	pendingProgressBody string
-	progressDirty       bool
-	progressForce       bool
-	progressWorker      bool
-	progressWake        chan struct{}
-	terminal            bool
-	stopRequested       bool
-	stopHandled         bool
-	cardMu              sync.Mutex
+	mu                 sync.Mutex
+	task               store.Task
+	run                store.Run
+	cardMessage        string
+	threadID           string
+	turnID             string
+	displayMode        string
+	stage              string
+	activity           string
+	milestones         []contracts.TaskMilestone
+	changes            []string
+	verification       []string
+	draftText          string
+	lastDraftPreview   string
+	finalText          string
+	finalReceived      bool
+	lastProgress       time.Time
+	progressRetryAfter time.Time
+	pendingProgress    contracts.TaskPresentation
+	pendingProgressKey string
+	lastProgressKey    string
+	progressDirty      bool
+	progressForce      bool
+	progressWorker     bool
+	progressWake       chan struct{}
+	terminal           bool
+	stopRequested      bool
+	stopHandled        bool
+	cardMu             sync.Mutex
 }
 
 func New(opts ControllerOptions) *Controller {
@@ -135,6 +149,10 @@ func New(opts ControllerOptions) *Controller {
 	if appServerTimeout <= 0 {
 		appServerTimeout = defaultAppServerTimeout
 	}
+	displayMode := opts.CardDisplayMode
+	if displayMode != "preview" {
+		displayMode = "concise"
+	}
 	ctx, cancel := context.WithCancel(context.Background())
 	c := &Controller{
 		api:                opts.AppServer,
@@ -143,6 +161,7 @@ func New(opts ControllerOptions) *Controller {
 		now:                now,
 		appServerTimeout:   appServerTimeout,
 		terminalRetryDelay: retryDelay,
+		cardDisplayMode:    displayMode,
 		ctx:                ctx,
 		cancel:             cancel,
 		byRun:              make(map[string]*activeRun),
@@ -201,6 +220,9 @@ func (c *Controller) Enqueue(ctx context.Context, input StartInput) error {
 		task:         input.Task,
 		run:          input.Run,
 		cardMessage:  input.CardMessageID,
+		displayMode:  c.cardDisplayMode,
+		stage:        "准备中",
+		activity:     "已接收，正在连接 Codex。",
 		progressWake: make(chan struct{}, 1),
 	}
 	c.lifecycleMu.Lock()
@@ -222,7 +244,7 @@ func (c *Controller) Enqueue(ctx context.Context, input StartInput) error {
 	c.wg.Add(1)
 	c.lifecycleMu.Unlock()
 
-	c.sendProgress(active, "已接收，正在连接 Codex。", true)
+	c.sendProgress(active, true)
 	go c.launch(active)
 	return nil
 }
@@ -244,13 +266,15 @@ func (c *Controller) Stop(ctx context.Context, taskID string) error {
 		return nil
 	}
 	if turnID == "" {
-		c.sendProgress(active, "正在停止 Codex。", true)
+		active.setActivity("停止中", "正在停止 Codex。")
+		c.sendProgress(active, true)
 		return nil
 	}
 	if !active.takeStopRequest() {
 		return nil
 	}
-	c.sendProgress(active, "正在停止 Codex。", true)
+	active.setActivity("停止中", "正在停止 Codex。")
+	c.sendProgress(active, true)
 	if !c.start(func() {
 		stopCtx, cancel := c.appServerContext(c.ctx)
 		defer cancel()
@@ -262,6 +286,43 @@ func (c *Controller) Stop(ctx context.Context, taskID string) error {
 		c.finish(active, "canceled", -1, "已停止。")
 	}) {
 		return ErrNotRunning
+	}
+	return nil
+}
+
+// Steer appends a user clarification to the active Codex turn. It deliberately
+// does not create a second run or task card, so the card remains the stable
+// representation of the user's current work.
+func (c *Controller) Steer(ctx context.Context, taskID, text string) error {
+	text = strings.TrimSpace(text)
+	if text == "" {
+		return errors.New("steer text is required")
+	}
+	c.mu.Lock()
+	active := c.byTask[taskID]
+	c.mu.Unlock()
+	if active == nil || active.isTerminal() {
+		return ErrNotRunning
+	}
+	threadID, turnID := active.ids()
+	if threadID == "" || turnID == "" {
+		return ErrNotRunning
+	}
+	steerCtx, cancel := c.appServerContext(ctx)
+	defer cancel()
+	returnedTurnID, err := c.api.SteerTurn(steerCtx, appserver.TurnSteerInput{
+		ThreadID:       threadID,
+		ExpectedTurnID: turnID,
+		Text:           text,
+	})
+	if err != nil {
+		return err
+	}
+	if returnedTurnID != "" {
+		c.setTurn(active, returnedTurnID)
+	}
+	if active.setActivity("执行中", "已接收补充，正在继续当前任务。") {
+		c.sendProgress(active, false)
 	}
 	return nil
 }
@@ -332,7 +393,8 @@ func (c *Controller) launch(active *activeRun) {
 		c.finish(active, "canceled", -1, "已停止。")
 		return
 	}
-	c.sendProgress(active, "Codex 正在处理。", true)
+	active.setActivity("执行中", "Codex 正在处理。")
+	c.sendProgress(active, true)
 
 	turnCtx, cancel := c.appServerContext(active.ctx)
 	turn, err := c.api.StartTurn(turnCtx, appserver.TurnStartInput{
@@ -417,16 +479,23 @@ func (c *Controller) handleEvent(event appserver.Event) {
 			return
 		}
 		if active := c.activeFor(params.ThreadID, params.TurnID); active != nil {
-			active.appendText(params.Delta)
-			c.sendProgress(active, active.progressBody(), false)
+			if active.appendDraft(params.Delta) {
+				c.sendProgress(active, false)
+			}
 		}
-	case "item/completed":
-		var params itemCompletedParams
-		if json.Unmarshal(event.Params, &params) != nil || params.Item.Type != "agentMessage" {
+	case "item/started", "item/completed":
+		var params itemEventParams
+		if json.Unmarshal(event.Params, &params) != nil || params.Item.Type == "" {
 			return
 		}
 		if active := c.activeFor(params.ThreadID, params.TurnID); active != nil {
-			active.setFinalText(params.Item.Text)
+			if event.Method == "item/completed" && params.Item.Type == "agentMessage" {
+				active.setFinalText(params.Item.Text)
+				return
+			}
+			if active.applyDisplayItem(params.Item, event.Method == "item/completed") {
+				c.sendProgress(active, false)
+			}
 		}
 	case "turn/completed":
 		var params turnCompletedParams
@@ -527,6 +596,7 @@ func (c *Controller) finalize(active *activeRun, status string, exitCode int, bo
 		ProjectAlias:    active.project.Alias,
 		CWDLabel:        active.cwd(),
 		Body:            body,
+		Presentation:    active.resultPresentation(status, body),
 	}
 	active.cardMu.Lock()
 	notifyCtx, cancelNotify := c.notificationContext()
@@ -633,8 +703,9 @@ func (c *Controller) insertTerminalRoute(active *activeRun, sent contracts.SentM
 	}
 }
 
-func (c *Controller) sendProgress(active *activeRun, body string, force bool) {
-	if !active.queueProgress(body, force) {
+func (c *Controller) sendProgress(active *activeRun, force bool) {
+	presentation := active.progressPresentation()
+	if !active.queueProgress(presentation, force) {
 		return
 	}
 	if !c.start(func() { c.flushProgress(active) }) {
@@ -643,8 +714,8 @@ func (c *Controller) sendProgress(active *activeRun, body string, force bool) {
 }
 
 // flushProgress keeps one card update in flight per task. While Feishu is
-// processing that update, incoming deltas replace the pending body so the next
-// patch always reflects the current stream rather than an outdated snapshot.
+// processing that update, incoming event summaries replace the pending
+// presentation so the next patch reflects the current task state.
 func (c *Controller) flushProgress(active *activeRun) {
 	for {
 		select {
@@ -654,7 +725,7 @@ func (c *Controller) flushProgress(active *activeRun) {
 		default:
 		}
 
-		body, wait, ok := active.nextProgress(c.now())
+		presentation, wait, ok := active.nextProgress(c.now())
 		if !ok {
 			return
 		}
@@ -690,10 +761,10 @@ func (c *Controller) flushProgress(active *activeRun) {
 				ChatID:          active.chatID(),
 				UpdateMessageID: active.cardID(),
 				TaskID:          active.taskID(),
-				Status:          "running",
+				Status:          active.status(),
 				ProjectAlias:    active.project.Alias,
 				CWDLabel:        active.cwd(),
-				Body:            body,
+				Presentation:    presentation,
 			})
 			cancel()
 		}
@@ -702,7 +773,7 @@ func (c *Controller) flushProgress(active *activeRun) {
 			transient := transport.IsTransientError(notifyErr)
 			slog.Warn("Feishu progress card patch failed", "task_id", active.taskID(), "transient", transient, "error", notifyErr)
 			if transient {
-				active.retryProgress(body, c.now().Add(progressRetryDelay))
+				active.retryProgress(presentation, c.now().Add(progressRetryDelay))
 			}
 		}
 	}
@@ -834,6 +905,12 @@ func (a *activeRun) cardID() string {
 	return a.cardMessage
 }
 
+func (a *activeRun) status() string {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	return a.task.Status
+}
+
 func (a *activeRun) setState(task store.Task, run store.Run) {
 	a.mu.Lock()
 	a.task = task
@@ -863,44 +940,37 @@ func (a *activeRun) stopPending() bool {
 	return a.stopRequested
 }
 
-func (a *activeRun) appendText(delta string) {
-	a.mu.Lock()
-	defer a.mu.Unlock()
-	a.finalText = trimStreamingText(a.finalText + delta)
-}
-
 func (a *activeRun) setFinalText(text string) {
 	a.mu.Lock()
 	defer a.mu.Unlock()
-	if text != "" {
-		a.finalText = text
-	}
+	a.finalText = text
+	a.finalReceived = true
 }
 
 func (a *activeRun) text() string {
 	a.mu.Lock()
 	defer a.mu.Unlock()
-	return strings.TrimSpace(a.finalText)
+	if a.finalReceived {
+		return strings.TrimSpace(a.finalText)
+	}
+	return strings.TrimSpace(a.draftText)
 }
 
-func (a *activeRun) progressBody() string {
-	text := a.text()
-	if text == "" {
-		return "Codex 正在处理。"
-	}
-	return "Codex 正在处理。\n\n" + trimStreamingText(text)
-}
-
-func (a *activeRun) queueProgress(body string, force bool) bool {
-	if body == "" {
-		return false
-	}
+func (a *activeRun) queueProgress(presentation contracts.TaskPresentation, force bool) bool {
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	if a.terminal {
 		return false
 	}
-	a.pendingProgressBody = body
+	key := presentationKey(presentation)
+	if a.progressDirty && key == a.pendingProgressKey {
+		return false
+	}
+	if !a.progressDirty && key == a.lastProgressKey {
+		return false
+	}
+	a.pendingProgress = presentation
+	a.pendingProgressKey = key
 	a.progressDirty = true
 	a.progressForce = a.progressForce || force
 	if a.progressWake != nil {
@@ -916,45 +986,52 @@ func (a *activeRun) queueProgress(body string, force bool) bool {
 	return true
 }
 
-func (a *activeRun) nextProgress(now time.Time) (body string, wait time.Duration, ok bool) {
+func (a *activeRun) nextProgress(now time.Time) (presentation contracts.TaskPresentation, wait time.Duration, ok bool) {
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	if a.terminal || !a.progressDirty {
 		a.progressWorker = false
-		return "", 0, false
+		return contracts.TaskPresentation{}, 0, false
 	}
 	if !a.progressForce && !a.progressRetryAfter.IsZero() {
 		if remaining := a.progressRetryAfter.Sub(now); remaining > 0 {
-			return "", remaining, true
+			return contracts.TaskPresentation{}, remaining, true
 		}
 		a.progressRetryAfter = time.Time{}
 	}
 	if !a.progressForce && !a.lastProgress.IsZero() {
 		if remaining := progressUpdateInterval - now.Sub(a.lastProgress); remaining > 0 {
-			return "", remaining, true
+			return contracts.TaskPresentation{}, remaining, true
 		}
 	}
-	body = a.pendingProgressBody
+	presentation = a.pendingProgress
+	a.lastProgressKey = a.pendingProgressKey
 	a.progressDirty = false
 	a.progressForce = false
 	a.lastProgress = now
-	return body, 0, true
+	return presentation, 0, true
 }
 
-func (a *activeRun) retryProgress(body string, retryAfter time.Time) {
-	if body == "" {
-		return
-	}
+func (a *activeRun) retryProgress(presentation contracts.TaskPresentation, retryAfter time.Time) {
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	if a.terminal {
 		return
 	}
 	if !a.progressDirty {
-		a.pendingProgressBody = body
+		a.pendingProgress = presentation
+		a.pendingProgressKey = presentationKey(presentation)
 		a.progressDirty = true
 	}
 	a.progressRetryAfter = retryAfter
+}
+
+func presentationKey(presentation contracts.TaskPresentation) string {
+	data, err := json.Marshal(presentation)
+	if err != nil {
+		return fmt.Sprintf("%#v", presentation)
+	}
+	return string(data)
 }
 
 func (a *activeRun) stopProgressWorker() {
@@ -988,15 +1065,6 @@ type agentMessageDeltaParams struct {
 	ThreadID string `json:"threadId"`
 	TurnID   string `json:"turnId"`
 	Delta    string `json:"delta"`
-}
-
-type itemCompletedParams struct {
-	ThreadID string `json:"threadId"`
-	TurnID   string `json:"turnId"`
-	Item     struct {
-		Type string `json:"type"`
-		Text string `json:"text"`
-	} `json:"item"`
 }
 
 type turnCompletedParams struct {
@@ -1080,14 +1148,6 @@ func errorText(raw json.RawMessage) string {
 		return text
 	}
 	return string(raw)
-}
-
-func trimStreamingText(text string) string {
-	const limit = 3200
-	if len(text) <= limit {
-		return text
-	}
-	return "..." + text[len(text)-limit:]
 }
 
 func turnKey(threadID, turnID string) string {

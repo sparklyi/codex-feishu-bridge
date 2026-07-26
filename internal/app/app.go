@@ -128,12 +128,13 @@ func Serve(ctx context.Context, opts ServeOptions) error {
 		}
 	}()
 
-	notify := notifier.New(sender)
+	notify := notifier.New(sender, notifier.Options{CardDisplayMode: cfg.Feishu.CardDisplayMode})
 	controller := runtime.New(runtime.ControllerOptions{
-		AppServer: api,
-		Store:     st,
-		Notifier:  notify,
-		Now:       now,
+		AppServer:       api,
+		Store:           st,
+		Notifier:        notify,
+		CardDisplayMode: cfg.Feishu.CardDisplayMode,
+		Now:             now,
 	})
 	defer controller.Close()
 	probeCtx, cancelProbe := context.WithTimeout(ctx, cfg.StartupTimeout())
@@ -217,6 +218,8 @@ func openStoreFromConfig(ctx context.Context, configPath string, getenv func(str
 const defaultConfig = `feishu:
   app_id: cli_xxx
   app_secret_env: FEISHU_APP_SECRET
+  # concise only shows phases and milestones; preview also shows a throttled reply draft.
+  card_display_mode: concise
   # proxy_url: http://127.0.0.1:7890
 security:
   allowed_open_ids:

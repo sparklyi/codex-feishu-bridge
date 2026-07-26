@@ -185,6 +185,24 @@ func TestFeishuProxyURL(t *testing.T) {
 	}
 }
 
+func TestCardDisplayModeDefaultsAndValidation(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config.yaml")
+	if err := os.WriteFile(path, []byte("feishu:\n  app_id: cli_test\n  app_secret_env: FEISHU_APP_SECRET\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := Load(path, func(string) string { return "" })
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.Feishu.CardDisplayMode != "concise" {
+		t.Fatalf("default card display mode = %q", cfg.Feishu.CardDisplayMode)
+	}
+	invalid := Config{Feishu: FeishuConfig{CardDisplayMode: "terminal"}}
+	if !hasDiagnostic(invalid.Validate(func(string) string { return "" }, nil), LevelError, "feishu.card_display_mode") {
+		t.Fatal("invalid display mode should be reported")
+	}
+}
+
 func TestProjectAliasesSorted(t *testing.T) {
 	cfg := Config{Projects: map[string]ProjectConfig{
 		"frontend": {CWD: "/repo/frontend"},

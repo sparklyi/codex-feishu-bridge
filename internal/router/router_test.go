@@ -96,6 +96,89 @@ func TestRouterResumesAttachedThreadAndHandlesStop(t *testing.T) {
 	}
 }
 
+func TestRouterSteersActiveTaskWithoutCreatingAnotherRun(t *testing.T) {
+	ctx := context.Background()
+	router, st, controller, notes := newTestRouter(t)
+	defer func() { _ = st.Close() }()
+	admit, err := st.AdmitNewTask(ctx, "new", "message", store.CreateTaskInput{
+		TaskID: "running", RunID: "running-run", CWD: "/repo/default", CreatedBy: "ou_owner", ChatID: "chat", Prompt: "work", Now: time.Now(),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := st.StartRun(ctx, store.StartRunInput{RunID: admit.Run.ID, ThreadID: "thread-1", TurnID: "turn-1", Now: time.Now()}); err != nil {
+		t.Fatal(err)
+	}
+	if err := router.Handle(ctx, contracts.InboundEvent{
+		Kind: contracts.InboundCardAction, ChatType: "private", ChatID: "chat", SenderOpenID: "ou_owner", MessageID: "card", Text: "also verify the result",
+		ActionValue: map[string]string{"action": "steer", "task_id": admit.Task.ID},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if len(controller.steers) != 1 || controller.steers[0] != (steerCall{TaskID: admit.Task.ID, Text: "also verify the result"}) {
+		t.Fatalf("steer was not routed to the active task: %+v", controller.steers)
+	}
+	_, runs, err := st.GetTask(ctx, admit.Task.ID)
+	if err != nil || len(runs) != 1 || runs[0].ID != admit.Run.ID || len(controller.enqueues) != 0 || len(notes.rejections) != 0 {
+		t.Fatalf("steer should not create a run: runs=%+v enqueues=%+v rejections=%+v err=%v", runs, controller.enqueues, notes.rejections, err)
+	}
+}
+
+func TestRouterSendsAndPatchesDetailsCard(t *testing.T) {
+	ctx := context.Background()
+	router, st, _, notes := newTestRouter(t)
+	defer func() { _ = st.Close() }()
+	task := newFinishedTask(t, ctx, st)
+	if err := router.Handle(ctx, contracts.InboundEvent{
+		Kind: contracts.InboundCardAction, ChatType: "private", ChatID: "chat", SenderOpenID: "ou_owner", MessageID: "result-card", RootMessageID: "result-card",
+		ActionValue: map[string]string{"action": "view_details", "task_id": task.ID},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if len(notes.details) != 1 || notes.details[0].ReplyToMessageID != "result-card" || notes.details[0].UpdateMessageID != "" || notes.details[0].FinalText != "final result" {
+		t.Fatalf("details card was not sent from the persisted result: %+v", notes.details)
+	}
+	if routed, err := st.ResolveMessageRoute(ctx, "details"); err != nil || routed.ID != task.ID {
+		t.Fatalf("details route missing: task=%+v err=%v", routed, err)
+	}
+	if err := router.Handle(ctx, contracts.InboundEvent{
+		Kind: contracts.InboundCardAction, ChatType: "private", ChatID: "chat", SenderOpenID: "ou_owner", MessageID: "details",
+		ActionValue: map[string]string{"action": "details_page", "task_id": task.ID, "page": "1"},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if len(notes.details) != 2 || notes.details[1].UpdateMessageID != "details" || notes.details[1].Page != 1 {
+		t.Fatalf("details page should patch its existing card: %+v", notes.details)
+	}
+}
+
+func TestRouterRejectsSteerAndDetailsOutsideTaskOwnership(t *testing.T) {
+	ctx := context.Background()
+	router, st, controller, notes := newTestRouter(t)
+	defer func() { _ = st.Close() }()
+	task, _, err := st.AttachThread(ctx, "attach", "message", store.AttachThreadInput{
+		TaskID: "owned", ThreadID: "thread-1", CWD: "/repo/default", CreatedBy: "ou_owner", ChatID: "chat", Now: time.Now(),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := router.Handle(ctx, contracts.InboundEvent{
+		Kind: contracts.InboundCardAction, ChatType: "private", ChatID: "chat", SenderOpenID: "ou_other", MessageID: "card", Text: "change direction",
+		ActionValue: map[string]string{"action": "steer", "task_id": task.ID},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := router.Handle(ctx, contracts.InboundEvent{
+		Kind: contracts.InboundCardAction, ChatType: "private", ChatID: "other-chat", SenderOpenID: "ou_owner", MessageID: "card",
+		ActionValue: map[string]string{"action": "view_details", "task_id": task.ID},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if len(controller.steers) != 0 || len(notes.details) != 0 || len(notes.rejections) != 2 {
+		t.Fatalf("out-of-scope actions must be rejected: steers=%+v details=%+v rejections=%+v", controller.steers, notes.details, notes.rejections)
+	}
+}
+
 func TestRouterRejectsUnauthorizedAndRouteMiss(t *testing.T) {
 	ctx := context.Background()
 	router, st, controller, notes := newTestRouter(t)
@@ -141,7 +224,7 @@ func newTestRouter(t *testing.T) (*Router, *store.Store, *fakeController, *fakeN
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := st.RefreshUsers(context.Background(), []string{"ou_owner"}); err != nil {
+	if err := st.RefreshUsers(context.Background(), []string{"ou_owner", "ou_other"}); err != nil {
 		_ = st.Close()
 		t.Fatal(err)
 	}
@@ -151,7 +234,7 @@ func newTestRouter(t *testing.T) (*Router, *store.Store, *fakeController, *fakeN
 	nextTask := func() string { count++; return "task-" + string(rune('0'+count)) }
 	router := New(RouterOptions{
 		Config: config.Config{
-			Security:  config.SecurityConfig{AllowedOpenIDs: []string{"ou_owner"}},
+			Security:  config.SecurityConfig{AllowedOpenIDs: []string{"ou_owner", "ou_other"}},
 			AppServer: config.AppServerConfig{},
 			Workspace: config.WorkspaceConfig{Default: "/repo/default"},
 			Projects:  map[string]config.ProjectConfig{"backend": {CWD: "/repo/backend"}},
@@ -169,6 +252,7 @@ func newTestRouter(t *testing.T) (*Router, *store.Store, *fakeController, *fakeN
 type fakeController struct {
 	threads  []appserver.Thread
 	enqueues []runtime.StartInput
+	steers   []steerCall
 	stops    []string
 	err      error
 }
@@ -180,6 +264,38 @@ func (f *fakeController) Enqueue(_ context.Context, input runtime.StartInput) er
 	f.enqueues = append(f.enqueues, input)
 	return f.err
 }
+func (f *fakeController) Steer(_ context.Context, taskID, text string) error {
+	f.steers = append(f.steers, steerCall{TaskID: taskID, Text: text})
+	return f.err
+}
+
+type steerCall struct {
+	TaskID string
+	Text   string
+}
+
+func newFinishedTask(t *testing.T, ctx context.Context, st *store.Store) store.Task {
+	t.Helper()
+	admit, err := st.AdmitNewTask(ctx, "finished", "message", store.CreateTaskInput{
+		TaskID: "finished", RunID: "finished-run", CWD: "/repo/default", CreatedBy: "ou_owner", ChatID: "chat", Prompt: "work", Now: time.Now(),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := st.StartRun(ctx, store.StartRunInput{RunID: admit.Run.ID, ThreadID: "thread-1", TurnID: "turn-1", Now: time.Now()}); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.FinishRun(ctx, "finished", store.FinishRunInput{
+		RunID: admit.Run.ID, ThreadID: "thread-1", TurnID: "turn-1", Status: "succeeded", ExitCode: 0, FinalText: "final result", FinishedAt: time.Now(),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	task, _, err := st.GetTask(ctx, admit.Task.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return task
+}
 func (f *fakeController) Stop(_ context.Context, taskID string) error {
 	f.stops = append(f.stops, taskID)
 	return f.err
@@ -188,6 +304,7 @@ func (f *fakeController) Stop(_ context.Context, taskID string) error {
 type fakeNotifier struct {
 	startIDs         []string
 	starts           []notifier.TaskCardInput
+	details          []notifier.DetailsInput
 	threadSelections []notifier.ThreadSelectionInput
 	routingErrors    []string
 	rejections       []string
@@ -204,6 +321,10 @@ func (f *fakeNotifier) Start(_ context.Context, input notifier.TaskCardInput) (c
 }
 func (f *fakeNotifier) Failure(context.Context, notifier.TaskCardInput) (contracts.SentMessage, error) {
 	return contracts.SentMessage{MessageID: "failure"}, nil
+}
+func (f *fakeNotifier) Details(_ context.Context, input notifier.DetailsInput) (contracts.SentMessage, error) {
+	f.details = append(f.details, input)
+	return contracts.SentMessage{MessageID: "details"}, nil
 }
 func (f *fakeNotifier) ThreadSelection(_ context.Context, input notifier.ThreadSelectionInput) (contracts.SentMessage, error) {
 	f.threadSelections = append(f.threadSelections, input)

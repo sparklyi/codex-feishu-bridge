@@ -66,6 +66,22 @@ func TestBuildInteractiveCardRendersThreadOptionsWithCallbackBehaviors(t *testin
 	if len(buttons) != 2 || !jsonContains(string(card), "Fix login") || !jsonContains(string(card), "Polish card") {
 		t.Fatalf("structured options missing: %s", string(card))
 	}
+	rows := taggedElements(decoded["body"], "interactive_container")
+	if len(rows) != 2 {
+		t.Fatalf("thread options must render as whole-row interactive containers: %s", string(card))
+	}
+	for _, row := range rows {
+		if row["width"] != "fill" || row["has_border"] != true || row["corner_radius"] != "8px" {
+			t.Fatalf("thread option row should use the documented card treatment: %s", string(card))
+		}
+		if value := callbackValue(t, row, card); value["action_id"] != "attach_thread" {
+			t.Fatalf("thread row callback malformed: %s", string(card))
+		}
+		columnSets := taggedElements(row, "column_set")
+		if len(columnSets) != 1 || columnSets[0]["flex_mode"] != "stretch" {
+			t.Fatalf("thread option must stack its content on narrow screens: %s", string(card))
+		}
+	}
 	threads := make(map[string]bool, len(buttons))
 	for _, button := range buttons {
 		if _, legacyValue := button["value"]; legacyValue {
@@ -86,6 +102,144 @@ func TestBuildInteractiveCardRendersThreadOptionsWithCallbackBehaviors(t *testin
 	}
 	if !threads["desktop-1"] || !threads["desktop-2"] {
 		t.Fatalf("option callbacks lost thread values: %s", string(card))
+	}
+}
+
+func TestBuildInteractiveCardUsesSemanticHeaderAndSummary(t *testing.T) {
+	card, err := BuildInteractiveCard(contracts.OutboundMessage{
+		CardKind: contracts.CardStart,
+		Status:   "queued",
+		Title:    "等待处理",
+		Subtitle: "项目：backend",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	decoded := decodeCard(t, card)
+	config := decoded["config"].(map[string]any)
+	summary := config["summary"].(map[string]any)
+	if summary["content"] != "等待处理 · 项目：backend" {
+		t.Fatalf("card summary should include the project context: %s", string(card))
+	}
+	header := decoded["header"].(map[string]any)
+	if header["template"] != "orange" || header["padding"] != "12px" {
+		t.Fatalf("queued task header should use the documented warning treatment: %s", string(card))
+	}
+	icon := header["icon"].(map[string]any)
+	if icon["tag"] != "standard_icon" || icon["token"] != "chat_outlined" || icon["color"] != "orange" {
+		t.Fatalf("task header icon malformed: %s", string(card))
+	}
+}
+
+func TestBuildInteractiveCardRendersCanceledResultAsStopped(t *testing.T) {
+	card, err := BuildInteractiveCard(contracts.OutboundMessage{
+		CardKind: contracts.CardFailure,
+		Status:   "canceled",
+		Title:    "任务已停止",
+		Presentation: &contracts.TaskPresentation{
+			Layout:     contracts.TaskCardResult,
+			Conclusion: "任务已停止。",
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	decoded := decodeCard(t, card)
+	header := decoded["header"].(map[string]any)
+	if header["template"] != "grey" || !jsonContains(string(card), "已停止") {
+		t.Fatalf("canceled result should not render as a failure: %s", string(card))
+	}
+	icon := header["icon"].(map[string]any)
+	if icon["color"] != "grey" {
+		t.Fatalf("canceled result icon should match its stopped state: %s", string(card))
+	}
+}
+
+func TestBuildInteractiveCardRendersDeveloperRunningWorkspace(t *testing.T) {
+	card, err := BuildInteractiveCard(contracts.OutboundMessage{
+		CardKind: contracts.CardStart,
+		Status:   "running",
+		Title:    "正在处理",
+		Subtitle: "项目：backend",
+		Presentation: &contracts.TaskPresentation{
+			Layout:     contracts.TaskCardRunning,
+			Stage:      "验证",
+			Activity:   "正在执行测试。",
+			Milestones: []contracts.TaskMilestone{{Label: "已读取代码", Kind: "read"}, {Label: "已修改 2 个文件", Kind: "change"}},
+			Draft:      "正在整理可读的回复草稿。",
+		},
+		Actions: []contracts.Action{
+			{ID: "steer_submit", Label: "补充到本轮", Style: "primary", Value: map[string]string{"action": "steer", "task_id": "task-1"}},
+			{ID: "stop_task", Label: "停止", Style: "danger", Value: map[string]string{"action": "stop_task", "task_id": "task-1"}},
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	body := string(card)
+	for _, want := range []string{"阶段", "验证", "里程碑", "当前活动", "关键里程碑", "回复草稿", "补充到本轮", "正在执行测试。"} {
+		if !jsonContains(body, want) {
+			t.Fatalf("running workspace missing %q: %s", want, body)
+		}
+	}
+	decoded := decodeCard(t, card)
+	forms := taggedElements(decoded["body"], "form")
+	if len(forms) != 1 {
+		t.Fatalf("running card needs one steer form: %s", body)
+	}
+	var steer map[string]any
+	for _, button := range taggedElements(forms[0], "button") {
+		if button["name"] == "steer_submit" {
+			steer = button
+		}
+	}
+	if steer == nil || callbackValue(t, steer, card)["action"] != "steer" {
+		t.Fatalf("steer form callback malformed: %s", body)
+	}
+}
+
+func TestBuildInteractiveCardRendersResultAndDetailsLayouts(t *testing.T) {
+	result, err := BuildInteractiveCard(contracts.OutboundMessage{
+		CardKind: contracts.CardSuccess,
+		Status:   "succeeded",
+		Title:    "任务已完成",
+		Subtitle: "项目：backend",
+		Presentation: &contracts.TaskPresentation{
+			Layout:       contracts.TaskCardResult,
+			Conclusion:   "已完成卡片展示改造。",
+			Changes:      []string{"新增事件归类"},
+			Verification: []string{"go test ./... 已通过"},
+		},
+		Actions: []contracts.Action{
+			{ID: "view_details", Label: "查看详情", Value: map[string]string{"action": "view_details", "task_id": "task-1"}},
+			{ID: "continue_submit", Label: "继续跟进", Style: "primary", Value: map[string]string{"action": "continue", "task_id": "task-1"}},
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{"结论", "改动", "验证", "查看详情", "继续跟进"} {
+		if !jsonContains(string(result), want) {
+			t.Fatalf("result card missing %q: %s", want, string(result))
+		}
+	}
+	details, err := BuildInteractiveCard(contracts.OutboundMessage{
+		CardKind: contracts.CardDetails,
+		Status:   "succeeded",
+		Title:    "任务详情",
+		Presentation: &contracts.TaskPresentation{
+			Layout:      contracts.TaskCardDetails,
+			DetailText:  "完整最终回复。",
+			DetailPage:  2,
+			DetailPages: 3,
+		},
+		Actions: []contracts.Action{{ID: "details_page", Label: "下一页", Style: "primary", Value: map[string]string{"action": "details_page", "page": "2", "task_id": "task-1"}}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !jsonContains(string(details), "第 2 / 3 页") || !jsonContains(string(details), "完整最终回复") || !jsonContains(string(details), "下一页") {
+		t.Fatalf("details layout malformed: %s", string(details))
 	}
 }
 
@@ -116,11 +270,51 @@ func TestBuildInteractiveCardUsesCompactTaskInfoSection(t *testing.T) {
 	if len(taggedElements(decodeCard(t, card)["body"], "column")) < 3 {
 		t.Fatalf("task metadata must render as V2 columns: %s", body)
 	}
+	columnSets := taggedElements(decodeCard(t, card)["body"], "column_set")
+	if len(columnSets) == 0 || columnSets[0]["flex_mode"] != "stretch" {
+		t.Fatalf("task metadata must stack on narrow screens: %s", body)
+	}
 	for _, banned := range []string{"任务信息", "wide_screen_mode", "\"action_type\":"} {
 		if jsonContains(body, banned) {
 			t.Fatalf("card retained a JSON 1.0 field %q: %s", banned, body)
 		}
 	}
+}
+
+func TestBuildInteractiveCardSeparatesFollowUpAndConfirmsStop(t *testing.T) {
+	card, err := BuildInteractiveCard(contracts.OutboundMessage{
+		CardKind:     contracts.CardStart,
+		Status:       "running",
+		Title:        "正在处理",
+		BodyMarkdown: "**进度**\n正在运行测试。",
+		Actions: []contracts.Action{
+			{ID: "continue_submit", Label: "继续跟进", Style: "primary", Value: map[string]string{"action": "continue", "task_id": "task-1"}},
+			{ID: "stop_task", Label: "停止", Style: "danger", Value: map[string]string{"action": "stop_task", "task_id": "task-1"}},
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	decoded := decodeCard(t, card)
+	body := decoded["body"].(map[string]any)
+	if len(taggedElements(body, "hr")) != 1 {
+		t.Fatalf("follow-up form should be separated from task content: %s", string(card))
+	}
+	for _, button := range taggedElements(body, "button") {
+		value := callbackValue(t, button, card)
+		if value["action_id"] != "stop_task" {
+			continue
+		}
+		if button["size"] != "medium" {
+			t.Fatalf("stop button should use a touch-friendly size: %s", string(card))
+		}
+		confirm, ok := button["confirm"].(map[string]any)
+		if !ok || confirm["title"] == nil || confirm["text"] == nil {
+			t.Fatalf("stop button should require a native confirmation: %s", string(card))
+		}
+		return
+	}
+	t.Fatalf("stop button missing: %s", string(card))
 }
 
 func TestBuildInteractiveCardRendersContinueForm(t *testing.T) {

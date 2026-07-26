@@ -6,6 +6,7 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"strconv"
 	"strings"
 	"time"
 
@@ -17,6 +18,8 @@ import (
 	"github.com/sparklyi/codex-feishu-bridge/internal/runtime"
 	"github.com/sparklyi/codex-feishu-bridge/internal/store"
 )
+
+var errActionCreatorMismatch = errors.New("task creator mismatch")
 
 type TaskStore interface {
 	AdmitNewTask(ctx context.Context, dedupKey, source string, in store.CreateTaskInput) (store.AdmitResult, error)
@@ -33,12 +36,14 @@ type TaskStore interface {
 type Controller interface {
 	Threads(ctx context.Context, limit int) ([]appserver.Thread, error)
 	Enqueue(ctx context.Context, input runtime.StartInput) error
+	Steer(ctx context.Context, taskID, text string) error
 	Stop(ctx context.Context, taskID string) error
 }
 
 type Notifier interface {
 	Start(ctx context.Context, in notifier.TaskCardInput) (contracts.SentMessage, error)
 	Failure(ctx context.Context, in notifier.TaskCardInput) (contracts.SentMessage, error)
+	Details(ctx context.Context, in notifier.DetailsInput) (contracts.SentMessage, error)
 	ThreadSelection(ctx context.Context, in notifier.ThreadSelectionInput) (contracts.SentMessage, error)
 	RoutingError(ctx context.Context, chatID, replyToMessageID string) (contracts.SentMessage, error)
 	Rejection(ctx context.Context, chatID, replyToMessageID, body string) error
@@ -104,11 +109,21 @@ func (r *Router) Handle(ctx context.Context, ev contracts.InboundEvent) error {
 	case contracts.InboundNewTask:
 		return r.handleNewTask(ctx, ev)
 	case contracts.InboundCardAction:
-		switch ev.ActionValue["action"] {
+		action := ev.ActionValue["action"]
+		if action == "" {
+			action = ev.ActionID
+		}
+		switch action {
 		case "attach_thread":
 			return r.handleAttachThread(ctx, ev)
 		case "stop_task":
 			return r.handleStop(ctx, ev)
+		case "steer":
+			return r.handleSteer(ctx, ev)
+		case "view_details":
+			return r.handleViewDetails(ctx, ev)
+		case "details_page":
+			return r.handleDetailsPage(ctx, ev)
 		}
 		return r.handleContinuation(ctx, ev)
 	case contracts.InboundReply:
@@ -321,6 +336,120 @@ func (r *Router) handleStop(ctx context.Context, ev contracts.InboundEvent) erro
 		return r.notifier.Rejection(ctx, ev.ChatID, ev.MessageID, "停止任务失败："+err.Error())
 	}
 	return nil
+}
+
+func (r *Router) handleSteer(ctx context.Context, ev contracts.InboundEvent) error {
+	text := strings.TrimSpace(ev.Text)
+	if text == "" {
+		return r.notifier.Rejection(ctx, ev.ChatID, ev.MessageID, "补充到本轮需要填写内容。")
+	}
+	task, _, err := r.actionTask(ctx, ev)
+	if err != nil {
+		return r.actionTaskError(ctx, ev, err)
+	}
+	if err := r.controller.Steer(ctx, task.ID, text); err != nil {
+		if errors.Is(err, runtime.ErrNotRunning) {
+			return r.notifier.Rejection(ctx, ev.ChatID, ev.MessageID, "当前任务已结束，请使用继续跟进发起下一轮。")
+		}
+		return r.notifier.Rejection(ctx, ev.ChatID, ev.MessageID, "补充当前任务失败："+err.Error())
+	}
+	return nil
+}
+
+func (r *Router) handleViewDetails(ctx context.Context, ev contracts.InboundEvent) error {
+	task, runs, err := r.actionTask(ctx, ev)
+	if err != nil {
+		return r.actionTaskError(ctx, ev, err)
+	}
+	sent, err := r.notifier.Details(ctx, notifier.DetailsInput{
+		ChatID:           task.ChatID,
+		ReplyToMessageID: detailReplyMessageID(ev),
+		TaskID:           task.ID,
+		Status:           task.Status,
+		ProjectAlias:     task.ProjectAlias,
+		CWDLabel:         task.CWD,
+		FinalText:        latestFinalText(runs),
+	})
+	if err != nil {
+		return err
+	}
+	return r.insertRouteWithRetry(ctx, sent.MessageID, task.ID, "detail_card")
+}
+
+func (r *Router) handleDetailsPage(ctx context.Context, ev contracts.InboundEvent) error {
+	task, runs, err := r.actionTask(ctx, ev)
+	if err != nil {
+		return r.actionTaskError(ctx, ev, err)
+	}
+	page, err := strconv.Atoi(ev.ActionValue["page"])
+	if err != nil || page < 0 {
+		return r.notifier.Rejection(ctx, ev.ChatID, ev.MessageID, "详情页码无效。")
+	}
+	messageID := ev.MessageID
+	if messageID == "" {
+		messageID = ev.RootMessageID
+	}
+	if messageID == "" {
+		return r.notifier.Rejection(ctx, ev.ChatID, ev.MessageID, "无法更新详情卡片。")
+	}
+	_, err = r.notifier.Details(ctx, notifier.DetailsInput{
+		ChatID:          task.ChatID,
+		UpdateMessageID: messageID,
+		TaskID:          task.ID,
+		Status:          task.Status,
+		ProjectAlias:    task.ProjectAlias,
+		CWDLabel:        task.CWD,
+		FinalText:       latestFinalText(runs),
+		Page:            page,
+	})
+	return err
+}
+
+func (r *Router) actionTask(ctx context.Context, ev contracts.InboundEvent) (store.Task, []store.Run, error) {
+	taskID := ev.ActionValue["task_id"]
+	if taskID == "" {
+		return store.Task{}, nil, errors.New("missing task id")
+	}
+	task, runs, err := r.store.GetTask(ctx, taskID)
+	if err != nil {
+		return store.Task{}, nil, err
+	}
+	if task.ChatID != ev.ChatID {
+		return store.Task{}, nil, store.ErrRouteMiss
+	}
+	if task.CreatedBy != ev.SenderOpenID {
+		return store.Task{}, nil, errActionCreatorMismatch
+	}
+	return task, runs, nil
+}
+
+func (r *Router) actionTaskError(ctx context.Context, ev contracts.InboundEvent, err error) error {
+	switch {
+	case errors.Is(err, store.ErrNotFound):
+		return r.notifier.Rejection(ctx, ev.ChatID, ev.MessageID, "任务不存在。")
+	case errors.Is(err, store.ErrRouteMiss):
+		return r.notifier.Rejection(ctx, ev.ChatID, ev.MessageID, "无权操作此任务。")
+	case errors.Is(err, errActionCreatorMismatch):
+		return r.notifier.Rejection(ctx, ev.ChatID, ev.MessageID, "只有任务创建者可以操作此任务。")
+	default:
+		return r.notifier.Rejection(ctx, ev.ChatID, ev.MessageID, "任务操作失败："+err.Error())
+	}
+}
+
+func detailReplyMessageID(ev contracts.InboundEvent) string {
+	if ev.RootMessageID != "" {
+		return ev.RootMessageID
+	}
+	return ev.MessageID
+}
+
+func latestFinalText(runs []store.Run) string {
+	for _, run := range runs {
+		if strings.TrimSpace(run.FinalText) != "" {
+			return run.FinalText
+		}
+	}
+	return ""
 }
 
 func (r *Router) resolveContinuationTask(ctx context.Context, ev contracts.InboundEvent) (store.Task, error) {

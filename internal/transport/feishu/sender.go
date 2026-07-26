@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"net/url"
+	"strings"
 	"time"
 
 	lark "github.com/larksuite/oapi-sdk-go/v3"
@@ -210,6 +211,13 @@ func (s *Sender) attemptContext(ctx context.Context) (context.Context, context.C
 }
 
 func BuildInteractiveCard(msg contracts.OutboundMessage) ([]byte, error) {
+	if msg.Presentation != nil && msg.Presentation.Layout != "" {
+		return buildTaskPresentationCard(msg)
+	}
+	return buildGenericInteractiveCard(msg)
+}
+
+func buildGenericInteractiveCard(msg contracts.OutboundMessage) ([]byte, error) {
 	elements := make([]any, 0, len(msg.Fields)+len(msg.Options)+3)
 	if len(msg.Fields) > 0 {
 		elements = append(elements, metadataGrid(msg.Fields))
@@ -229,23 +237,26 @@ func BuildInteractiveCard(msg contracts.OutboundMessage) ([]byte, error) {
 		elements = append(elements, optionRows(msg.Options)...)
 	}
 
-	var followUpAction *contracts.Action
-	buttonActions := make([]contracts.Action, 0, len(msg.Actions))
-	for _, action := range msg.Actions {
-		if action.ID == "continue_submit" {
-			actionCopy := action
-			followUpAction = &actionCopy
-			continue
-		}
-		buttonActions = append(buttonActions, action)
-	}
-	if len(buttonActions) > 0 {
-		elements = append(elements, actionButtons(buttonActions))
-	}
-	if followUpAction != nil {
-		elements = append(elements, followUpForm(*followUpAction))
-	}
+	elements = appendCardActions(elements, msg.Actions)
+	return marshalCard(msg, elements)
+}
 
+func buildTaskPresentationCard(msg contracts.OutboundMessage) ([]byte, error) {
+	presentation := *msg.Presentation
+	elements := make([]any, 0, 8)
+	switch presentation.Layout {
+	case contracts.TaskCardResult:
+		elements = append(elements, resultCardElements(msg, presentation)...)
+	case contracts.TaskCardDetails:
+		elements = append(elements, detailCardElements(msg, presentation)...)
+	default:
+		elements = append(elements, runningCardElements(msg, presentation)...)
+	}
+	elements = appendCardActions(elements, msg.Actions)
+	return marshalCard(msg, elements)
+}
+
+func marshalCard(msg contracts.OutboundMessage, elements []any) ([]byte, error) {
 	card := map[string]any{
 		"schema": "2.0",
 		"config": map[string]any{
@@ -258,7 +269,8 @@ func BuildInteractiveCard(msg contracts.OutboundMessage) ([]byte, error) {
 			"title":         map[string]any{"tag": "plain_text", "content": msg.Title},
 			"subtitle":      map[string]any{"tag": "plain_text", "content": cardSubtitle(msg)},
 			"text_tag_list": []any{statusTag(msg)},
-			"padding":       "12px 12px 8px 12px",
+			"icon":          headerIcon(msg),
+			"padding":       "12px",
 		},
 		"body": map[string]any{
 			"direction":        "vertical",
@@ -270,11 +282,143 @@ func BuildInteractiveCard(msg contracts.OutboundMessage) ([]byte, error) {
 	return json.Marshal(card)
 }
 
+func runningCardElements(msg contracts.OutboundMessage, presentation contracts.TaskPresentation) []any {
+	stage := presentation.Stage
+	if stage == "" {
+		stage = "执行中"
+	}
+	activity := presentation.Activity
+	if activity == "" {
+		activity = "Codex 正在处理。"
+	}
+	elements := []any{metadataGrid([]contracts.Field{
+		{Title: "阶段", Value: stage},
+		{Title: "里程碑", Value: fmt.Sprintf("%d 已完成", len(presentation.Milestones))},
+		{Title: "状态", Value: statusLabel(msg)},
+	})}
+	elements = append(elements, sectionMarkdown("当前活动", activity))
+	if len(presentation.Milestones) > 0 {
+		elements = append(elements, sectionMarkdown("关键里程碑", markdownList(presentation.Milestones)))
+	}
+	if presentation.Draft != "" {
+		elements = append(elements, sectionMarkdown("回复草稿", presentation.Draft))
+	}
+	return elements
+}
+
+func resultCardElements(msg contracts.OutboundMessage, presentation contracts.TaskPresentation) []any {
+	conclusion := presentation.Conclusion
+	if conclusion == "" {
+		conclusion = "任务已完成。"
+	}
+	elements := []any{metadataGrid([]contracts.Field{
+		{Title: "结果", Value: statusLabel(msg)},
+		{Title: "改动", Value: fmt.Sprintf("%d 项", len(presentation.Changes))},
+		{Title: "验证", Value: fmt.Sprintf("%d 项", len(presentation.Verification))},
+	})}
+	elements = append(elements, sectionMarkdown("结论", conclusion))
+	if len(presentation.Changes) > 0 {
+		elements = append(elements, sectionMarkdown("改动", markdownStrings(presentation.Changes)))
+	}
+	if len(presentation.Verification) > 0 {
+		elements = append(elements, sectionMarkdown("验证", markdownStrings(presentation.Verification)))
+	}
+	return elements
+}
+
+func detailCardElements(msg contracts.OutboundMessage, presentation contracts.TaskPresentation) []any {
+	page := presentation.DetailPage
+	if page <= 0 {
+		page = 1
+	}
+	pages := presentation.DetailPages
+	if pages <= 0 {
+		pages = 1
+	}
+	text := presentation.DetailText
+	if text == "" {
+		text = "暂无更完整的结果内容。"
+	}
+	return []any{
+		metadataGrid([]contracts.Field{
+			{Title: "内容", Value: fmt.Sprintf("第 %d / %d 页", page, pages)},
+			{Title: "状态", Value: statusLabel(msg)},
+		}),
+		sectionMarkdown("完整回复", text),
+	}
+}
+
+func sectionMarkdown(title, content string) map[string]any {
+	return map[string]any{
+		"tag":       "column_set",
+		"flex_mode": "stretch",
+		"columns": []any{map[string]any{
+			"tag":              "column",
+			"width":            "weighted",
+			"weight":           1,
+			"vertical_spacing": "4px",
+			"elements": []any{
+				plainText(title, "notation", "grey"),
+				map[string]any{"tag": "markdown", "content": content, "text_size": "normal"},
+			},
+		}},
+	}
+}
+
+func markdownList(values []contracts.TaskMilestone) string {
+	items := make([]string, 0, len(values))
+	for _, value := range values {
+		if value.Label != "" {
+			items = append(items, value.Label)
+		}
+	}
+	return markdownStrings(items)
+}
+
+func markdownStrings(values []string) string {
+	items := make([]string, 0, len(values))
+	for _, value := range values {
+		value = strings.TrimSpace(value)
+		if value != "" {
+			items = append(items, "- "+value)
+		}
+	}
+	return strings.Join(items, "\n")
+}
+
+func appendCardActions(elements []any, actions []contracts.Action) []any {
+	var followUpAction *contracts.Action
+	buttonActions := make([]contracts.Action, 0, len(actions))
+	for _, action := range actions {
+		if isFollowUpAction(action.ID) {
+			actionCopy := action
+			followUpAction = &actionCopy
+			continue
+		}
+		buttonActions = append(buttonActions, action)
+	}
+	if len(buttonActions) > 0 {
+		elements = append(elements, actionButtons(buttonActions))
+	}
+	if followUpAction != nil {
+		if len(elements) > 0 {
+			elements = append(elements, map[string]any{"tag": "hr", "margin": "4px 0px"})
+		}
+		elements = append(elements, followUpForm(*followUpAction))
+	}
+	return elements
+}
+
+func isFollowUpAction(actionID string) bool {
+	return actionID == "continue_submit" || actionID == "steer_submit"
+}
+
 func followUpForm(action contracts.Action) map[string]any {
 	submit := actionButton(action)
 	submit["name"] = action.ID
 	submit["form_action_type"] = "submit"
 	submit["width"] = "default"
+	label, placeholder := followUpCopy(action.ID)
 	return map[string]any{
 		"tag":              "form",
 		"name":             "codex_followup_form",
@@ -290,8 +434,8 @@ func followUpForm(action contracts.Action) map[string]any {
 				"max_rows":    6,
 				"max_length":  1000,
 				"width":       "fill",
-				"label":       map[string]any{"tag": "plain_text", "content": "继续跟进"},
-				"placeholder": map[string]any{"tag": "plain_text", "content": "继续补充需求或问题"},
+				"label":       map[string]any{"tag": "plain_text", "content": label},
+				"placeholder": map[string]any{"tag": "plain_text", "content": placeholder},
 			},
 			map[string]any{
 				"tag":                "column_set",
@@ -306,6 +450,13 @@ func followUpForm(action contracts.Action) map[string]any {
 			},
 		},
 	}
+}
+
+func followUpCopy(actionID string) (string, string) {
+	if actionID == "steer_submit" {
+		return "补充到本轮", "补充目标、约束或调整方向"
+	}
+	return "继续跟进", "继续补充需求或问题"
 }
 
 func metadataGrid(fields []contracts.Field) map[string]any {
@@ -326,7 +477,7 @@ func metadataGrid(fields []contracts.Field) map[string]any {
 	}
 	return map[string]any{
 		"tag":                "column_set",
-		"flex_mode":          "flow",
+		"flex_mode":          "stretch",
 		"horizontal_spacing": "small",
 		"columns":            columns,
 	}
@@ -334,7 +485,7 @@ func metadataGrid(fields []contracts.Field) map[string]any {
 
 func optionRows(options []contracts.CardOption) []any {
 	elements := make([]any, 0, len(options))
-	for _, option := range options {
+	for index, option := range options {
 		content := []any{plainText(option.Title, "heading", "default")}
 		if option.Detail != "" {
 			content = append(content, plainText(option.Detail, "normal", "default"))
@@ -343,27 +494,38 @@ func optionRows(options []contracts.CardOption) []any {
 			content = append(content, plainText(option.Meta, "notation", "grey"))
 		}
 		elements = append(elements, map[string]any{
-			"tag":                "column_set",
-			"flex_mode":          "stretch",
-			"background_style":   "grey",
-			"horizontal_spacing": "small",
-			"columns": []any{
-				map[string]any{
-					"tag":              "column",
-					"width":            "weighted",
-					"weight":           1,
-					"padding":          "8px",
-					"vertical_spacing": "4px",
-					"elements":         content,
+			"tag":              "interactive_container",
+			"element_id":       fmt.Sprintf("option_%d", index),
+			"width":            "fill",
+			"height":           "auto",
+			"background_style": "default",
+			"has_border":       true,
+			"border_color":     "grey",
+			"corner_radius":    "8px",
+			"padding":          "10px 12px",
+			"vertical_spacing": "4px",
+			"hover_tips":       plainTextContent("接管此会话"),
+			"behaviors":        []any{callbackBehavior(option.Action)},
+			"elements": []any{map[string]any{
+				"tag":                "column_set",
+				"flex_mode":          "stretch",
+				"horizontal_spacing": "medium",
+				"columns": []any{
+					map[string]any{
+						"tag":              "column",
+						"width":            "weighted",
+						"weight":           1,
+						"vertical_spacing": "4px",
+						"elements":         content,
+					},
+					map[string]any{
+						"tag":            "column",
+						"width":          "auto",
+						"vertical_align": "center",
+						"elements":       []any{actionButton(option.Action)},
+					},
 				},
-				map[string]any{
-					"tag":            "column",
-					"width":          "auto",
-					"padding":        "8px",
-					"vertical_align": "center",
-					"elements":       []any{actionButton(option.Action)},
-				},
-			},
+			}},
 		})
 	}
 	return elements
@@ -388,13 +550,21 @@ func actionButtons(actions []contracts.Action) map[string]any {
 }
 
 func actionButton(action contracts.Action) map[string]any {
-	return map[string]any{
+	button := map[string]any{
 		"tag":       "button",
 		"type":      buttonType(action.Style),
-		"size":      "small",
+		"size":      "medium",
 		"text":      map[string]any{"tag": "plain_text", "content": action.Label},
-		"behaviors": []any{map[string]any{"type": "callback", "value": actionValue(action)}},
+		"behaviors": []any{callbackBehavior(action)},
 	}
+	if action.ID == "stop_task" {
+		button["hover_tips"] = plainTextContent("停止当前任务")
+		button["confirm"] = map[string]any{
+			"title": plainTextContent("停止当前任务？"),
+			"text":  plainTextContent("Codex 将收到停止请求，当前未完成的工作可能会中断。"),
+		}
+	}
+	return button
 }
 
 func plainText(content, size, color string) map[string]any {
@@ -409,35 +579,65 @@ func plainText(content, size, color string) map[string]any {
 	}
 }
 
+func plainTextContent(content string) map[string]any {
+	return map[string]any{"tag": "plain_text", "content": content}
+}
+
 func templateFor(msg contracts.OutboundMessage) string {
 	switch msg.CardKind {
 	case contracts.CardSuccess:
 		return "green"
-	case contracts.CardFailure, contracts.CardRoutingError:
+	case contracts.CardDetails:
+		return "blue"
+	case contracts.CardFailure:
+		if msg.Status == "canceled" {
+			return "grey"
+		}
+		return "red"
+	case contracts.CardRoutingError:
 		return "red"
 	case contracts.CardRunningConflict:
 		return "orange"
 	case contracts.CardThreadSelection:
 		return "blue"
 	default:
-		if msg.Status == "failed" {
+		switch msg.Status {
+		case "idle", "succeeded":
+			return "green"
+		case "queued":
+			return "orange"
+		case "canceled":
+			return "grey"
+		case "failed":
 			return "red"
+		default:
+			return "wathet"
 		}
-		return "wathet"
 	}
 }
 
 func cardSummary(msg contracts.OutboundMessage) string {
 	if msg.Title != "" {
+		if msg.Subtitle != "" {
+			return msg.Title + " · " + msg.Subtitle
+		}
 		return msg.Title
 	}
 	return statusLabel(msg)
 }
 
 func cardSubtitle(msg contracts.OutboundMessage) string {
+	if msg.Subtitle != "" {
+		return msg.Subtitle
+	}
+	if msg.Status == "canceled" {
+		return "本机 Codex 已停止执行"
+	}
 	switch msg.CardKind {
 	case contracts.CardSuccess:
 		return "本机 Codex 已完成执行"
+	case contracts.CardDetails:
+		return "分页查看最终回复"
 	case contracts.CardFailure:
 		return "本机 Codex 需要你的处理"
 	case contracts.CardThreadSelection:
@@ -448,6 +648,44 @@ func cardSubtitle(msg contracts.OutboundMessage) string {
 		return "请从有效任务卡片继续"
 	default:
 		return "本机 Codex 远程任务"
+	}
+}
+
+func headerIcon(msg contracts.OutboundMessage) map[string]any {
+	token, color := "chat_outlined", "blue"
+	switch msg.CardKind {
+	case contracts.CardSuccess:
+		token, color = "thumbsup_outlined", "green"
+	case contracts.CardDetails:
+		token, color = "chat-history_outlined", "blue"
+	case contracts.CardFailure:
+		if msg.Status == "canceled" {
+			token, color = "chat_outlined", "grey"
+			break
+		}
+		token, color = "chat-forbidden_outlined", "red"
+	case contracts.CardRoutingError:
+		token, color = "chat-forbidden_outlined", "red"
+	case contracts.CardThreadSelection:
+		token, color = "chat-history_outlined", "blue"
+	case contracts.CardRunningConflict:
+		token, color = "chat_outlined", "orange"
+	default:
+		switch msg.Status {
+		case "idle", "succeeded":
+			color = "green"
+		case "queued":
+			color = "orange"
+		case "canceled":
+			color = "grey"
+		case "failed":
+			color = "red"
+		}
+	}
+	return map[string]any{
+		"tag":   "standard_icon",
+		"token": token,
+		"color": color,
 	}
 }
 
@@ -464,6 +702,9 @@ func statusLabel(msg contracts.OutboundMessage) string {
 	case contracts.CardSuccess:
 		return "已完成"
 	case contracts.CardFailure:
+		if msg.Status == "canceled" {
+			return "已停止"
+		}
 		return "未完成"
 	case contracts.CardRoutingError:
 		return "待处理"
@@ -494,7 +735,12 @@ func statusColor(msg contracts.OutboundMessage) string {
 	switch msg.CardKind {
 	case contracts.CardSuccess:
 		return "green"
-	case contracts.CardFailure, contracts.CardRoutingError:
+	case contracts.CardFailure:
+		if msg.Status == "canceled" {
+			return "grey"
+		}
+		return "red"
+	case contracts.CardRoutingError:
 		return "red"
 	case contracts.CardRunningConflict:
 		return "orange"
@@ -508,11 +754,17 @@ func statusColor(msg contracts.OutboundMessage) string {
 		return "orange"
 	case "running":
 		return "wathet"
-	case "failed", "canceled":
+	case "failed":
 		return "red"
+	case "canceled":
+		return "grey"
 	default:
 		return "neutral"
 	}
+}
+
+func callbackBehavior(action contracts.Action) map[string]any {
+	return map[string]any{"type": "callback", "value": actionValue(action)}
 }
 
 func actionValue(action contracts.Action) map[string]string {

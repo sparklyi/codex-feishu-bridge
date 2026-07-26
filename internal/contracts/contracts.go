@@ -30,10 +30,45 @@ const (
 	CardStart           CardKind = "start"
 	CardSuccess         CardKind = "success"
 	CardFailure         CardKind = "failure"
+	CardDetails         CardKind = "details"
 	CardRoutingError    CardKind = "routing_error"
 	CardThreadSelection CardKind = "thread_selection"
 	CardRunningConflict CardKind = "running_conflict"
 )
+
+// TaskCardLayout selects the specialized developer-facing task card layout.
+// Other card kinds continue to use the generic card layout.
+type TaskCardLayout string
+
+const (
+	TaskCardRunning TaskCardLayout = "running"
+	TaskCardResult  TaskCardLayout = "result"
+	TaskCardDetails TaskCardLayout = "details"
+)
+
+// TaskMilestone is a bounded, user-facing event summary. It intentionally
+// carries no command output, reasoning, or transport detail.
+type TaskMilestone struct {
+	Label string
+	Kind  string
+}
+
+// TaskPresentation contains the structured information needed by the three
+// task-card layouts. The final response itself remains available only through
+// the paged details layout when it does not fit in the result summary.
+type TaskPresentation struct {
+	Layout       TaskCardLayout
+	Stage        string
+	Activity     string
+	Milestones   []TaskMilestone
+	Draft        string
+	Conclusion   string
+	Changes      []string
+	Verification []string
+	DetailText   string
+	DetailPage   int
+	DetailPages  int
+}
 
 type OutboundMessage struct {
 	ChatID           string
@@ -43,7 +78,9 @@ type OutboundMessage struct {
 	TaskID           string
 	Status           string
 	Title            string
+	Subtitle         string
 	BodyMarkdown     string
+	Presentation     *TaskPresentation
 	Fields           []Field
 	Options          []CardOption
 	Actions          []Action

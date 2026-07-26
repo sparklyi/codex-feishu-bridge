@@ -17,6 +17,7 @@ import (
 const (
 	defaultCommand               = "codex"
 	defaultStartupTimeoutSeconds = 15
+	defaultCardDisplayMode       = "concise"
 )
 
 type Config struct {
@@ -29,9 +30,10 @@ type Config struct {
 }
 
 type FeishuConfig struct {
-	AppID        string `yaml:"app_id"`
-	AppSecretEnv string `yaml:"app_secret_env"`
-	ProxyURL     string `yaml:"proxy_url"`
+	AppID           string `yaml:"app_id"`
+	AppSecretEnv    string `yaml:"app_secret_env"`
+	ProxyURL        string `yaml:"proxy_url"`
+	CardDisplayMode string `yaml:"card_display_mode"`
 }
 
 type SecurityConfig struct {
@@ -120,6 +122,9 @@ func (cfg Config) Validate(getenv func(string) string, stat func(string) error) 
 		} else {
 			diags = append(diags, Diagnostic{Level: LevelOK, Code: "feishu.proxy_url", Message: "Feishu proxy configured"})
 		}
+	}
+	if !validCardDisplayMode(cfg.Feishu.CardDisplayMode) {
+		diags = append(diags, Diagnostic{Level: LevelError, Code: "feishu.card_display_mode", Message: "must be concise or preview"})
 	}
 	if cfg.Workspace.Default == "" {
 		diags = append(diags, Diagnostic{Level: LevelError, Code: "workspace.default", Message: "default workspace is required"})
@@ -219,6 +224,9 @@ func (cfg Config) ProjectAliases() []string {
 }
 
 func (cfg *Config) applyDefaults(home string) {
+	if cfg.Feishu.CardDisplayMode == "" {
+		cfg.Feishu.CardDisplayMode = defaultCardDisplayMode
+	}
 	if cfg.AppServer.Command == "" {
 		cfg.AppServer.Command = defaultCommand
 	}
@@ -231,6 +239,10 @@ func (cfg *Config) applyDefaults(home string) {
 	if home != "" && cfg.Paths.StateDB == "" {
 		cfg.Paths.StateDB = filepath.Join(home, ".codex-feishu-bridge", "state.db")
 	}
+}
+
+func validCardDisplayMode(mode string) bool {
+	return mode == "concise" || mode == "preview"
 }
 
 func samePath(left, right string) bool {

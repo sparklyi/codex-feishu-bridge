@@ -83,7 +83,7 @@ func TestServeRecoversStaleRunAndInitConfigUsesAppServer(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(string(data), "app_server:") || !strings.Contains(string(data), "startup_timeout_seconds: 15") || strings.Contains(string(data), "approval:") || strings.Contains(string(data), "sandbox:") || strings.Contains(string(data), "bot_open_id:") || strings.Contains(string(data), "connection:") || strings.Contains(string(data), "projects:") {
+	if !strings.Contains(string(data), "app_server:") || !strings.Contains(string(data), "startup_timeout_seconds: 15") || !strings.Contains(string(data), "card_display_mode: concise") || strings.Contains(string(data), "approval:") || strings.Contains(string(data), "sandbox:") || strings.Contains(string(data), "bot_open_id:") || strings.Contains(string(data), "connection:") || strings.Contains(string(data), "projects:") {
 		t.Fatalf("unexpected generated config:\n%s", data)
 	}
 }
@@ -205,6 +205,9 @@ func (*fakeAppServer) ResumeThread(context.Context, appserver.ThreadResumeInput)
 }
 func (*fakeAppServer) StartTurn(context.Context, appserver.TurnStartInput) (appserver.Turn, error) {
 	return appserver.Turn{}, errors.New("not used")
+}
+func (*fakeAppServer) SteerTurn(context.Context, appserver.TurnSteerInput) (string, error) {
+	return "", errors.New("not used")
 }
 func (*fakeAppServer) Interrupt(context.Context, string, string) error     { return errors.New("not used") }
 func (*fakeAppServer) Respond(context.Context, json.RawMessage, any) error { return nil }

@@ -158,3 +158,50 @@ func TestFullAccessPolicyIsFixed(t *testing.T) {
 		t.Fatalf("unexpected policy: %#v", policy)
 	}
 }
+
+func TestClientSteersCurrentTurnWithoutStartingAnother(t *testing.T) {
+	serverIn, clientOut := io.Pipe()
+	clientIn, serverOut := io.Pipe()
+	client := NewClient(clientIn, clientOut, func() error { return nil })
+	defer func() { _ = client.Close() }()
+
+	request := make(chan map[string]any, 1)
+	go func() {
+		reader := bufio.NewScanner(serverIn)
+		writer := bufio.NewWriter(serverOut)
+		defer func() { _ = writer.Flush() }()
+		if !reader.Scan() {
+			return
+		}
+		var message map[string]any
+		if json.Unmarshal(reader.Bytes(), &message) != nil {
+			return
+		}
+		request <- message
+		_, _ = writer.WriteString(`{"id":1,"result":{"turnId":"turn-1"}}` + "\n")
+		_ = writer.Flush()
+	}()
+
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	turnID, err := client.SteerTurn(ctx, TurnSteerInput{ThreadID: "thread-1", ExpectedTurnID: "turn-1", Text: "also verify the tests"})
+	if err != nil || turnID != "turn-1" {
+		t.Fatalf("steer result turn=%q err=%v", turnID, err)
+	}
+	message := <-request
+	if message["method"] != "turn/steer" {
+		t.Fatalf("method = %#v", message["method"])
+	}
+	params, ok := message["params"].(map[string]any)
+	if !ok || params["threadId"] != "thread-1" || params["expectedTurnId"] != "turn-1" {
+		t.Fatalf("unexpected steer params: %#v", message["params"])
+	}
+	input, ok := params["input"].([]any)
+	if !ok || len(input) != 1 {
+		t.Fatalf("steer input malformed: %#v", params["input"])
+	}
+	part, ok := input[0].(map[string]any)
+	if !ok || part["type"] != "text" || part["text"] != "also verify the tests" {
+		t.Fatalf("steer text malformed: %#v", input[0])
+	}
+}

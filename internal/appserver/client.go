@@ -225,6 +225,24 @@ func (c *Client) StartTurn(ctx context.Context, in TurnStartInput) (Turn, error)
 	return out.Turn, err
 }
 
+func (c *Client) SteerTurn(ctx context.Context, in TurnSteerInput) (string, error) {
+	if in.ThreadID == "" || in.ExpectedTurnID == "" {
+		return "", errors.New("thread id and expected turn id are required")
+	}
+	if in.Text == "" {
+		return "", errors.New("steer text is required")
+	}
+	var out struct {
+		TurnID string `json:"turnId"`
+	}
+	err := c.Call(ctx, "turn/steer", map[string]any{
+		"threadId":       in.ThreadID,
+		"expectedTurnId": in.ExpectedTurnID,
+		"input":          []map[string]string{{"type": "text", "text": in.Text}},
+	}, &out)
+	return out.TurnID, err
+}
+
 func (c *Client) Interrupt(ctx context.Context, threadID, turnID string) error {
 	if threadID == "" || turnID == "" {
 		return errors.New("thread id and turn id are required")

@@ -4,9 +4,11 @@ import (
 	"bytes"
 	"errors"
 	"fmt"
+	"net/url"
 	"os"
 	"path/filepath"
 	"sort"
+	"strings"
 	"time"
 
 	"gopkg.in/yaml.v3"
@@ -32,6 +34,7 @@ type FeishuConfig struct {
 	AppSecretEnv string `yaml:"app_secret_env"`
 	Connection   string `yaml:"connection"`
 	BotOpenID    string `yaml:"bot_open_id"`
+	ProxyURL     string `yaml:"proxy_url"`
 }
 
 type SecurityConfig struct {
@@ -114,6 +117,13 @@ func (cfg Config) Validate(getenv func(string) string, stat func(string) error) 
 	} else {
 		diags = append(diags, Diagnostic{Level: LevelOK, Code: "feishu.app_secret", Message: "Feishu app secret environment variable is set"})
 	}
+	if strings.TrimSpace(cfg.Feishu.ProxyURL) != "" {
+		if _, err := cfg.Feishu.Proxy(); err != nil {
+			diags = append(diags, Diagnostic{Level: LevelError, Code: "feishu.proxy_url", Message: err.Error()})
+		} else {
+			diags = append(diags, Diagnostic{Level: LevelOK, Code: "feishu.proxy_url", Message: "Feishu proxy configured"})
+		}
+	}
 	if cfg.Workspace.Default == "" {
 		diags = append(diags, Diagnostic{Level: LevelError, Code: "workspace.default", Message: "default workspace is required"})
 	} else if stat != nil {
@@ -138,6 +148,23 @@ func (cfg Config) Validate(getenv func(string) string, stat func(string) error) 
 		diags = append(diags, Diagnostic{Level: LevelError, Code: "app_server.startup_timeout_seconds", Message: "startup timeout must be positive"})
 	}
 	return diags
+}
+
+// Proxy returns the configured Feishu proxy. A missing value deliberately
+// returns nil so all Feishu network traffic uses a direct connection.
+func (cfg FeishuConfig) Proxy() (*url.URL, error) {
+	rawURL := strings.TrimSpace(cfg.ProxyURL)
+	if rawURL == "" {
+		return nil, nil
+	}
+	proxyURL, err := url.ParseRequestURI(rawURL)
+	if err != nil || proxyURL.Scheme == "" || proxyURL.Host == "" {
+		return nil, errors.New("must be an absolute http URL")
+	}
+	if strings.ToLower(proxyURL.Scheme) != "http" {
+		return nil, errors.New("must use the http scheme")
+	}
+	return proxyURL, nil
 }
 
 func (cfg Config) ResolveProject(alias string) (ResolvedProject, error) {

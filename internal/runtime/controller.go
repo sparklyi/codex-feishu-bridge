@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log/slog"
 	"strings"
 	"sync"
 	"time"
@@ -16,11 +17,18 @@ import (
 	"github.com/sparklyi/codex-feishu-bridge/internal/contracts"
 	"github.com/sparklyi/codex-feishu-bridge/internal/notifier"
 	"github.com/sparklyi/codex-feishu-bridge/internal/store"
+	"github.com/sparklyi/codex-feishu-bridge/internal/transport"
 )
 
 var ErrNotRunning = errors.New("task has no running bridge turn")
 
-const progressUpdateInterval = 400 * time.Millisecond
+const (
+	progressUpdateInterval    = 400 * time.Millisecond
+	progressRetryDelay        = 800 * time.Millisecond
+	notificationTimeout       = 20 * time.Second
+	terminalRetryAttempts     = 3
+	defaultTerminalRetryDelay = time.Second
+)
 
 type TaskStore interface {
 	StartRun(ctx context.Context, in store.StartRunInput) (store.Task, store.Run, error)
@@ -43,17 +51,19 @@ type StartInput struct {
 }
 
 type ControllerOptions struct {
-	AppServer appserver.API
-	Store     TaskStore
-	Notifier  CardNotifier
-	Now       func() time.Time
+	AppServer          appserver.API
+	Store              TaskStore
+	Notifier           CardNotifier
+	Now                func() time.Time
+	TerminalRetryDelay time.Duration
 }
 
 type Controller struct {
-	api      appserver.API
-	store    TaskStore
-	notifier CardNotifier
-	now      func() time.Time
+	api                appserver.API
+	store              TaskStore
+	notifier           CardNotifier
+	now                func() time.Time
+	terminalRetryDelay time.Duration
 
 	ctx    context.Context
 	cancel context.CancelFunc
@@ -85,6 +95,7 @@ type activeRun struct {
 	turnID              string
 	finalText           string
 	lastProgress        time.Time
+	progressRetryAfter  time.Time
 	pendingProgressBody string
 	progressDirty       bool
 	progressForce       bool
@@ -101,18 +112,23 @@ func New(opts ControllerOptions) *Controller {
 	if now == nil {
 		now = func() time.Time { return time.Now().UTC() }
 	}
+	retryDelay := opts.TerminalRetryDelay
+	if retryDelay <= 0 {
+		retryDelay = defaultTerminalRetryDelay
+	}
 	ctx, cancel := context.WithCancel(context.Background())
 	c := &Controller{
-		api:      opts.AppServer,
-		store:    opts.Store,
-		notifier: opts.Notifier,
-		now:      now,
-		ctx:      ctx,
-		cancel:   cancel,
-		byRun:    make(map[string]*activeRun),
-		byTask:   make(map[string]*activeRun),
-		byThread: make(map[string]*activeRun),
-		byTurn:   make(map[string]*activeRun),
+		api:                opts.AppServer,
+		store:              opts.Store,
+		notifier:           opts.Notifier,
+		now:                now,
+		terminalRetryDelay: retryDelay,
+		ctx:                ctx,
+		cancel:             cancel,
+		byRun:              make(map[string]*activeRun),
+		byTask:             make(map[string]*activeRun),
+		byThread:           make(map[string]*activeRun),
+		byTurn:             make(map[string]*activeRun),
 	}
 	if c.api != nil {
 		c.start(c.eventLoop)
@@ -437,9 +453,8 @@ func (c *Controller) finish(active *activeRun, status string, exitCode int, body
 	active.cancel()
 	c.unregister(active)
 	threadID, turnID := active.ids()
-	ctx, cancel := c.notificationContext()
-	defer cancel()
-	if err := c.store.FinishRun(ctx, active.dedupKey, store.FinishRunInput{
+	storeCtx, cancelStore := c.notificationContext()
+	if err := c.store.FinishRun(storeCtx, active.dedupKey, store.FinishRunInput{
 		RunID:      active.runID(),
 		ThreadID:   threadID,
 		TurnID:     turnID,
@@ -451,6 +466,7 @@ func (c *Controller) finish(active *activeRun, status string, exitCode int, body
 		body = "无法保存 Codex 结果：" + err.Error()
 		status = "failed"
 	}
+	cancelStore()
 	input := notifier.TaskCardInput{
 		ChatID:          active.chatID(),
 		UpdateMessageID: active.cardID(),
@@ -461,27 +477,97 @@ func (c *Controller) finish(active *activeRun, status string, exitCode int, body
 		Body:            body,
 	}
 	active.cardMu.Lock()
-	defer active.cardMu.Unlock()
-	var (
-		sent contracts.SentMessage
-		err  error
-	)
-	if status == "succeeded" {
-		sent, err = c.notifier.Success(ctx, input)
-	} else {
-		sent, err = c.notifier.Failure(ctx, input)
-	}
-	if err != nil && input.UpdateMessageID != "" {
-		input.UpdateMessageID = ""
-		if status == "succeeded" {
-			sent, err = c.notifier.Success(ctx, input)
-		} else {
-			sent, err = c.notifier.Failure(ctx, input)
+	notifyCtx, cancelNotify := c.notificationContext()
+	sent, err := c.sendTerminal(notifyCtx, status, input)
+	cancelNotify()
+	active.cardMu.Unlock()
+	if err != nil {
+		if input.UpdateMessageID != "" && transport.IsTransientError(err) {
+			slog.Warn("Feishu terminal card patch failed; retrying original card", "task_id", active.taskID(), "error", err)
+			c.retryTerminalPatch(active, status, input)
+			return
 		}
+		if input.UpdateMessageID != "" {
+			c.sendTerminalFallback(active, status, input, err)
+			return
+		}
+		slog.Error("Feishu terminal card delivery failed", "task_id", active.taskID(), "error", err)
+		return
 	}
-	if err == nil && sent.MessageID != "" && sent.MessageID != active.cardID() {
-		_ = c.store.InsertMessageRoute(ctx, sent.MessageID, active.taskID(), "result_card")
+	c.insertTerminalRoute(active, sent)
+}
+
+func (c *Controller) sendTerminal(ctx context.Context, status string, input notifier.TaskCardInput) (contracts.SentMessage, error) {
+	if status == "succeeded" {
+		return c.notifier.Success(ctx, input)
 	}
+	return c.notifier.Failure(ctx, input)
+}
+
+func (c *Controller) retryTerminalPatch(active *activeRun, status string, input notifier.TaskCardInput) {
+	if !c.start(func() {
+		var lastErr error
+		for attempt := 1; attempt <= terminalRetryAttempts; attempt++ {
+			if !c.waitForTerminalRetry(attempt) {
+				return
+			}
+			active.cardMu.Lock()
+			notifyCtx, cancel := c.notificationContext()
+			sent, err := c.sendTerminal(notifyCtx, status, input)
+			cancel()
+			active.cardMu.Unlock()
+			if err == nil {
+				c.insertTerminalRoute(active, sent)
+				return
+			}
+			if !transport.IsTransientError(err) {
+				c.sendTerminalFallback(active, status, input, err)
+				return
+			}
+			lastErr = err
+			slog.Warn("Feishu terminal card patch retry failed", "task_id", active.taskID(), "attempt", attempt, "error", err)
+		}
+		slog.Error("Feishu terminal card could not be updated after retries", "task_id", active.taskID(), "error", lastErr)
+		c.sendTerminalFallback(active, status, input, lastErr)
+	}) {
+		slog.Error("Feishu terminal card retry could not be scheduled", "task_id", active.taskID())
+	}
+}
+
+func (c *Controller) waitForTerminalRetry(attempt int) bool {
+	delay := c.terminalRetryDelay * time.Duration(attempt)
+	timer := time.NewTimer(delay)
+	defer timer.Stop()
+	select {
+	case <-c.ctx.Done():
+		return false
+	case <-timer.C:
+		return true
+	}
+}
+
+func (c *Controller) sendTerminalFallback(active *activeRun, status string, input notifier.TaskCardInput, patchErr error) {
+	slog.Warn("Feishu terminal card cannot be patched; sending fallback result card", "task_id", active.taskID(), "error", patchErr)
+	input.UpdateMessageID = ""
+	active.cardMu.Lock()
+	fallbackCtx, cancelFallback := c.notificationContext()
+	sent, err := c.sendTerminal(fallbackCtx, status, input)
+	cancelFallback()
+	active.cardMu.Unlock()
+	if err != nil {
+		slog.Error("Feishu terminal fallback card delivery failed", "task_id", active.taskID(), "error", err)
+		return
+	}
+	c.insertTerminalRoute(active, sent)
+}
+
+func (c *Controller) insertTerminalRoute(active *activeRun, sent contracts.SentMessage) {
+	if sent.MessageID == "" || sent.MessageID == active.cardID() {
+		return
+	}
+	routeCtx, cancelRoute := c.notificationContext()
+	_ = c.store.InsertMessageRoute(routeCtx, sent.MessageID, active.taskID(), "result_card")
+	cancelRoute()
 }
 
 func (c *Controller) sendProgress(_ context.Context, active *activeRun, body string, force bool) {
@@ -533,10 +619,11 @@ func (c *Controller) flushProgress(active *activeRun) {
 			continue
 		}
 
+		var notifyErr error
 		active.cardMu.Lock()
 		if !active.isTerminal() {
 			notifyCtx, cancel := c.notificationContext()
-			_, _ = c.notifier.Progress(notifyCtx, notifier.TaskCardInput{
+			_, notifyErr = c.notifier.Progress(notifyCtx, notifier.TaskCardInput{
 				ChatID:          active.chatID(),
 				UpdateMessageID: active.cardID(),
 				TaskID:          active.taskID(),
@@ -548,11 +635,18 @@ func (c *Controller) flushProgress(active *activeRun) {
 			cancel()
 		}
 		active.cardMu.Unlock()
+		if notifyErr != nil {
+			transient := transport.IsTransientError(notifyErr)
+			slog.Warn("Feishu progress card patch failed", "task_id", active.taskID(), "transient", transient, "error", notifyErr)
+			if transient {
+				active.retryProgress(body, c.now().Add(progressRetryDelay))
+			}
+		}
 	}
 }
 
 func (c *Controller) notificationContext() (context.Context, context.CancelFunc) {
-	return context.WithTimeout(context.Background(), 15*time.Second)
+	return context.WithTimeout(context.Background(), notificationTimeout)
 }
 
 func (c *Controller) setThread(active *activeRun, threadID string) {
@@ -756,6 +850,12 @@ func (a *activeRun) nextProgress(now time.Time) (body string, wait time.Duration
 		a.progressWorker = false
 		return "", 0, false
 	}
+	if !a.progressForce && !a.progressRetryAfter.IsZero() {
+		if remaining := a.progressRetryAfter.Sub(now); remaining > 0 {
+			return "", remaining, true
+		}
+		a.progressRetryAfter = time.Time{}
+	}
 	if !a.progressForce && !a.lastProgress.IsZero() {
 		if remaining := progressUpdateInterval - now.Sub(a.lastProgress); remaining > 0 {
 			return "", remaining, true
@@ -766,6 +866,22 @@ func (a *activeRun) nextProgress(now time.Time) (body string, wait time.Duration
 	a.progressForce = false
 	a.lastProgress = now
 	return body, 0, true
+}
+
+func (a *activeRun) retryProgress(body string, retryAfter time.Time) {
+	if body == "" {
+		return
+	}
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	if a.terminal {
+		return
+	}
+	if !a.progressDirty {
+		a.pendingProgressBody = body
+		a.progressDirty = true
+	}
+	a.progressRetryAfter = retryAfter
 }
 
 func (a *activeRun) stopProgressWorker() {

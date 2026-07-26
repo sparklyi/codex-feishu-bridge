@@ -24,15 +24,17 @@ const (
 	feishuWSEndpoint        = "https://open.feishu.cn/callback/ws/endpoint"
 	feishuHTTPTimeout       = 30 * time.Second
 	feishuBootstrapTimeout  = 8 * time.Second
-	feishuHeartbeatInterval = 90 * time.Second
+	feishuHeartbeatInterval = 30 * time.Second
+	maxHeartbeatInterval    = 30 * time.Second
 	feishuReconnectDelay    = time.Second
 	feishuWriteTimeout      = 5 * time.Second
 	fragmentTTL             = 5 * time.Second
 )
 
 // feishuWSClient owns the parts of the Feishu long connection that the SDK
-// leaves server-configurable. It keeps a short heartbeat and reconnects on a
-// direct network path when the remote endpoint closes the connection.
+// leaves server-configurable. It keeps a conservative protocol heartbeat and
+// reconnects on a direct network path when the remote endpoint closes the
+// connection.
 type feishuWSClient struct {
 	appID      string
 	appSecret  string
@@ -66,13 +68,13 @@ type fragmentBuffer struct {
 	expiresAt time.Time
 }
 
-func newFeishuWSClient(appID, appSecret string, eventDispatcher *dispatcher.EventDispatcher) *feishuWSClient {
+func newFeishuWSClient(appID, appSecret string, eventDispatcher *dispatcher.EventDispatcher, proxyURL *url.URL) *feishuWSClient {
 	return &feishuWSClient{
 		appID:            appID,
 		appSecret:        appSecret,
 		dispatcher:       eventDispatcher,
-		httpClient:       newFeishuHTTPClient(feishuHTTPTimeout),
-		dialer:           newFeishuWebSocketDialer(),
+		httpClient:       newFeishuHTTPClient(feishuHTTPTimeout, proxyURL),
+		dialer:           newFeishuWebSocketDialer(proxyURL),
 		endpointURL:      feishuWSEndpoint,
 		bootstrapTimeout: feishuBootstrapTimeout,
 		reconnectDelay:   feishuReconnectDelay,
@@ -81,20 +83,34 @@ func newFeishuWSClient(appID, appSecret string, eventDispatcher *dispatcher.Even
 	}
 }
 
-func newFeishuHTTPClient(timeout time.Duration) *http.Client {
-	transport := http.DefaultTransport.(*http.Transport).Clone()
-	transport.Proxy = nil
-	transport.MaxIdleConns = 32
-	transport.MaxIdleConnsPerHost = 8
-	transport.IdleConnTimeout = 30 * time.Second
+func newFeishuHTTPClient(timeout time.Duration, proxyURL *url.URL) *http.Client {
+	transport := newFeishuTransport()
+	transport.Proxy = staticProxy(proxyURL)
 	return &http.Client{Transport: transport, Timeout: timeout}
 }
 
-func newFeishuWebSocketDialer() *websocket.Dialer {
+func staticProxy(proxyURL *url.URL) func(*http.Request) (*url.URL, error) {
+	if proxyURL == nil {
+		return nil
+	}
+	proxyCopy := *proxyURL
+	return http.ProxyURL(&proxyCopy)
+}
+
+func newFeishuTransport() *http.Transport {
+	transport := http.DefaultTransport.(*http.Transport).Clone()
+	transport.MaxIdleConns = 32
+	transport.MaxIdleConnsPerHost = 8
+	transport.IdleConnTimeout = 30 * time.Second
+	return transport
+}
+
+func newFeishuWebSocketDialer(proxyURL *url.URL) *websocket.Dialer {
 	dialer := &net.Dialer{Timeout: feishuBootstrapTimeout, KeepAlive: 20 * time.Second}
 	return &websocket.Dialer{
 		HandshakeTimeout: feishuBootstrapTimeout,
 		NetDialContext:   dialer.DialContext,
+		Proxy:            staticProxy(proxyURL),
 	}
 }
 
@@ -249,7 +265,14 @@ func heartbeatFromConfig(config *larkws.ClientConfig) time.Duration {
 	if config == nil || config.PingInterval <= 0 {
 		return feishuHeartbeatInterval
 	}
-	return time.Duration(config.PingInterval) * time.Second
+	interval := time.Duration(config.PingInterval) * time.Second / 2
+	if interval <= 0 {
+		return feishuHeartbeatInterval
+	}
+	if interval > maxHeartbeatInterval {
+		return maxHeartbeatInterval
+	}
+	return interval
 }
 
 func (c *feishuWSClient) setServerHeartbeatInterval(interval time.Duration) {
@@ -304,25 +327,7 @@ func (c *feishuWSClient) serveConnection(ctx context.Context, conn *websocket.Co
 		case <-stop:
 		}
 	}()
-	go func() {
-		defer workers.Done()
-		interval := c.currentHeartbeatInterval()
-		ticker := time.NewTicker(interval)
-		defer ticker.Stop()
-		for {
-			select {
-			case <-stop:
-				return
-			case <-ctx.Done():
-				return
-			case <-ticker.C:
-				if err := c.writePing(conn, serviceID, &writeMu); err != nil {
-					_ = conn.Close()
-					return
-				}
-			}
-		}
-	}()
+	go c.heartbeatLoop(ctx, stop, conn, serviceID, &writeMu, &workers)
 
 	for {
 		messageType, payload, err := conn.ReadMessage()
@@ -341,16 +346,56 @@ func (c *feishuWSClient) serveConnection(ctx context.Context, conn *websocket.Co
 			continue
 		}
 		frame, complete := c.completeFrame(frame)
-		if !complete || larkws.FrameType(frame.Method) != larkws.FrameTypeData {
+		if !complete {
+			continue
+		}
+		if larkws.FrameType(frame.Method) == larkws.FrameTypeControl {
+			c.handleControlFrame(frame)
+			continue
+		}
+		if larkws.FrameType(frame.Method) != larkws.FrameTypeData {
 			continue
 		}
 		c.handleDataFrame(ctx, conn, frame, &writeMu)
 	}
 }
 
+func (c *feishuWSClient) heartbeatLoop(ctx context.Context, stop <-chan struct{}, conn *websocket.Conn, serviceID int32, writeMu *sync.Mutex, workers *sync.WaitGroup) {
+	defer workers.Done()
+	timer := time.NewTimer(c.currentHeartbeatInterval())
+	defer timer.Stop()
+	for {
+		select {
+		case <-stop:
+			return
+		case <-ctx.Done():
+			return
+		case <-timer.C:
+			if err := c.writePing(conn, serviceID, writeMu); err != nil {
+				_ = conn.Close()
+				return
+			}
+			timer.Reset(c.currentHeartbeatInterval())
+		}
+	}
+}
+
 func (c *feishuWSClient) writePing(conn *websocket.Conn, serviceID int32, writeMu *sync.Mutex) error {
 	frame := larkws.NewPingFrame(serviceID)
 	return c.writeFrame(conn, frame, writeMu)
+}
+
+func (c *feishuWSClient) handleControlFrame(frame larkws.Frame) {
+	headers := larkws.Headers(frame.Headers)
+	if larkws.MessageType(headers.GetString(larkws.HeaderType)) != larkws.MessageTypePong || len(frame.Payload) == 0 {
+		return
+	}
+	var config larkws.ClientConfig
+	if err := json.Unmarshal(frame.Payload, &config); err != nil {
+		slog.Warn("Feishu WebSocket pong config rejected", "error", err)
+		return
+	}
+	c.setServerHeartbeatInterval(heartbeatFromConfig(&config))
 }
 
 func (c *feishuWSClient) handleDataFrame(ctx context.Context, conn *websocket.Conn, frame larkws.Frame, writeMu *sync.Mutex) {

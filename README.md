@@ -23,6 +23,8 @@ codex-feishu-bridge serve
 
 Set `app_server.command` to the standalone Codex CLI installed by the official installer. Do not point it at the executable bundled inside Codex Desktop; the standalone CLI provides the supported app-server interface for this bridge.
 
+When the network requires a proxy, set `feishu.proxy_url` to an `http://` proxy URL. Leave it unset for direct Feishu REST and WebSocket connections; environment proxy variables are ignored by the bridge.
+
 ## Feishu Workflow
 
 For a screenshot-based setup guide, see [Feishu Bot Quickstart (Chinese)](docs/feishu-quickstart.zh-CN.md).

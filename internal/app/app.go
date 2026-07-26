@@ -57,6 +57,10 @@ func Serve(ctx context.Context, opts ServeOptions) error {
 			return fmt.Errorf("invalid config %s: %s", diagnostic.Code, diagnostic.Message)
 		}
 	}
+	proxyURL, err := cfg.Feishu.Proxy()
+	if err != nil {
+		return fmt.Errorf("invalid config feishu.proxy_url: %w", err)
+	}
 	st, err := store.Open(ctx, cfg.Paths.StateDB)
 	if err != nil {
 		return err
@@ -76,7 +80,7 @@ func Serve(ctx context.Context, opts ServeOptions) error {
 		if secret == "" {
 			return errors.New("missing Feishu app secret")
 		}
-		source := feishu.NewSDKEventSource(cfg.Feishu.AppID, secret, "")
+		source := feishu.NewSDKEventSource(cfg.Feishu.AppID, secret, "", proxyURL)
 		receiver = feishu.Receiver{
 			Source: source,
 			Verify: feishu.VerifyOptions{AppID: cfg.Feishu.AppID, BotOpenID: cfg.Feishu.BotOpenID},
@@ -86,7 +90,7 @@ func Serve(ctx context.Context, opts ServeOptions) error {
 		}
 	}
 	if sender == nil {
-		api := feishu.NewSDKCardAPI(cfg.Feishu.AppID, secret)
+		api := feishu.NewSDKCardAPI(cfg.Feishu.AppID, secret, proxyURL)
 		sender, err = feishu.NewSenderFromEnv(cfg.Feishu.AppID, cfg.Feishu.AppSecretEnv, getenv, api)
 		if err != nil {
 			return err
@@ -185,6 +189,7 @@ const defaultConfig = `feishu:
   app_secret_env: FEISHU_APP_SECRET
   bot_open_id: ou_bot_xxx
   connection: websocket
+  # proxy_url: http://127.0.0.1:7890
 security:
   allowed_open_ids:
     - ou_xxx

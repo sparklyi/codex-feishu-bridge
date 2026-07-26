@@ -165,6 +165,44 @@ projects:
 	}
 }
 
+func TestFeishuProxyURL(t *testing.T) {
+	cases := []struct {
+		name    string
+		rawURL  string
+		wantURL string
+		wantErr bool
+	}{
+		{name: "direct by default"},
+		{name: "http proxy", rawURL: "http://127.0.0.1:7890", wantURL: "http://127.0.0.1:7890"},
+		{name: "missing scheme", rawURL: "proxy.example.test:7890", wantErr: true},
+		{name: "https proxy", rawURL: "https://proxy.example.test:8443", wantErr: true},
+		{name: "unsupported scheme", rawURL: "socks5://127.0.0.1:1080", wantErr: true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			proxyURL, err := (FeishuConfig{ProxyURL: tc.rawURL}).Proxy()
+			if tc.wantErr {
+				if err == nil {
+					t.Fatal("expected proxy URL error")
+				}
+				return
+			}
+			if err != nil {
+				t.Fatal(err)
+			}
+			if tc.wantURL == "" {
+				if proxyURL != nil {
+					t.Fatalf("proxy URL = %q, want nil", proxyURL)
+				}
+				return
+			}
+			if proxyURL == nil || proxyURL.String() != tc.wantURL {
+				t.Fatalf("proxy URL = %v, want %q", proxyURL, tc.wantURL)
+			}
+		})
+	}
+}
+
 func TestProjectAliasesSorted(t *testing.T) {
 	cfg := Config{Projects: map[string]ProjectConfig{
 		"frontend": {CWD: "/repo/frontend"},

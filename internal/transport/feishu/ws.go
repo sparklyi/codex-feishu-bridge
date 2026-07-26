@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"log/slog"
+	"net/url"
 	"sync"
 	"time"
 
@@ -44,7 +45,7 @@ type sourceEvent struct {
 	err error
 }
 
-func NewSDKEventSource(appID, appSecret, verificationToken string) *SDKEventSource {
+func NewSDKEventSource(appID, appSecret, verificationToken string, proxyURL *url.URL) *SDKEventSource {
 	source := &SDKEventSource{
 		events:      make(chan sourceEvent, 64),
 		cardActions: make(chan sourceEvent, 64),
@@ -63,7 +64,7 @@ func NewSDKEventSource(appID, appSecret, verificationToken string) *SDKEventSour
 		slog.Info("Feishu card action received")
 		return cardActionResponse("success", "操作已收到。"), nil
 	})
-	source.client = newFeishuWSClient(appID, appSecret, eventDispatcher)
+	source.client = newFeishuWSClient(appID, appSecret, eventDispatcher, proxyURL)
 	return source
 }
 

@@ -6,6 +6,7 @@ import (
 	"errors"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"strings"
 	"testing"
 	"time"
@@ -34,7 +35,7 @@ func TestFeishuWSClientBootstrapReadsEndpoint(t *testing.T) {
 	}))
 	defer server.Close()
 
-	client := newFeishuWSClient("cli_test", "secret", nil)
+	client := newFeishuWSClient("cli_test", "secret", nil, nil)
 	client.httpClient = server.Client()
 	client.endpointURL = server.URL + "/callback/ws/endpoint"
 	endpoint, serviceID, heartbeatInterval, err := client.bootstrap(context.Background())
@@ -44,25 +45,86 @@ func TestFeishuWSClientBootstrapReadsEndpoint(t *testing.T) {
 	if endpoint != "wss://example.test/ws?service_id=73" || serviceID != 73 {
 		t.Fatalf("unexpected endpoint result: endpoint=%q service_id=%d", endpoint, serviceID)
 	}
-	if heartbeatInterval != 45*time.Second {
-		t.Fatalf("heartbeat interval = %s, want %s", heartbeatInterval, 45*time.Second)
+	if heartbeatInterval != 22500*time.Millisecond {
+		t.Fatalf("heartbeat interval = %s, want %s", heartbeatInterval, 22500*time.Millisecond)
 	}
 	if received.AppID != "cli_test" || received.AppSecret != "secret" || received.ClientAssertion != "" {
 		t.Fatalf("unexpected bootstrap request: %+v", received)
 	}
 }
 
-func TestFeishuTransportsBypassProxyEnvironment(t *testing.T) {
-	httpClient := newFeishuHTTPClient(time.Second)
+func TestFeishuHeartbeatUsesSafeInterval(t *testing.T) {
+	cases := []struct {
+		name   string
+		config *larkws.ClientConfig
+		want   time.Duration
+	}{
+		{name: "default", want: 30 * time.Second},
+		{name: "short server interval", config: &larkws.ClientConfig{PingInterval: 10}, want: 5 * time.Second},
+		{name: "long server interval", config: &larkws.ClientConfig{PingInterval: 120}, want: 30 * time.Second},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := heartbeatFromConfig(tc.config); got != tc.want {
+				t.Fatalf("heartbeat interval = %s, want %s", got, tc.want)
+			}
+		})
+	}
+}
+
+func TestFeishuWSClientAppliesPongHeartbeatConfig(t *testing.T) {
+	client := newFeishuWSClient("cli_test", "secret", nil, nil)
+	headers := larkws.Headers{}
+	headers.Add(larkws.HeaderType, string(larkws.MessageTypePong))
+	payload, err := json.Marshal(larkws.ClientConfig{PingInterval: 120})
+	if err != nil {
+		t.Fatal(err)
+	}
+	client.handleControlFrame(larkws.Frame{Method: int32(larkws.FrameTypeControl), Headers: []larkws.Header(headers), Payload: payload})
+	if got := client.currentHeartbeatInterval(); got != 30*time.Second {
+		t.Fatalf("heartbeat interval = %s, want %s", got, 30*time.Second)
+	}
+}
+
+func TestFeishuTransportsUseConfiguredProxy(t *testing.T) {
+	proxyURL, err := url.Parse("http://proxy.example.test:7890")
+	if err != nil {
+		t.Fatal(err)
+	}
+	restClient := newFeishuHTTPClient(time.Second, proxyURL)
+	restTransport, ok := restClient.Transport.(*http.Transport)
+	if !ok {
+		t.Fatalf("transport type = %T, want *http.Transport", restClient.Transport)
+	}
+	if restTransport.Proxy == nil {
+		t.Fatal("Feishu REST client must use the configured proxy")
+	}
+	req, err := http.NewRequest(http.MethodGet, "https://open.feishu.cn", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	selected, err := restTransport.Proxy(req)
+	if err != nil || selected == nil || selected.String() != proxyURL.String() {
+		t.Fatalf("REST proxy = %v, %v; want %s", selected, err, proxyURL)
+	}
+	if dialer := newFeishuWebSocketDialer(proxyURL); dialer.Proxy == nil {
+		t.Fatal("Feishu WebSocket dialer must use the configured proxy")
+	} else if selected, err := dialer.Proxy(req); err != nil || selected == nil || selected.String() != proxyURL.String() {
+		t.Fatalf("WebSocket proxy = %v, %v; want %s", selected, err, proxyURL)
+	}
+}
+
+func TestFeishuTransportsDefaultDirect(t *testing.T) {
+	httpClient := newFeishuHTTPClient(time.Second, nil)
 	transport, ok := httpClient.Transport.(*http.Transport)
 	if !ok {
 		t.Fatalf("transport type = %T, want *http.Transport", httpClient.Transport)
 	}
 	if transport.Proxy != nil {
-		t.Fatal("Feishu HTTP client must not use an environment proxy")
+		t.Fatal("Feishu HTTP client must directly connect by default")
 	}
-	if dialer := newFeishuWebSocketDialer(); dialer.Proxy != nil {
-		t.Fatal("Feishu WebSocket dialer must not use an environment proxy")
+	if dialer := newFeishuWebSocketDialer(nil); dialer.Proxy != nil {
+		t.Fatal("Feishu WebSocket dialer must directly connect by default")
 	}
 }
 
@@ -195,7 +257,7 @@ func TestFeishuWSClientDispatchesEventAndReplies(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	source := NewSDKEventSource("cli_test", "secret", "")
+	source := NewSDKEventSource("cli_test", "secret", "", nil)
 	source.client.heartbeatInterval = time.Hour
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -294,7 +356,7 @@ func TestFeishuWSClientAcknowledgesCardActions(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	source := NewSDKEventSource("cli_test", "secret", "")
+	source := NewSDKEventSource("cli_test", "secret", "", nil)
 	source.client.heartbeatInterval = time.Hour
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()

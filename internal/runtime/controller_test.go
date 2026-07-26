@@ -3,6 +3,7 @@ package runtime
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"strings"
 	"sync"
 	"testing"
@@ -97,6 +98,100 @@ func TestControllerCoalescesSlowProgressCardUpdates(t *testing.T) {
 	time.Sleep(progressUpdateInterval + 50*time.Millisecond)
 	if count := notes.progressCount(); count != 2 {
 		t.Fatalf("stale progress updates should not queue, got %d", count)
+	}
+}
+
+func TestControllerRetriesTransientProgressPatch(t *testing.T) {
+	ctx := context.Background()
+	st, task, run := newQueuedTask(t, ctx)
+	defer st.Close()
+	api := newFakeAPI()
+	notes := &transientProgressNotifier{needle: "retry-this-progress"}
+	controller := New(ControllerOptions{AppServer: api, Store: st, Notifier: notes})
+	defer controller.Close()
+
+	if err := controller.Enqueue(ctx, StartInput{Task: task, Run: run, Project: config.ResolvedProject{CWD: task.CWD}, CardMessageID: "card", DedupKey: "new"}); err != nil {
+		t.Fatal(err)
+	}
+	waitFor(t, api.startedTurn)
+	waitUntil(t, func() bool { return controller.activeFor("thread-1", "turn-1") != nil })
+	api.events <- appserver.Event{Method: "item/agentMessage/delta", Params: json.RawMessage(`{"threadId":"thread-1","turnId":"turn-1","itemId":"item-1","delta":"retry-this-progress"}`)}
+
+	waitUntil(t, func() bool { return notes.matchCount() == 2 })
+	for _, update := range notes.matchingUpdates() {
+		if update.UpdateMessageID != "card" {
+			t.Fatalf("retry must patch the original card: %+v", update)
+		}
+	}
+}
+
+func TestControllerKeepsOriginalTerminalCardForTransientPatchFailure(t *testing.T) {
+	ctx := context.Background()
+	st, task, run := newQueuedTask(t, ctx)
+	defer st.Close()
+	api := newFakeAPI()
+	notes := &terminalPatchNotifier{patchErr: temporaryNotifierError{}, patchFailures: 1}
+	controller := New(ControllerOptions{AppServer: api, Store: st, Notifier: notes, TerminalRetryDelay: time.Millisecond})
+	defer controller.Close()
+
+	if err := controller.Enqueue(ctx, StartInput{Task: task, Run: run, Project: config.ResolvedProject{CWD: task.CWD}, CardMessageID: "card", DedupKey: "new"}); err != nil {
+		t.Fatal(err)
+	}
+	waitFor(t, api.startedTurn)
+	waitUntil(t, func() bool { return controller.activeFor("thread-1", "turn-1") != nil })
+	api.events <- appserver.Event{Method: "turn/completed", Params: json.RawMessage(`{"threadId":"thread-1","turn":{"id":"turn-1","status":"completed"}}`)}
+
+	waitUntil(t, func() bool { return notes.successCount() == 2 })
+	updates := notes.successUpdates()
+	if len(updates) != 2 || updates[0].UpdateMessageID != "card" || updates[1].UpdateMessageID != "card" {
+		t.Fatalf("transient terminal failure should keep the original card: %+v", updates)
+	}
+}
+
+func TestControllerCreatesFallbackAfterTransientTerminalPatchRetriesAreExhausted(t *testing.T) {
+	ctx := context.Background()
+	st, task, run := newQueuedTask(t, ctx)
+	defer st.Close()
+	api := newFakeAPI()
+	notes := &terminalPatchNotifier{patchErr: temporaryNotifierError{}, patchFailures: terminalRetryAttempts + 1}
+	controller := New(ControllerOptions{AppServer: api, Store: st, Notifier: notes, TerminalRetryDelay: time.Millisecond})
+	defer controller.Close()
+
+	if err := controller.Enqueue(ctx, StartInput{Task: task, Run: run, Project: config.ResolvedProject{CWD: task.CWD}, CardMessageID: "card", DedupKey: "new"}); err != nil {
+		t.Fatal(err)
+	}
+	waitFor(t, api.startedTurn)
+	waitUntil(t, func() bool { return controller.activeFor("thread-1", "turn-1") != nil })
+	api.events <- appserver.Event{Method: "turn/completed", Params: json.RawMessage(`{"threadId":"thread-1","turn":{"id":"turn-1","status":"completed"}}`)}
+
+	wantCalls := terminalRetryAttempts + 2 // Initial patch, retries, then the fallback card.
+	waitUntil(t, func() bool { return notes.successCount() == wantCalls })
+	updates := notes.successUpdates()
+	if updates[wantCalls-1].UpdateMessageID != "" {
+		t.Fatalf("exhausted transient retries should create one fallback card: %+v", updates)
+	}
+}
+
+func TestControllerCreatesFallbackForPermanentTerminalPatchFailure(t *testing.T) {
+	ctx := context.Background()
+	st, task, run := newQueuedTask(t, ctx)
+	defer st.Close()
+	api := newFakeAPI()
+	notes := &terminalPatchNotifier{patchErr: errors.New("message cannot be updated"), patchFailures: 1}
+	controller := New(ControllerOptions{AppServer: api, Store: st, Notifier: notes})
+	defer controller.Close()
+
+	if err := controller.Enqueue(ctx, StartInput{Task: task, Run: run, Project: config.ResolvedProject{CWD: task.CWD}, CardMessageID: "card", DedupKey: "new"}); err != nil {
+		t.Fatal(err)
+	}
+	waitFor(t, api.startedTurn)
+	waitUntil(t, func() bool { return controller.activeFor("thread-1", "turn-1") != nil })
+	api.events <- appserver.Event{Method: "turn/completed", Params: json.RawMessage(`{"threadId":"thread-1","turn":{"id":"turn-1","status":"completed"}}`)}
+
+	waitUntil(t, func() bool { return notes.successCount() == 2 })
+	updates := notes.successUpdates()
+	if len(updates) != 2 || updates[0].UpdateMessageID != "card" || updates[1].UpdateMessageID != "" {
+		t.Fatalf("permanent terminal failure should create one fallback card: %+v", updates)
 	}
 }
 
@@ -371,6 +466,90 @@ type fakeNotifier struct {
 	mu    sync.Mutex
 	calls []string
 }
+
+type transientProgressNotifier struct {
+	mu      sync.Mutex
+	needle  string
+	failed  bool
+	matched []notifier.TaskCardInput
+}
+
+func (n *transientProgressNotifier) Progress(_ context.Context, input notifier.TaskCardInput) (contracts.SentMessage, error) {
+	n.mu.Lock()
+	defer n.mu.Unlock()
+	if strings.Contains(input.Body, n.needle) {
+		n.matched = append(n.matched, input)
+		if !n.failed {
+			n.failed = true
+			return contracts.SentMessage{}, temporaryNotifierError{}
+		}
+	}
+	return contracts.SentMessage{MessageID: "card"}, nil
+}
+
+func (n *transientProgressNotifier) Success(context.Context, notifier.TaskCardInput) (contracts.SentMessage, error) {
+	return contracts.SentMessage{MessageID: "card"}, nil
+}
+
+func (n *transientProgressNotifier) Failure(context.Context, notifier.TaskCardInput) (contracts.SentMessage, error) {
+	return contracts.SentMessage{MessageID: "card"}, nil
+}
+
+func (n *transientProgressNotifier) matchCount() int {
+	n.mu.Lock()
+	defer n.mu.Unlock()
+	return len(n.matched)
+}
+
+func (n *transientProgressNotifier) matchingUpdates() []notifier.TaskCardInput {
+	n.mu.Lock()
+	defer n.mu.Unlock()
+	return append([]notifier.TaskCardInput(nil), n.matched...)
+}
+
+type terminalPatchNotifier struct {
+	mu            sync.Mutex
+	patchErr      error
+	patchFailures int
+	success       []notifier.TaskCardInput
+}
+
+func (n *terminalPatchNotifier) Progress(context.Context, notifier.TaskCardInput) (contracts.SentMessage, error) {
+	return contracts.SentMessage{MessageID: "card"}, nil
+}
+
+func (n *terminalPatchNotifier) Success(_ context.Context, input notifier.TaskCardInput) (contracts.SentMessage, error) {
+	n.mu.Lock()
+	defer n.mu.Unlock()
+	n.success = append(n.success, input)
+	if input.UpdateMessageID != "" && n.patchFailures > 0 {
+		n.patchFailures--
+		return contracts.SentMessage{}, n.patchErr
+	}
+	return contracts.SentMessage{MessageID: "result-card"}, nil
+}
+
+func (n *terminalPatchNotifier) Failure(context.Context, notifier.TaskCardInput) (contracts.SentMessage, error) {
+	return contracts.SentMessage{MessageID: "card"}, nil
+}
+
+func (n *terminalPatchNotifier) successCount() int {
+	n.mu.Lock()
+	defer n.mu.Unlock()
+	return len(n.success)
+}
+
+func (n *terminalPatchNotifier) successUpdates() []notifier.TaskCardInput {
+	n.mu.Lock()
+	defer n.mu.Unlock()
+	return append([]notifier.TaskCardInput(nil), n.success...)
+}
+
+type temporaryNotifierError struct{}
+
+func (temporaryNotifierError) Error() string   { return "temporary timeout" }
+func (temporaryNotifierError) Timeout() bool   { return true }
+func (temporaryNotifierError) Temporary() bool { return true }
 
 type blockingProgressNotifier struct {
 	mu            sync.Mutex

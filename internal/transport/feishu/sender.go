@@ -5,16 +5,20 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"io"
-	"net"
+	"net/url"
 	"time"
 
 	lark "github.com/larksuite/oapi-sdk-go/v3"
 	larkim "github.com/larksuite/oapi-sdk-go/v3/service/im/v1"
 	"github.com/sparklyi/codex-feishu-bridge/internal/contracts"
+	"github.com/sparklyi/codex-feishu-bridge/internal/transport"
 )
 
-var ErrRateLimited = errors.New("feishu rate limited")
+// ErrRateLimited is retained for callers of the Feishu transport. It is the
+// shared transport sentinel so runtime delivery retries classify it correctly.
+var ErrRateLimited = transport.ErrRateLimited
+
+const defaultDeliveryAttemptTimeout = 5 * time.Second
 
 type CardAPI interface {
 	SendCard(ctx context.Context, chatID, replyToMessageID string, cardJSON []byte) (messageID string, retryAfter time.Duration, err error)
@@ -22,11 +26,12 @@ type CardAPI interface {
 }
 
 type Sender struct {
-	AppID      string
-	AppSecret  string
-	API        CardAPI
-	MaxRetries int
-	Sleep      func(context.Context, time.Duration) error
+	AppID          string
+	AppSecret      string
+	API            CardAPI
+	MaxRetries     int
+	AttemptTimeout time.Duration
+	Sleep          func(context.Context, time.Duration) error
 }
 
 func NewSenderFromEnv(appID, secretEnv string, getenv func(string) string, api CardAPI) (*Sender, error) {
@@ -40,8 +45,8 @@ func NewSenderFromEnv(appID, secretEnv string, getenv func(string) string, api C
 	return &Sender{AppID: appID, AppSecret: secret, API: api}, nil
 }
 
-func NewSDKCardAPI(appID, appSecret string) *SDKCardAPI {
-	return &SDKCardAPI{client: lark.NewClient(appID, appSecret, lark.WithHttpClient(newFeishuHTTPClient(feishuHTTPTimeout)))}
+func NewSDKCardAPI(appID, appSecret string, proxyURL *url.URL) *SDKCardAPI {
+	return &SDKCardAPI{client: lark.NewClient(appID, appSecret, lark.WithHttpClient(newFeishuHTTPClient(feishuHTTPTimeout, proxyURL)))}
 }
 
 type SDKCardAPI struct {
@@ -64,7 +69,7 @@ func (api *SDKCardAPI) SendCard(ctx context.Context, chatID, replyToMessageID st
 			return "", 0, err
 		}
 		if !resp.Success() {
-			return "", 0, fmt.Errorf("feishu reply failed: code=%d msg=%s", resp.Code, resp.Msg)
+			return "", 0, feishuResponseError("reply", resp.Code, resp.Msg)
 		}
 		if resp.Data == nil || resp.Data.MessageId == nil {
 			return "", 0, nil
@@ -85,7 +90,7 @@ func (api *SDKCardAPI) SendCard(ctx context.Context, chatID, replyToMessageID st
 		return "", 0, err
 	}
 	if !resp.Success() {
-		return "", 0, fmt.Errorf("feishu send failed: code=%d msg=%s", resp.Code, resp.Msg)
+		return "", 0, feishuResponseError("send", resp.Code, resp.Msg)
 	}
 	if resp.Data == nil || resp.Data.MessageId == nil {
 		return "", 0, nil
@@ -106,7 +111,7 @@ func (api *SDKCardAPI) PatchCard(ctx context.Context, messageID string, cardJSON
 		return 0, err
 	}
 	if !resp.Success() {
-		return 0, fmt.Errorf("feishu patch failed: code=%d msg=%s", resp.Code, resp.Msg)
+		return 0, feishuResponseError("patch", resp.Code, resp.Msg)
 	}
 	return 0, nil
 }
@@ -131,7 +136,9 @@ func (s *Sender) Send(ctx context.Context, msg contracts.OutboundMessage) (contr
 	}
 	var lastErr error
 	for attempt := 0; attempt <= maxRetries; attempt++ {
-		messageID, retryAfter, err := s.API.SendCard(ctx, msg.ChatID, msg.ReplyToMessageID, card)
+		attemptCtx, cancel := s.attemptContext(ctx)
+		messageID, retryAfter, err := s.API.SendCard(attemptCtx, msg.ChatID, msg.ReplyToMessageID, card)
+		cancel()
 		if err == nil {
 			if messageID == "" {
 				return contracts.SentMessage{}, errors.New("Feishu send returned empty message id")
@@ -159,7 +166,9 @@ func (s *Sender) patchWithRetry(ctx context.Context, messageID string, card []by
 	}
 	var lastErr error
 	for attempt := 0; attempt <= maxRetries; attempt++ {
-		retryAfter, err := s.API.PatchCard(ctx, messageID, card)
+		attemptCtx, cancel := s.attemptContext(ctx)
+		retryAfter, err := s.API.PatchCard(attemptCtx, messageID, card)
+		cancel()
 		if err == nil {
 			return nil
 		}
@@ -178,11 +187,26 @@ func (s *Sender) patchWithRetry(ctx context.Context, messageID string, card []by
 }
 
 func shouldRetrySendError(err error) bool {
-	if errors.Is(err, ErrRateLimited) || errors.Is(err, io.EOF) || errors.Is(err, io.ErrUnexpectedEOF) || errors.Is(err, net.ErrClosed) {
-		return true
+	return errors.Is(err, ErrRateLimited) || transport.IsTransientError(err)
+}
+
+func feishuResponseError(operation string, code int, message string) error {
+	if isRateLimitedCode(code) {
+		return fmt.Errorf("%w: Feishu %s failed: code=%d msg=%s", ErrRateLimited, operation, code, message)
 	}
-	var netErr net.Error
-	return errors.As(err, &netErr) && (netErr.Timeout() || netErr.Temporary())
+	return fmt.Errorf("Feishu %s failed: code=%d msg=%s", operation, code, message)
+}
+
+func isRateLimitedCode(code int) bool {
+	return code == 99991400 || code == 99991401 || code == 230002
+}
+
+func (s *Sender) attemptContext(ctx context.Context) (context.Context, context.CancelFunc) {
+	timeout := s.AttemptTimeout
+	if timeout <= 0 {
+		timeout = defaultDeliveryAttemptTimeout
+	}
+	return context.WithTimeout(ctx, timeout)
 }
 
 func BuildInteractiveCard(msg contracts.OutboundMessage) ([]byte, error) {

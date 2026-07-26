@@ -68,6 +68,19 @@ func TestProjectAndErrorCards(t *testing.T) {
 	}
 }
 
+func TestDefaultTaskCardShowsWorkspaceName(t *testing.T) {
+	sender := &fakeSender{ids: []string{"message-1"}}
+	n := New(sender)
+	if _, err := n.Start(context.Background(), TaskCardInput{
+		ChatID: "chat", TaskID: "task-1", Status: "queued", CWDLabel: "/Users/alice/GoProject/codex-feishu-bridge",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if got := fieldValue(sender.messages[0], "项目"); got != "codex-feishu-bridge" {
+		t.Fatalf("default task card project = %q", got)
+	}
+}
+
 type fakeSender struct {
 	ids      []string
 	messages []contracts.OutboundMessage
@@ -102,6 +115,15 @@ func hasOptionAction(message contracts.OutboundMessage, id string) bool {
 		}
 	}
 	return false
+}
+
+func fieldValue(message contracts.OutboundMessage, title string) string {
+	for _, field := range message.Fields {
+		if field.Title == title {
+			return field.Value
+		}
+	}
+	return ""
 }
 
 func optionActionValue(message contracts.OutboundMessage, id, key string) string {

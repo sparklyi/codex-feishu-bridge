@@ -131,6 +131,90 @@ func TestProjectAliasForCWDAndAliases(t *testing.T) {
 	}
 }
 
+func TestLoadFeishuBotOpenID(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.yaml")
+	err := os.WriteFile(path, []byte(`
+feishu:
+  app_id: cli_test
+  app_secret_env: FEISHU_APP_SECRET
+  bot_open_id: ou_bot
+workspace:
+  default: /repo/default
+projects:
+  backend:
+    cwd: /repo/backend
+`), 0o600)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := Load(path, func(key string) string {
+		if key == "HOME" {
+			return dir
+		}
+		if key == "FEISHU_APP_SECRET" {
+			return "secret"
+		}
+		return ""
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.Feishu.BotOpenID != "ou_bot" {
+		t.Fatalf("bot open id = %q", cfg.Feishu.BotOpenID)
+	}
+}
+
+func TestFeishuProxyURL(t *testing.T) {
+	cases := []struct {
+		name    string
+		rawURL  string
+		wantURL string
+		wantErr bool
+	}{
+		{name: "direct by default"},
+		{name: "http proxy", rawURL: "http://127.0.0.1:7890", wantURL: "http://127.0.0.1:7890"},
+		{name: "missing scheme", rawURL: "proxy.example.test:7890", wantErr: true},
+		{name: "https proxy", rawURL: "https://proxy.example.test:8443", wantErr: true},
+		{name: "unsupported scheme", rawURL: "socks5://127.0.0.1:1080", wantErr: true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			proxyURL, err := (FeishuConfig{ProxyURL: tc.rawURL}).Proxy()
+			if tc.wantErr {
+				if err == nil {
+					t.Fatal("expected proxy URL error")
+				}
+				return
+			}
+			if err != nil {
+				t.Fatal(err)
+			}
+			if tc.wantURL == "" {
+				if proxyURL != nil {
+					t.Fatalf("proxy URL = %q, want nil", proxyURL)
+				}
+				return
+			}
+			if proxyURL == nil || proxyURL.String() != tc.wantURL {
+				t.Fatalf("proxy URL = %v, want %q", proxyURL, tc.wantURL)
+			}
+		})
+	}
+}
+
+func TestProjectAliasesSorted(t *testing.T) {
+	cfg := Config{Projects: map[string]ProjectConfig{
+		"frontend": {CWD: "/repo/frontend"},
+		"backend":  {CWD: "/repo/backend"},
+	}}
+	got := cfg.ProjectAliases()
+	want := []string{"backend", "frontend"}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("ProjectAliases() = %v, want %v", got, want)
+	}
+}
+
 func TestValidateReportsMissingRequiredValues(t *testing.T) {
 	diags := (Config{}).Validate(func(string) string { return "" }, func(string) error { return os.ErrNotExist })
 	for _, code := range []string{"feishu.app_id", "feishu.app_secret", "workspace.default"} {

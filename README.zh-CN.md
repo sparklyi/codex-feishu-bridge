@@ -62,6 +62,8 @@ codex-feishu-bridge tasks show [--config path] <task_id>
 
 示例配置见 [config.example.yaml](config.example.yaml)。飞书 app secret 不应写入配置文件，建议通过 `FEISHU_APP_SECRET` 等环境变量注入。
 
+网络需要代理时，在 `feishu.proxy_url` 填写 `http://` 代理地址；不配置时飞书 REST 与 WebSocket 均直连。桥接会忽略环境代理变量。
+
 ## 安全模型
 
 只有 `security.allowed_open_ids` 中的飞书用户可以使用桥接服务。未授权用户在私聊中会收到拒绝提示，在群聊中会被静默忽略。继续任务和停止任务都必须由任务创建者本人触发。

@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/sparklyi/codex-feishu-bridge/internal/contracts"
+	"github.com/sparklyi/codex-feishu-bridge/internal/transport"
 )
 
 func TestBuildInteractiveCardUsesCardJSONV2(t *testing.T) {
@@ -244,6 +245,33 @@ func callbackValue(t *testing.T, button map[string]any, card []byte) map[string]
 	return nil
 }
 
+func TestBuildInteractiveCardWithActionValues(t *testing.T) {
+	card, err := BuildInteractiveCard(contracts.OutboundMessage{
+		CardKind:     contracts.CardProjectSelection,
+		Title:        "Choose project",
+		BodyMarkdown: "Select a project.",
+		Fields:       []contracts.Field{{Title: "Prompt", Value: "fix tests"}},
+		Actions: []contracts.Action{
+			{ID: "project_select", Label: "backend", Value: map[string]string{"action": "select_project", "project": "backend", "pending_id": "pi_1"}},
+			{ID: "project_select", Label: "frontend", Value: map[string]string{"action": "select_project", "project": "frontend", "pending_id": "pi_1"}},
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var decoded map[string]any
+	if err := json.Unmarshal(card, &decoded); err != nil {
+		t.Fatalf("invalid card json: %v", err)
+	}
+	if !jsonContains(string(card), "select_project") || !jsonContains(string(card), "backend") || !jsonContains(string(card), "Prompt") {
+		t.Fatalf("card missing action values or fields: %s", string(card))
+	}
+	header := decoded["header"].(map[string]any)
+	if header["template"] == nil {
+		t.Fatalf("missing header template: %s", string(card))
+	}
+}
+
 func TestSenderRateLimitRetryAndMessageID(t *testing.T) {
 	api := &fakeCardAPI{
 		results: []sendResult{
@@ -295,6 +323,16 @@ func TestSenderRetriesUnexpectedEOF(t *testing.T) {
 	}
 }
 
+func TestRateLimitedResponsesAreTransient(t *testing.T) {
+	err := feishuResponseError("patch", 99991400, "too frequent")
+	if !errors.Is(err, ErrRateLimited) || !transport.IsTransientError(err) {
+		t.Fatalf("rate-limited response must be transient: %v", err)
+	}
+	if isRateLimitedCode(12345) {
+		t.Fatal("unexpected rate-limited code")
+	}
+}
+
 func TestSenderPatchesUpdateTarget(t *testing.T) {
 	api := &fakeCardAPI{}
 	s := &Sender{API: api, MaxRetries: 1, Sleep: func(ctx context.Context, d time.Duration) error { return nil }}
@@ -313,6 +351,36 @@ func TestSenderPatchesUpdateTarget(t *testing.T) {
 	}
 	if api.calls != 0 || api.patchCalls != 1 || api.lastPatchMessageID != "msg_original" {
 		t.Fatalf("expected patch without create/reply, calls=%d patchCalls=%d lastPatch=%q", api.calls, api.patchCalls, api.lastPatchMessageID)
+	}
+}
+
+func TestSenderUsesFreshAttemptContextsForPatchRetry(t *testing.T) {
+	api := &contextTrackingCardAPI{}
+	s := &Sender{
+		API:            api,
+		MaxRetries:     1,
+		AttemptTimeout: time.Second,
+		Sleep:          func(context.Context, time.Duration) error { return nil },
+	}
+	if _, err := s.Send(context.Background(), contracts.OutboundMessage{
+		UpdateMessageID: "msg_original",
+		CardKind:        contracts.CardStart,
+		TaskID:          "cx",
+		Title:           "title",
+		BodyMarkdown:    "body",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if len(api.contexts) != 2 {
+		t.Fatalf("patch attempts = %d, want 2", len(api.contexts))
+	}
+	if api.contexts[0] == api.contexts[1] {
+		t.Fatal("patch retries must receive fresh contexts")
+	}
+	for _, attemptCtx := range api.contexts {
+		if _, ok := attemptCtx.Deadline(); !ok {
+			t.Fatal("patch attempt is missing a timeout")
+		}
 	}
 }
 
@@ -360,6 +428,22 @@ type temporarySendError struct{}
 func (temporarySendError) Error() string   { return "temporary timeout" }
 func (temporarySendError) Timeout() bool   { return true }
 func (temporarySendError) Temporary() bool { return true }
+
+type contextTrackingCardAPI struct {
+	contexts []context.Context
+}
+
+func (f *contextTrackingCardAPI) SendCard(context.Context, string, string, []byte) (string, time.Duration, error) {
+	return "", 0, errors.New("unexpected send")
+}
+
+func (f *contextTrackingCardAPI) PatchCard(ctx context.Context, _ string, _ []byte) (time.Duration, error) {
+	f.contexts = append(f.contexts, ctx)
+	if len(f.contexts) == 1 {
+		return 0, temporarySendError{}
+	}
+	return 0, nil
+}
 
 func (f *fakeCardAPI) SendCard(ctx context.Context, chatID, replyToMessageID string, cardJSON []byte) (string, time.Duration, error) {
 	f.calls++

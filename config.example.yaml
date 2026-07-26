@@ -3,6 +3,9 @@ feishu:
   app_secret_env: FEISHU_APP_SECRET
   bot_open_id: ou_bot_xxx
   connection: websocket
+  # Optional. All Feishu REST and WebSocket connections use this HTTP proxy.
+  # Leave unset for direct connections.
+  # proxy_url: http://127.0.0.1:7890
 security:
   allowed_open_ids:
     - ou_xxx

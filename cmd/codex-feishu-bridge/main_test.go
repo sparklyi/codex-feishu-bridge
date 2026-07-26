@@ -9,6 +9,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/sparklyi/codex-feishu-bridge/internal/app"
 	"github.com/sparklyi/codex-feishu-bridge/internal/store"
 )
 
@@ -94,5 +95,15 @@ paths:
 	code = runWithIO(ctx, []string{"tasks", "show", "--config", configPath, "cx_123"}, &stdout, &stderr)
 	if code != 0 || !strings.Contains(stdout.String(), "status succeeded") {
 		t.Fatalf("show failed code=%d stdout=%q stderr=%q", code, stdout.String(), stderr.String())
+	}
+}
+
+func TestRestartRequestUsesSupervisorExitCode(t *testing.T) {
+	var stderr bytes.Buffer
+	if got := serveExitCode(app.ErrRestartRequested, &stderr); got != restartExitCode {
+		t.Fatalf("exit code = %d, want %d", got, restartExitCode)
+	}
+	if stderr.Len() != 0 {
+		t.Fatalf("restart should not be reported as an error: %q", stderr.String())
 	}
 }

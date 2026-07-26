@@ -5,6 +5,7 @@ After=network-online.target
 [Service]
 Type=simple
 Environment=FEISHU_APP_SECRET=change-me
+Environment=CODEX_FEISHU_BRIDGE_SUPERVISED=1
 ExecStart=/usr/local/bin/codex-feishu-bridge serve --config /home/example/.codex-feishu-bridge/config.yaml
 Restart=always
 RestartSec=5

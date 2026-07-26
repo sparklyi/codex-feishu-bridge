@@ -14,6 +14,8 @@ import (
 	"github.com/sparklyi/codex-feishu-bridge/internal/doctor"
 )
 
+const restartExitCode = 75
+
 func main() {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
@@ -64,17 +66,24 @@ func runWithIO(ctx context.Context, args []string, stdout, stderr io.Writer) int
 		if err := fs.Parse(args[1:]); err != nil {
 			return 2
 		}
-		if err := app.Serve(ctx, app.ServeOptions{ConfigPath: *configPath}); err != nil && !errors.Is(err, context.Canceled) {
-			_, _ = fmt.Fprintln(stderr, err)
-			return 1
-		}
-		return 0
+		return serveExitCode(app.Serve(ctx, app.ServeOptions{ConfigPath: *configPath}), stderr)
 	case "tasks":
 		return runTasks(ctx, args[1:], stdout, stderr)
 	default:
 		_, _ = fmt.Fprintf(stderr, "unknown command %q\n", args[0])
 		return 2
 	}
+}
+
+func serveExitCode(err error, stderr io.Writer) int {
+	if errors.Is(err, app.ErrRestartRequested) {
+		return restartExitCode
+	}
+	if err == nil || errors.Is(err, context.Canceled) {
+		return 0
+	}
+	_, _ = fmt.Fprintln(stderr, err)
+	return 1
 }
 
 func runTasks(ctx context.Context, args []string, stdout, stderr io.Writer) int {

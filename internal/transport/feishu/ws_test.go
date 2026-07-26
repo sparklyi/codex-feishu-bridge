@@ -125,6 +125,28 @@ func TestSDKEventSourceRejectsFullCardQueueWithoutBlocking(t *testing.T) {
 	}
 }
 
+func TestSDKEventSourceRejectsFullMessageQueueWithoutBlocking(t *testing.T) {
+	source := &SDKEventSource{events: make(chan sourceEvent, 1)}
+	source.events <- sourceEvent{}
+	if source.tryPublishMessage(context.Background(), RawEvent{Kind: RawEventMessage}) {
+		t.Fatal("full message queue should reject the event without blocking")
+	}
+}
+
+func TestSDKEventSourceReturnsBackgroundFailure(t *testing.T) {
+	want := errors.New("websocket stopped")
+	source := &SDKEventSource{
+		events:      make(chan sourceEvent, 1),
+		cardActions: make(chan sourceEvent, 1),
+		failures:    make(chan error, 1),
+	}
+	source.failures <- want
+	_, err := source.Receive(context.Background())
+	if !errors.Is(err, want) {
+		t.Fatalf("receive error = %v, want %v", err, want)
+	}
+}
+
 func TestSDKEventSourceCloseWithoutClient(t *testing.T) {
 	if err := (&SDKEventSource{}).Close(); err != nil {
 		t.Fatalf("close without client: %v", err)

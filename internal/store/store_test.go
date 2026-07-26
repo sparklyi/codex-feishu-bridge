@@ -13,7 +13,7 @@ import (
 func TestFreshSchemaAndTaskLifecycle(t *testing.T) {
 	ctx := context.Background()
 	s := openTestStore(t)
-	defer s.Close()
+	defer func() { _ = s.Close() }()
 	for _, table := range []string{"schema_migrations", "tasks", "runs", "message_routes", "event_dedup", "users"} {
 		if !tableExists(t, s.db, table) {
 			t.Fatalf("missing table %s", table)
@@ -75,7 +75,7 @@ func TestFreshSchemaAndTaskLifecycle(t *testing.T) {
 func TestAttachThreadAndMessageRoutes(t *testing.T) {
 	ctx := context.Background()
 	s := openTestStore(t)
-	defer s.Close()
+	defer func() { _ = s.Close() }()
 	now := time.Now().UTC()
 	task, replay, err := s.AttachThread(ctx, "attach-1", "card_callback", AttachThreadInput{
 		TaskID: "task-attached", ThreadID: "desktop-thread", CWD: "/desktop/repo", CreatedBy: "ou_owner", ChatID: "chat", Now: now,
@@ -106,7 +106,7 @@ func TestAttachThreadAndMessageRoutes(t *testing.T) {
 func TestRecoverRunningMarksTasksTerminal(t *testing.T) {
 	ctx := context.Background()
 	s := openRunningTask(t, ctx)
-	defer s.Close()
+	defer func() { _ = s.Close() }()
 	now := time.Now().UTC()
 	if err := s.RecoverRunning(ctx, now.Add(time.Minute)); err != nil {
 		t.Fatal(err)
@@ -128,7 +128,7 @@ func TestRejectsUnsupportedMultiVersionDatabase(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer db.Close()
+	defer func() { _ = db.Close() }()
 	if tableExists(t, db, "pending_intents") {
 		t.Fatal("legacy database should be rejected before new tables are created")
 	}
@@ -182,7 +182,7 @@ func createUnsupportedMultiVersionDatabase(t *testing.T, path string) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer db.Close()
+	defer func() { _ = db.Close() }()
 	legacy := `
 CREATE TABLE schema_migrations (version INTEGER PRIMARY KEY, applied_at TEXT NOT NULL);
 CREATE TABLE tasks (
@@ -208,7 +208,7 @@ func columnExists(t *testing.T, db *sql.DB, table, column string) bool {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer rows.Close()
+	defer func() { _ = rows.Close() }()
 	for rows.Next() {
 		var cid, notNull, primaryKey int
 		var name, typ string

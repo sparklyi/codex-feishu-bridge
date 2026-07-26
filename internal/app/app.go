@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"log/slog"
 	"os"
 	"path/filepath"
@@ -20,14 +21,21 @@ import (
 	"github.com/sparklyi/codex-feishu-bridge/internal/transport/feishu"
 )
 
-type OpenAppServer func(context.Context, appserver.ProcessOptions) (appserver.API, error)
+// AppServer combines the runtime contract with the lifecycle ownership held by
+// the composition root.
+type AppServer interface {
+	runtime.AppServer
+	io.Closer
+}
+
+type OpenAppServer func(context.Context, appserver.ProcessOptions) (AppServer, error)
 
 type ServeOptions struct {
 	ConfigPath    string
 	Getenv        func(string) string
 	Receiver      transport.Receiver
 	Sender        transport.Sender
-	AppServer     appserver.API
+	AppServer     AppServer
 	OpenAppServer OpenAppServer
 	Now           func() time.Time
 }
@@ -65,7 +73,11 @@ func Serve(ctx context.Context, opts ServeOptions) error {
 	if err != nil {
 		return err
 	}
-	defer st.Close()
+	defer func() {
+		if closeErr := st.Close(); closeErr != nil {
+			slog.Warn("bridge state store close failed", "error", closeErr)
+		}
+	}()
 	if err := st.RefreshUsers(ctx, cfg.Security.AllowedOpenIDs); err != nil {
 		return err
 	}
@@ -101,7 +113,7 @@ func Serve(ctx context.Context, opts ServeOptions) error {
 	if api == nil {
 		open := opts.OpenAppServer
 		if open == nil {
-			open = func(ctx context.Context, processOpts appserver.ProcessOptions) (appserver.API, error) {
+			open = func(ctx context.Context, processOpts appserver.ProcessOptions) (AppServer, error) {
 				return appserver.Open(ctx, processOpts)
 			}
 		}
@@ -110,7 +122,11 @@ func Serve(ctx context.Context, opts ServeOptions) error {
 			return err
 		}
 	}
-	defer api.Close()
+	defer func() {
+		if closeErr := api.Close(); closeErr != nil {
+			slog.Warn("Codex app-server close failed", "error", closeErr)
+		}
+	}()
 
 	notify := notifier.New(sender)
 	controller := runtime.New(runtime.ControllerOptions{
@@ -157,8 +173,15 @@ func ListTasks(ctx context.Context, configPath string, getenv func(string) strin
 	if err != nil {
 		return nil, err
 	}
-	defer st.Close()
-	return st.ListTasks(ctx, limit)
+	tasks, listErr := st.ListTasks(ctx, limit)
+	closeErr := st.Close()
+	if listErr != nil {
+		return nil, listErr
+	}
+	if closeErr != nil {
+		return nil, fmt.Errorf("close state store: %w", closeErr)
+	}
+	return tasks, nil
 }
 
 func ShowTask(ctx context.Context, configPath string, getenv func(string) string, taskID string) (store.Task, []store.Run, error) {
@@ -166,8 +189,15 @@ func ShowTask(ctx context.Context, configPath string, getenv func(string) string
 	if err != nil {
 		return store.Task{}, nil, err
 	}
-	defer st.Close()
-	return st.GetTask(ctx, taskID)
+	task, runs, getErr := st.GetTask(ctx, taskID)
+	closeErr := st.Close()
+	if getErr != nil {
+		return store.Task{}, nil, getErr
+	}
+	if closeErr != nil {
+		return store.Task{}, nil, fmt.Errorf("close state store: %w", closeErr)
+	}
+	return task, runs, nil
 }
 
 func openStoreFromConfig(ctx context.Context, configPath string, getenv func(string) string) (*store.Store, error) {

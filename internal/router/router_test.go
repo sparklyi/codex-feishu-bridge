@@ -17,7 +17,7 @@ import (
 func TestRouterCreatesQueuedTaskAndDispatchesRuntime(t *testing.T) {
 	ctx := context.Background()
 	router, st, controller, notes := newTestRouter(t)
-	defer st.Close()
+	defer func() { _ = st.Close() }()
 	err := router.Handle(ctx, contracts.InboundEvent{Kind: contracts.InboundNewTask, DedupKey: "new", ChatType: "private", ChatID: "chat", SenderOpenID: "ou_owner", MessageID: "input", Text: "fix tests"})
 	if err != nil {
 		t.Fatal(err)
@@ -40,7 +40,7 @@ func TestRouterCreatesQueuedTaskAndDispatchesRuntime(t *testing.T) {
 func TestRouterListsAndAttachesDesktopThread(t *testing.T) {
 	ctx := context.Background()
 	router, st, controller, notes := newTestRouter(t)
-	defer st.Close()
+	defer func() { _ = st.Close() }()
 	controller.threads = []appserver.Thread{{ID: "desktop-1", Name: "Fix login", Preview: "Investigate login", CWD: "/repo/backend", Status: appserver.ThreadStatus{Type: "idle"}}}
 	if err := router.Handle(ctx, contracts.InboundEvent{Kind: contracts.InboundNewTask, DedupKey: "sessions", ChatType: "private", ChatID: "chat", SenderOpenID: "ou_owner", MessageID: "input", Text: "/sessions"}); err != nil {
 		t.Fatal(err)
@@ -67,7 +67,7 @@ func TestRouterListsAndAttachesDesktopThread(t *testing.T) {
 func TestRouterResumesAttachedThreadAndHandlesStop(t *testing.T) {
 	ctx := context.Background()
 	router, st, controller, notes := newTestRouter(t)
-	defer st.Close()
+	defer func() { _ = st.Close() }()
 	now := time.Now().UTC()
 	task, _, err := st.AttachThread(ctx, "attach", "message", store.AttachThreadInput{TaskID: "attached", ThreadID: "desktop-thread", ProjectAlias: "backend", CWD: "/repo/backend", CreatedBy: "ou_owner", ChatID: "chat", Now: now})
 	if err != nil {
@@ -99,7 +99,7 @@ func TestRouterResumesAttachedThreadAndHandlesStop(t *testing.T) {
 func TestRouterRejectsUnauthorizedAndRouteMiss(t *testing.T) {
 	ctx := context.Background()
 	router, st, controller, notes := newTestRouter(t)
-	defer st.Close()
+	defer func() { _ = st.Close() }()
 	if err := router.Handle(ctx, contracts.InboundEvent{Kind: contracts.InboundNewTask, ChatType: "private", ChatID: "chat", SenderOpenID: "ou_bad", MessageID: "input", Text: "x"}); err != nil {
 		t.Fatal(err)
 	}
@@ -117,7 +117,7 @@ func TestRouterRejectsUnauthorizedAndRouteMiss(t *testing.T) {
 func TestRouterIgnoresNonPrivateEventsBeforeAuthorization(t *testing.T) {
 	ctx := context.Background()
 	router, st, controller, notes := newTestRouter(t)
-	defer st.Close()
+	defer func() { _ = st.Close() }()
 	err := router.Handle(ctx, contracts.InboundEvent{
 		Kind:         contracts.InboundNewTask,
 		DedupKey:     "non-private",
@@ -139,6 +139,10 @@ func newTestRouter(t *testing.T) (*Router, *store.Store, *fakeController, *fakeN
 	t.Helper()
 	st, err := store.Open(context.Background(), filepath.Join(t.TempDir(), "state.db"))
 	if err != nil {
+		t.Fatal(err)
+	}
+	if err := st.RefreshUsers(context.Background(), []string{"ou_owner"}); err != nil {
+		_ = st.Close()
 		t.Fatal(err)
 	}
 	controller := &fakeController{}

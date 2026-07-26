@@ -1,24 +1,9 @@
 package appserver
 
 import (
-	"context"
 	"encoding/json"
 	"fmt"
 )
-
-// API is the narrow app-server surface consumed by the bridge runtime. Keeping
-// it here lets production use Client while tests can use a deterministic fake.
-type API interface {
-	ListThreads(ctx context.Context, limit int) ([]Thread, error)
-	StartThread(ctx context.Context, in ThreadStartInput) (Thread, error)
-	ResumeThread(ctx context.Context, in ThreadResumeInput) (Thread, error)
-	StartTurn(ctx context.Context, in TurnStartInput) (Turn, error)
-	Interrupt(ctx context.Context, threadID, turnID string) error
-	Respond(ctx context.Context, id json.RawMessage, result any) error
-	Events() <-chan Event
-	Requests() <-chan ServerRequest
-	Close() error
-}
 
 type Thread struct {
 	ID        string       `json:"id"`

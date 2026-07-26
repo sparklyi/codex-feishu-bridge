@@ -19,7 +19,7 @@ import (
 func TestControllerRunsTurnStreamsResultAndPersistsState(t *testing.T) {
 	ctx := context.Background()
 	st, task, run := newQueuedTask(t, ctx)
-	defer st.Close()
+	defer func() { _ = st.Close() }()
 	api := newFakeAPI()
 	notes := &fakeNotifier{}
 	controller := New(ControllerOptions{AppServer: api, Store: st, Notifier: notes})
@@ -59,7 +59,7 @@ func TestControllerRunsTurnStreamsResultAndPersistsState(t *testing.T) {
 func TestControllerCoalescesSlowProgressCardUpdates(t *testing.T) {
 	ctx := context.Background()
 	st, task, run := newQueuedTask(t, ctx)
-	defer st.Close()
+	defer func() { _ = st.Close() }()
 	api := newFakeAPI()
 	notes := newBlockingProgressNotifier()
 	controller := New(ControllerOptions{AppServer: api, Store: st, Notifier: notes})
@@ -104,7 +104,7 @@ func TestControllerCoalescesSlowProgressCardUpdates(t *testing.T) {
 func TestControllerRetriesTransientProgressPatch(t *testing.T) {
 	ctx := context.Background()
 	st, task, run := newQueuedTask(t, ctx)
-	defer st.Close()
+	defer func() { _ = st.Close() }()
 	api := newFakeAPI()
 	notes := &transientProgressNotifier{needle: "retry-this-progress"}
 	controller := New(ControllerOptions{AppServer: api, Store: st, Notifier: notes})
@@ -128,7 +128,7 @@ func TestControllerRetriesTransientProgressPatch(t *testing.T) {
 func TestControllerKeepsOriginalTerminalCardForTransientPatchFailure(t *testing.T) {
 	ctx := context.Background()
 	st, task, run := newQueuedTask(t, ctx)
-	defer st.Close()
+	defer func() { _ = st.Close() }()
 	api := newFakeAPI()
 	notes := &terminalPatchNotifier{patchErr: temporaryNotifierError{}, patchFailures: 1}
 	controller := New(ControllerOptions{AppServer: api, Store: st, Notifier: notes, TerminalRetryDelay: time.Millisecond})
@@ -151,7 +151,7 @@ func TestControllerKeepsOriginalTerminalCardForTransientPatchFailure(t *testing.
 func TestControllerCreatesFallbackAfterTransientTerminalPatchRetriesAreExhausted(t *testing.T) {
 	ctx := context.Background()
 	st, task, run := newQueuedTask(t, ctx)
-	defer st.Close()
+	defer func() { _ = st.Close() }()
 	api := newFakeAPI()
 	notes := &terminalPatchNotifier{patchErr: temporaryNotifierError{}, patchFailures: terminalRetryAttempts + 1}
 	controller := New(ControllerOptions{AppServer: api, Store: st, Notifier: notes, TerminalRetryDelay: time.Millisecond})
@@ -175,7 +175,7 @@ func TestControllerCreatesFallbackAfterTransientTerminalPatchRetriesAreExhausted
 func TestControllerCreatesFallbackForPermanentTerminalPatchFailure(t *testing.T) {
 	ctx := context.Background()
 	st, task, run := newQueuedTask(t, ctx)
-	defer st.Close()
+	defer func() { _ = st.Close() }()
 	api := newFakeAPI()
 	notes := &terminalPatchNotifier{patchErr: errors.New("message cannot be updated"), patchFailures: 1}
 	controller := New(ControllerOptions{AppServer: api, Store: st, Notifier: notes})
@@ -198,7 +198,7 @@ func TestControllerCreatesFallbackForPermanentTerminalPatchFailure(t *testing.T)
 func TestControllerAutomaticallyApprovesUnattendedRequests(t *testing.T) {
 	ctx := context.Background()
 	st, task, run := newQueuedTask(t, ctx)
-	defer st.Close()
+	defer func() { _ = st.Close() }()
 	api := newFakeAPI()
 	notes := &fakeNotifier{}
 	controller := New(ControllerOptions{AppServer: api, Store: st, Notifier: notes})
@@ -226,7 +226,7 @@ func TestControllerAutomaticallyApprovesUnattendedRequests(t *testing.T) {
 func TestControllerStopsActiveTurn(t *testing.T) {
 	ctx := context.Background()
 	st, task, run := newQueuedTask(t, ctx)
-	defer st.Close()
+	defer func() { _ = st.Close() }()
 	api := newFakeAPI()
 	notes := &fakeNotifier{}
 	controller := New(ControllerOptions{AppServer: api, Store: st, Notifier: notes})
@@ -250,7 +250,7 @@ func TestControllerStopsActiveTurn(t *testing.T) {
 func TestControllerStopDoesNotBlockOnInterrupt(t *testing.T) {
 	ctx := context.Background()
 	st, task, run := newQueuedTask(t, ctx)
-	defer st.Close()
+	defer func() { _ = st.Close() }()
 	api := newFakeAPI()
 	releaseInterrupt := make(chan struct{})
 	interruptStarted := make(chan struct{}, 1)
@@ -290,7 +290,7 @@ func TestControllerStopDoesNotBlockOnInterrupt(t *testing.T) {
 func TestControllerPersistsCompletionBeforeStartTurnResponse(t *testing.T) {
 	ctx := context.Background()
 	st, task, run := newQueuedTask(t, ctx)
-	defer st.Close()
+	defer func() { _ = st.Close() }()
 	api := newFakeAPI()
 	releaseStartTurn := make(chan struct{})
 	api.startTurn = func(context.Context, appserver.TurnStartInput) (appserver.Turn, error) {
@@ -318,7 +318,7 @@ func TestControllerPersistsCompletionBeforeStartTurnResponse(t *testing.T) {
 func TestControllerStopsTurnStartedBeforeRPCResponseOnlyOnce(t *testing.T) {
 	ctx := context.Background()
 	st, task, run := newQueuedTask(t, ctx)
-	defer st.Close()
+	defer func() { _ = st.Close() }()
 	api := newFakeAPI()
 	releaseStartTurn := make(chan struct{})
 	api.startTurn = func(context.Context, appserver.TurnStartInput) (appserver.Turn, error) {
@@ -345,6 +345,71 @@ func TestControllerStopsTurnStartedBeforeRPCResponseOnlyOnce(t *testing.T) {
 	if got := api.interrupts(); got != 1 {
 		t.Fatalf("interrupt count = %d, want 1", got)
 	}
+}
+
+func TestControllerStopsPendingTurnWhenStartTurnTimesOut(t *testing.T) {
+	ctx := context.Background()
+	st, task, run := newQueuedTask(t, ctx)
+	defer func() { _ = st.Close() }()
+	api := newFakeAPI()
+	api.startTurn = func(ctx context.Context, _ appserver.TurnStartInput) (appserver.Turn, error) {
+		<-ctx.Done()
+		return appserver.Turn{}, ctx.Err()
+	}
+	controller := New(ControllerOptions{
+		AppServer:        api,
+		Store:            st,
+		Notifier:         &fakeNotifier{},
+		AppServerTimeout: 20 * time.Millisecond,
+	})
+	defer controller.Close()
+
+	if err := controller.Enqueue(ctx, StartInput{Task: task, Run: run, Project: config.ResolvedProject{CWD: task.CWD}, CardMessageID: "card", DedupKey: "new"}); err != nil {
+		t.Fatal(err)
+	}
+	waitFor(t, api.startedTurn)
+	waitUntil(t, func() bool { return controller.activeFor("thread-1", "") != nil })
+	if err := controller.Stop(ctx, task.ID); err != nil {
+		t.Fatal(err)
+	}
+	waitUntil(t, func() bool {
+		stored, _, err := st.GetTask(ctx, task.ID)
+		return err == nil && stored.Status == "canceled"
+	})
+}
+
+func TestControllerDoesNotBlockEventLoopOnTerminalDelivery(t *testing.T) {
+	ctx := context.Background()
+	st, task, run := newQueuedTask(t, ctx)
+	defer func() { _ = st.Close() }()
+	api := newFakeAPI()
+	notes := newBlockingTerminalNotifier()
+	controller := New(ControllerOptions{AppServer: api, Store: st, Notifier: notes})
+	defer controller.Close()
+	defer notes.release()
+
+	if err := controller.Enqueue(ctx, StartInput{Task: task, Run: run, Project: config.ResolvedProject{CWD: task.CWD}, CardMessageID: "card", DedupKey: "new"}); err != nil {
+		t.Fatal(err)
+	}
+	waitFor(t, api.startedTurn)
+	waitUntil(t, func() bool { return controller.activeFor("thread-1", "turn-1") != nil })
+
+	returned := make(chan struct{})
+	go func() {
+		controller.handleEvent(appserver.Event{Method: "turn/completed", Params: json.RawMessage(`{"threadId":"thread-1","turn":{"id":"turn-1","status":"completed"}}`)})
+		close(returned)
+	}()
+	select {
+	case <-returned:
+	case <-time.After(200 * time.Millisecond):
+		t.Fatal("terminal event waited for card delivery")
+	}
+	waitFor(t, notes.started)
+	notes.release()
+	waitUntil(t, func() bool {
+		stored, _, err := st.GetTask(ctx, task.ID)
+		return err == nil && stored.Status == "succeeded"
+	})
 }
 
 func TestAutomaticPermissionResponse(t *testing.T) {
@@ -389,7 +454,9 @@ func newQueuedTask(t *testing.T, ctx context.Context) (*store.Store, store.Task,
 	}
 	admit, err := st.AdmitNewTask(ctx, "new", "message", store.CreateTaskInput{TaskID: "task", RunID: "run", CWD: "/repo", CreatedBy: "ou_owner", ChatID: "chat", Prompt: "work", Now: time.Now()})
 	if err != nil {
-		st.Close()
+		if closeErr := st.Close(); closeErr != nil {
+			t.Fatalf("admit queued task: %v; close store: %v", err, closeErr)
+		}
 		t.Fatal(err)
 	}
 	return st, admit.Task, admit.Run
@@ -557,6 +624,40 @@ type blockingProgressNotifier struct {
 	firstProgress chan struct{}
 	releaseFirst  chan struct{}
 	releaseOnce   sync.Once
+}
+
+type blockingTerminalNotifier struct {
+	started     chan struct{}
+	releaseSend chan struct{}
+	releaseOnce sync.Once
+}
+
+func newBlockingTerminalNotifier() *blockingTerminalNotifier {
+	return &blockingTerminalNotifier{
+		started:     make(chan struct{}, 1),
+		releaseSend: make(chan struct{}),
+	}
+}
+
+func (n *blockingTerminalNotifier) Progress(context.Context, notifier.TaskCardInput) (contracts.SentMessage, error) {
+	return contracts.SentMessage{MessageID: "card"}, nil
+}
+
+func (n *blockingTerminalNotifier) Success(context.Context, notifier.TaskCardInput) (contracts.SentMessage, error) {
+	select {
+	case n.started <- struct{}{}:
+	default:
+	}
+	<-n.releaseSend
+	return contracts.SentMessage{MessageID: "card"}, nil
+}
+
+func (n *blockingTerminalNotifier) Failure(context.Context, notifier.TaskCardInput) (contracts.SentMessage, error) {
+	return contracts.SentMessage{MessageID: "card"}, nil
+}
+
+func (n *blockingTerminalNotifier) release() {
+	n.releaseOnce.Do(func() { close(n.releaseSend) })
 }
 
 func newBlockingProgressNotifier() *blockingProgressNotifier {

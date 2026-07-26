@@ -141,7 +141,7 @@ func (s *Sender) Send(ctx context.Context, msg contracts.OutboundMessage) (contr
 		cancel()
 		if err == nil {
 			if messageID == "" {
-				return contracts.SentMessage{}, errors.New("Feishu send returned empty message id")
+				return contracts.SentMessage{}, errors.New("feishu send returned empty message id")
 			}
 			return contracts.SentMessage{MessageID: messageID}, nil
 		}
@@ -194,7 +194,7 @@ func feishuResponseError(operation string, code int, message string) error {
 	if isRateLimitedCode(code) {
 		return fmt.Errorf("%w: Feishu %s failed: code=%d msg=%s", ErrRateLimited, operation, code, message)
 	}
-	return fmt.Errorf("Feishu %s failed: code=%d msg=%s", operation, code, message)
+	return fmt.Errorf("feishu %s failed: code=%d msg=%s", operation, code, message)
 }
 
 func isRateLimitedCode(code int) bool {

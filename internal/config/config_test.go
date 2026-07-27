@@ -147,6 +147,7 @@ workspace:
   default: "` + workspace + `"
 runtime:
   stream_update_interval_milliseconds: 200
+  stream_update_attempt_timeout_milliseconds: 13
   stream_retry_delay_milliseconds: 17
   notification_timeout_seconds: 19
   app_server_timeout_seconds: 23
@@ -170,6 +171,9 @@ runtime:
 	}
 	if got, want := cfg.Runtime.StreamUpdateInterval(), 200*time.Millisecond; got != want {
 		t.Fatalf("stream update interval = %s, want %s", got, want)
+	}
+	if got, want := cfg.Runtime.StreamUpdateAttemptTimeout(), 13*time.Millisecond; got != want {
+		t.Fatalf("stream update attempt timeout = %s, want %s", got, want)
 	}
 	if got, want := cfg.Runtime.StreamRetryDelay(), 17*time.Millisecond; got != want {
 		t.Fatalf("stream retry delay = %s, want %s", got, want)
@@ -205,7 +209,10 @@ runtime:
 
 func TestValidateRejectsInvalidRuntimeAndNetworkSettings(t *testing.T) {
 	cfg := Config{
-		Runtime: RuntimeConfig{StreamUpdateIntervalMilliseconds: -1},
+		Runtime: RuntimeConfig{
+			StreamUpdateIntervalMilliseconds:       -1,
+			StreamUpdateAttemptTimeoutMilliseconds: -1,
+		},
 		Feishu: FeishuConfig{Network: FeishuNetworkConfig{
 			HTTPTimeoutSeconds:                -1,
 			WebSocketFallbackHeartbeatSeconds: 31,
@@ -217,6 +224,7 @@ func TestValidateRejectsInvalidRuntimeAndNetworkSettings(t *testing.T) {
 	diags := cfg.Validate(func(string) string { return "" }, nil)
 	for _, code := range []string{
 		"runtime.stream_update_interval_milliseconds",
+		"runtime.stream_update_attempt_timeout_milliseconds",
 		"feishu.network.http_timeout_seconds",
 		"feishu.network.websocket_max_heartbeat_seconds",
 		"feishu.network.max_idle_connections_per_host",
@@ -361,7 +369,7 @@ func TestDefaultPathAndExampleConfig(t *testing.T) {
 	if cfg.AppServer.Command != "codex" || cfg.StartupTimeout() != 15*time.Second {
 		t.Fatalf("unexpected example config: %+v", cfg.AppServer)
 	}
-	if cfg.Runtime.StreamUpdateInterval() != 200*time.Millisecond || cfg.Feishu.Network.DeliveryMaxAttempts != 3 || cfg.Feishu.Network.EventQueueCapacity != 64 {
+	if cfg.Runtime.StreamUpdateInterval() != 200*time.Millisecond || cfg.Runtime.StreamUpdateAttemptTimeout() != 1500*time.Millisecond || cfg.Feishu.Network.DeliveryMaxAttempts != 3 || cfg.Feishu.Network.EventQueueCapacity != 64 {
 		t.Fatalf("unexpected runtime defaults: runtime=%+v network=%+v", cfg.Runtime, cfg.Feishu.Network)
 	}
 }

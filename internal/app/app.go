@@ -145,17 +145,18 @@ func Serve(ctx context.Context, opts ServeOptions) error {
 
 	notify := notifier.New(sender, notifier.Options{CardDisplayMode: cfg.Feishu.CardDisplayMode})
 	controller := runtime.New(runtime.ControllerOptions{
-		AppServer:              api,
-		Store:                  st,
-		Notifier:               notify,
-		CardDisplayMode:        cfg.Feishu.CardDisplayMode,
-		Now:                    now,
-		ProgressUpdateInterval: cfg.Runtime.StreamUpdateInterval(),
-		ProgressRetryDelay:     cfg.Runtime.StreamRetryDelay(),
-		NotificationTimeout:    cfg.Runtime.NotificationTimeout(),
-		AppServerTimeout:       cfg.Runtime.AppServerTimeout(),
-		TerminalRetryAttempts:  cfg.Runtime.TerminalRetryAttempts,
-		TerminalRetryDelay:     cfg.Runtime.TerminalRetryDelay(),
+		AppServer:                    api,
+		Store:                        st,
+		Notifier:                     notify,
+		CardDisplayMode:              cfg.Feishu.CardDisplayMode,
+		Now:                          now,
+		ProgressUpdateInterval:       cfg.Runtime.StreamUpdateInterval(),
+		ProgressUpdateAttemptTimeout: cfg.Runtime.StreamUpdateAttemptTimeout(),
+		ProgressRetryDelay:           cfg.Runtime.StreamRetryDelay(),
+		NotificationTimeout:          cfg.Runtime.NotificationTimeout(),
+		AppServerTimeout:             cfg.Runtime.AppServerTimeout(),
+		TerminalRetryAttempts:        cfg.Runtime.TerminalRetryAttempts,
+		TerminalRetryDelay:           cfg.Runtime.TerminalRetryDelay(),
 	})
 	defer controller.Close()
 	probeCtx, cancelProbe := context.WithTimeout(ctx, cfg.StartupTimeout())
@@ -305,6 +306,7 @@ app_server:
   startup_timeout_seconds: 15
 runtime:
   stream_update_interval_milliseconds: 200
+  stream_update_attempt_timeout_milliseconds: 1500
   stream_retry_delay_milliseconds: 800
   notification_timeout_seconds: 20
   app_server_timeout_seconds: 30

@@ -16,6 +16,9 @@ const (
 	steerActionID    = "steer_submit"
 	successBodyLimit = 4000
 	failureBodyLimit = 2000
+	// Progress updates are superseded by newer card state, so the runtime owns
+	// retry scheduling instead of letting a stale patch retry in the sender.
+	progressDeliveryMaxAttempts = 1
 )
 
 var ErrMissingMessageID = errors.New("routeable card send returned empty message id")
@@ -72,19 +75,19 @@ func New(sender transport.Sender, options ...Options) *Notifier {
 }
 
 func (n *Notifier) Start(ctx context.Context, in TaskCardInput) (contracts.SentMessage, error) {
-	return n.sendTask(ctx, contracts.CardStart, in, successBodyLimit)
+	return n.sendTask(ctx, contracts.CardStart, in, successBodyLimit, 0)
 }
 
 func (n *Notifier) Progress(ctx context.Context, in TaskCardInput) (contracts.SentMessage, error) {
-	return n.sendTask(ctx, contracts.CardStart, in, successBodyLimit)
+	return n.sendTask(ctx, contracts.CardStart, in, successBodyLimit, progressDeliveryMaxAttempts)
 }
 
 func (n *Notifier) Success(ctx context.Context, in TaskCardInput) (contracts.SentMessage, error) {
-	return n.sendTask(ctx, contracts.CardSuccess, in, successBodyLimit)
+	return n.sendTask(ctx, contracts.CardSuccess, in, successBodyLimit, 0)
 }
 
 func (n *Notifier) Failure(ctx context.Context, in TaskCardInput) (contracts.SentMessage, error) {
-	return n.sendTask(ctx, contracts.CardFailure, in, failureBodyLimit)
+	return n.sendTask(ctx, contracts.CardFailure, in, failureBodyLimit, 0)
 }
 
 // Restarting confirms a native bridge restart before the service tears down
@@ -190,19 +193,20 @@ func (n *Notifier) Rejection(ctx context.Context, chatID, replyToMessageID, body
 	return err
 }
 
-func (n *Notifier) sendTask(ctx context.Context, kind contracts.CardKind, in TaskCardInput, limit int) (contracts.SentMessage, error) {
+func (n *Notifier) sendTask(ctx context.Context, kind contracts.CardKind, in TaskCardInput, limit, deliveryMaxAttempts int) (contracts.SentMessage, error) {
 	presentation := normalizeTaskPresentation(kind, in, n.cardDisplayMode, limit)
 	msg := contracts.OutboundMessage{
-		ChatID:           in.ChatID,
-		ReplyToMessageID: in.ReplyToMessageID,
-		UpdateMessageID:  in.UpdateMessageID,
-		CardKind:         kind,
-		TaskID:           in.TaskID,
-		Status:           in.Status,
-		Title:            taskTitle(kind, in.Status),
-		Subtitle:         taskSubtitle(in),
-		Presentation:     &presentation,
-		Actions:          taskActions(in.Status, in.TaskID),
+		ChatID:              in.ChatID,
+		ReplyToMessageID:    in.ReplyToMessageID,
+		UpdateMessageID:     in.UpdateMessageID,
+		DeliveryMaxAttempts: deliveryMaxAttempts,
+		CardKind:            kind,
+		TaskID:              in.TaskID,
+		Status:              in.Status,
+		Title:               taskTitle(kind, in.Status),
+		Subtitle:            taskSubtitle(in),
+		Presentation:        &presentation,
+		Actions:             taskActions(in.Status, in.TaskID),
 	}
 	sent, err := n.sender.Send(ctx, msg)
 	if err != nil {

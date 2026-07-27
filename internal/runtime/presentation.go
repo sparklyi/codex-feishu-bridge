@@ -247,15 +247,9 @@ func (a *activeRun) appendProcessingDetail(delta string) bool {
 		return false
 	}
 	a.processingDetail = trimProcessingDetail(a.processingDetail + delta)
-	if a.displayMode != "preview" {
-		return false
-	}
-	current := strings.TrimSpace(a.processingDetail)
-	if !substantiveProcessingDetailDelta(a.lastDetailPreview, current) {
-		return false
-	}
-	a.lastDetailPreview = current
-	return true
+	// flushProgress is the cadence governor. Queue every visible delta so a
+	// short answer is not held behind an arbitrary character threshold.
+	return a.displayMode == "preview"
 }
 
 func trimProcessingDetail(text string) string {
@@ -265,20 +259,6 @@ func trimProcessingDetail(text string) string {
 	}
 	runes := []rune(text)
 	return "..." + string(runes[len(runes)-limit:])
-}
-
-func substantiveProcessingDetailDelta(previous, current string) bool {
-	if current == "" || current == previous {
-		return false
-	}
-	delta := current
-	if strings.HasPrefix(current, previous) {
-		delta = strings.TrimPrefix(current, previous)
-	}
-	if utf8.RuneCountInString(strings.TrimSpace(delta)) >= 48 {
-		return true
-	}
-	return strings.ContainsAny(delta, "。！？.!?\n")
 }
 
 func (a *activeRun) progressPresentation() contracts.TaskPresentation {

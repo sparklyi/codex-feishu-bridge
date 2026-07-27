@@ -23,12 +23,13 @@ import (
 var ErrNotRunning = errors.New("task has no running bridge turn")
 
 const (
-	progressUpdateInterval    = 200 * time.Millisecond
-	progressRetryDelay        = 800 * time.Millisecond
-	notificationTimeout       = 20 * time.Second
-	defaultAppServerTimeout   = 30 * time.Second
-	terminalRetryAttempts     = 3
-	defaultTerminalRetryDelay = time.Second
+	progressUpdateInterval       = 200 * time.Millisecond
+	progressUpdateAttemptTimeout = 1500 * time.Millisecond
+	progressRetryDelay           = 800 * time.Millisecond
+	notificationTimeout          = 20 * time.Second
+	defaultAppServerTimeout      = 30 * time.Second
+	terminalRetryAttempts        = 3
+	defaultTerminalRetryDelay    = time.Second
 )
 
 type TaskStore interface {
@@ -65,31 +66,33 @@ type StartInput struct {
 }
 
 type ControllerOptions struct {
-	AppServer              AppServer
-	Store                  TaskStore
-	Notifier               CardNotifier
-	CardDisplayMode        string
-	Now                    func() time.Time
-	ProgressUpdateInterval time.Duration
-	ProgressRetryDelay     time.Duration
-	NotificationTimeout    time.Duration
-	AppServerTimeout       time.Duration
-	TerminalRetryAttempts  int
-	TerminalRetryDelay     time.Duration
+	AppServer                    AppServer
+	Store                        TaskStore
+	Notifier                     CardNotifier
+	CardDisplayMode              string
+	Now                          func() time.Time
+	ProgressUpdateInterval       time.Duration
+	ProgressUpdateAttemptTimeout time.Duration
+	ProgressRetryDelay           time.Duration
+	NotificationTimeout          time.Duration
+	AppServerTimeout             time.Duration
+	TerminalRetryAttempts        int
+	TerminalRetryDelay           time.Duration
 }
 
 type Controller struct {
-	api                    AppServer
-	store                  TaskStore
-	notifier               CardNotifier
-	now                    func() time.Time
-	progressUpdateInterval time.Duration
-	progressRetryDelay     time.Duration
-	notificationTimeout    time.Duration
-	appServerTimeout       time.Duration
-	terminalRetryAttempts  int
-	terminalRetryDelay     time.Duration
-	cardDisplayMode        string
+	api                          AppServer
+	store                        TaskStore
+	notifier                     CardNotifier
+	now                          func() time.Time
+	progressUpdateInterval       time.Duration
+	progressUpdateAttemptTimeout time.Duration
+	progressRetryDelay           time.Duration
+	notificationTimeout          time.Duration
+	appServerTimeout             time.Duration
+	terminalRetryAttempts        int
+	terminalRetryDelay           time.Duration
+	cardDisplayMode              string
 
 	ctx    context.Context
 	cancel context.CancelFunc
@@ -126,7 +129,6 @@ type activeRun struct {
 	changes            []string
 	verification       []string
 	processingDetail   string
-	lastDetailPreview  string
 	finalText          string
 	lastProgress       time.Time
 	progressRetryAfter time.Time
@@ -151,6 +153,10 @@ func New(opts ControllerOptions) *Controller {
 	progressInterval := opts.ProgressUpdateInterval
 	if progressInterval <= 0 {
 		progressInterval = progressUpdateInterval
+	}
+	progressAttemptTimeout := opts.ProgressUpdateAttemptTimeout
+	if progressAttemptTimeout <= 0 {
+		progressAttemptTimeout = progressUpdateAttemptTimeout
 	}
 	progressRetry := opts.ProgressRetryDelay
 	if progressRetry <= 0 {
@@ -178,23 +184,24 @@ func New(opts ControllerOptions) *Controller {
 	}
 	ctx, cancel := context.WithCancel(context.Background())
 	c := &Controller{
-		api:                    opts.AppServer,
-		store:                  opts.Store,
-		notifier:               opts.Notifier,
-		now:                    now,
-		progressUpdateInterval: progressInterval,
-		progressRetryDelay:     progressRetry,
-		notificationTimeout:    notifyTimeout,
-		appServerTimeout:       appServerTimeout,
-		terminalRetryAttempts:  terminalRetries,
-		terminalRetryDelay:     retryDelay,
-		cardDisplayMode:        displayMode,
-		ctx:                    ctx,
-		cancel:                 cancel,
-		byRun:                  make(map[string]*activeRun),
-		byTask:                 make(map[string]*activeRun),
-		byThread:               make(map[string]*activeRun),
-		byTurn:                 make(map[string]*activeRun),
+		api:                          opts.AppServer,
+		store:                        opts.Store,
+		notifier:                     opts.Notifier,
+		now:                          now,
+		progressUpdateInterval:       progressInterval,
+		progressUpdateAttemptTimeout: progressAttemptTimeout,
+		progressRetryDelay:           progressRetry,
+		notificationTimeout:          notifyTimeout,
+		appServerTimeout:             appServerTimeout,
+		terminalRetryAttempts:        terminalRetries,
+		terminalRetryDelay:           retryDelay,
+		cardDisplayMode:              displayMode,
+		ctx:                          ctx,
+		cancel:                       cancel,
+		byRun:                        make(map[string]*activeRun),
+		byTask:                       make(map[string]*activeRun),
+		byThread:                     make(map[string]*activeRun),
+		byTurn:                       make(map[string]*activeRun),
 	}
 	if c.api != nil {
 		c.start(c.eventLoop)
@@ -781,9 +788,11 @@ func (c *Controller) flushProgress(active *activeRun) {
 		}
 
 		var notifyErr error
+		var notifyElapsed time.Duration
 		active.cardMu.Lock()
 		if !active.isTerminal() {
-			notifyCtx, cancel := c.notificationContext()
+			notifyStarted := time.Now()
+			notifyCtx, cancel := c.progressNotificationContext(active.ctx)
 			_, notifyErr = c.notifier.Progress(notifyCtx, notifier.TaskCardInput{
 				ChatID:          active.chatID(),
 				UpdateMessageID: active.cardID(),
@@ -794,11 +803,12 @@ func (c *Controller) flushProgress(active *activeRun) {
 				Presentation:    presentation,
 			})
 			cancel()
+			notifyElapsed = time.Since(notifyStarted)
 		}
 		active.cardMu.Unlock()
-		if notifyErr != nil {
+		if notifyErr != nil && !errors.Is(notifyErr, context.Canceled) {
 			transient := transport.IsTransientError(notifyErr)
-			slog.Warn("Feishu progress card patch failed", "task_id", active.taskID(), "transient", transient, "error", notifyErr)
+			slog.Warn("Feishu progress card patch failed", "task_id", active.taskID(), "transient", transient, "elapsed", notifyElapsed, "timeout", c.progressUpdateAttemptTimeout, "retry_delay", c.progressRetryDelay, "error", notifyErr)
 			if transient {
 				active.retryProgress(presentation, c.now().Add(c.progressRetryDelay))
 			}
@@ -808,6 +818,13 @@ func (c *Controller) flushProgress(active *activeRun) {
 
 func (c *Controller) notificationContext() (context.Context, context.CancelFunc) {
 	return context.WithTimeout(context.Background(), c.notificationTimeout)
+}
+
+func (c *Controller) progressNotificationContext(parent context.Context) (context.Context, context.CancelFunc) {
+	if parent == nil {
+		parent = context.Background()
+	}
+	return context.WithTimeout(parent, c.progressUpdateAttemptTimeout)
 }
 
 func (c *Controller) appServerContext(parent context.Context) (context.Context, context.CancelFunc) {

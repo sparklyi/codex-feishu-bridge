@@ -1,0 +1,38 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1200 300" role="img" aria-labelledby="title desc">
+  <title id="title">任务卡片状态流转</title>
+  <desc id="desc">新任务或继续跟进进入运行中的同一张任务卡，完成后显示结果并可继续跟进。</desc>
+  <defs>
+    <style>
+      .card { stroke-width: 2; }
+      .title { fill: #182523; font: 600 24px -apple-system, BlinkMacSystemFont, "PingFang SC", "Microsoft YaHei", sans-serif; }
+      .body { fill: #52605D; font: 16px -apple-system, BlinkMacSystemFont, "PingFang SC", "Microsoft YaHei", sans-serif; }
+      .label { fill: #52605D; font: 14px -apple-system, BlinkMacSystemFont, "PingFang SC", "Microsoft YaHei", sans-serif; }
+      .line { stroke: #52605D; stroke-width: 2; fill: none; }
+    </style>
+  </defs>
+  <rect width="1200" height="300" fill="#F7F8F6"/>
+  <rect x="52" y="70" width="276" height="160" rx="8" fill="#FFF8E8" stroke="#D89827" class="card"/>
+  <text x="190" y="122" text-anchor="middle" class="title">发起或继续</text>
+  <text x="190" y="158" text-anchor="middle" class="body">私聊任务</text>
+  <text x="190" y="186" text-anchor="middle" class="body">/sessions 或继续跟进</text>
+
+  <rect x="462" y="70" width="276" height="160" rx="8" fill="#EAF6F1" stroke="#23856F" class="card"/>
+  <text x="600" y="122" text-anchor="middle" class="title">运行中</text>
+  <text x="600" y="158" text-anchor="middle" class="body">阶段、里程碑、流式详情</text>
+  <text x="600" y="186" text-anchor="middle" class="body">补充到本轮 / 停止</text>
+
+  <rect x="872" y="70" width="276" height="160" rx="8" fill="#ECF4FA" stroke="#3C7EAB" class="card"/>
+  <text x="1010" y="122" text-anchor="middle" class="title">结果</text>
+  <text x="1010" y="158" text-anchor="middle" class="body">结论、改动、验证</text>
+  <text x="1010" y="186" text-anchor="middle" class="body">继续跟进</text>
+
+  <path d="M328 150H448" class="line"/>
+  <path d="M448 150L438 144V156Z" fill="#52605D"/>
+  <path d="M738 150H858" class="line"/>
+  <path d="M858 150L848 144V156Z" fill="#52605D"/>
+  <path d="M1010 230V268H190V230" class="line"/>
+  <path d="M190 230L184 240H196Z" fill="#52605D"/>
+  <text x="394" y="132" text-anchor="middle" class="label">同一张卡片</text>
+  <text x="804" y="132" text-anchor="middle" class="label">终态更新</text>
+  <text x="600" y="290" text-anchor="middle" class="label">继续跟进会复用原会话</text>
+</svg>

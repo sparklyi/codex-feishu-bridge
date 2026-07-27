@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"io"
+	"net/http"
 	"testing"
 	"time"
 
@@ -576,6 +577,42 @@ func TestSenderUsesFreshAttemptContextsForPatchRetry(t *testing.T) {
 	}
 }
 
+func TestSenderProgressPatchAttemptOverrideStopsSenderRetries(t *testing.T) {
+	api := &fakeCardAPI{results: []sendResult{{err: temporarySendError{}}, {}}}
+	var sleeps int
+	s := &Sender{
+		API:         api,
+		MaxAttempts: 3,
+		Sleep: func(context.Context, time.Duration) error {
+			sleeps++
+			return nil
+		},
+	}
+	_, err := s.Send(context.Background(), contracts.OutboundMessage{
+		UpdateMessageID:     "msg_original",
+		DeliveryMaxAttempts: 1,
+		CardKind:            contracts.CardStart,
+		TaskID:              "cx",
+		Title:               "title",
+		BodyMarkdown:        "body",
+	})
+	if err == nil {
+		t.Fatal("expected the single progress attempt to return its transient error")
+	}
+	if api.patchCalls != 1 || sleeps != 0 {
+		t.Fatalf("progress patch retried in the sender: patchCalls=%d sleeps=%d", api.patchCalls, sleeps)
+	}
+}
+
+func TestSDKCardAPIClosesIdleConnections(t *testing.T) {
+	transport := &closeIdleTrackingTransport{}
+	api := &SDKCardAPI{httpClient: &http.Client{Transport: transport}}
+	api.closeIdleConnections()
+	if transport.closeIdleCalls != 1 {
+		t.Fatalf("idle connections closed %d times, want 1", transport.closeIdleCalls)
+	}
+}
+
 func TestSenderRequiresMessageID(t *testing.T) {
 	s := &Sender{API: &fakeCardAPI{results: []sendResult{{messageID: ""}}}}
 	if _, err := s.Send(context.Background(), contracts.OutboundMessage{ChatID: "chat", CardKind: contracts.CardStart, TaskID: "cx", Title: "title"}); err == nil {
@@ -639,6 +676,18 @@ func (temporarySendError) Temporary() bool { return true }
 
 type contextTrackingCardAPI struct {
 	contexts []context.Context
+}
+
+type closeIdleTrackingTransport struct {
+	closeIdleCalls int
+}
+
+func (t *closeIdleTrackingTransport) RoundTrip(*http.Request) (*http.Response, error) {
+	return nil, errors.New("unexpected request")
+}
+
+func (t *closeIdleTrackingTransport) CloseIdleConnections() {
+	t.closeIdleCalls++
 }
 
 func (f *contextTrackingCardAPI) SendCard(context.Context, string, string, []byte) (string, time.Duration, error) {

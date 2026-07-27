@@ -1,74 +1,76 @@
 # codex-feishu-bridge
 
-[English](README.md) | [简体中文](README.zh-CN.md)
+可信飞书私聊与本地 Codex 的轻量桥接服务。
 
-`codex-feishu-bridge` is a personal local daemon for controlling Codex from a trusted Feishu private chat. It uses Codex `app-server` over local stdio, so it can create new work or take over a thread already visible in Codex Desktop. Events from non-private chats are ignored.
+<img src="docs/assets/bridge-flow.svg" alt="飞书私聊、桥接服务、本地 Codex app-server 与工作区之间的链路" width="100%">
 
-## Quick Start
+## 启动
 
 ```bash
 go install github.com/sparklyi/codex-feishu-bridge/cmd/codex-feishu-bridge@latest
 codex-feishu-bridge init-config
-```
 
-Edit `~/.codex-feishu-bridge/config.yaml`, then run:
-
-```bash
 export FEISHU_APP_SECRET=...
 codex-feishu-bridge doctor
 codex-feishu-bridge serve
 ```
 
-`doctor` starts a local app-server process and verifies that desktop threads can be listed. `serve` performs the same probe before accepting Feishu events.
+`app_server.command` 使用官方安装器提供的独立 Codex CLI，不使用 Codex Desktop 应用包内的可执行文件。
 
-Set `app_server.command` to the standalone Codex CLI installed by the official installer. Do not point it at the executable bundled inside Codex Desktop; the standalone CLI provides the supported app-server interface for this bridge.
+## 配置
 
-When the network requires a proxy, set `feishu.proxy_url` to an `http://` proxy URL. Leave it unset for direct Feishu REST and WebSocket connections; environment proxy variables are ignored by the bridge.
-
-`runtime.stream_update_interval_milliseconds` controls streamed task-card refreshes and defaults to `200`. The `runtime` section also controls task-card and app-server timeouts, retry behavior, and thread-list limits. `feishu.network` controls Feishu connection pools, WebSocket behavior, event queues, and card-delivery retries. See [config.example.yaml](config.example.yaml) for all values; restart the bridge after changing them.
-
-## Feishu Workflow
-
-For a screenshot-based setup guide, see [Feishu Bot Quickstart (Chinese)](docs/feishu-quickstart.zh-CN.md).
-
-Start a new task in a private chat:
-
-```text
-explain this repository
-@backend fix the failing test
+```yaml
+feishu:
+  app_id: cli_xxx
+  app_secret_env: FEISHU_APP_SECRET
+  card_display_mode: preview
+security:
+  allowed_open_ids: [ou_xxx]
+app_server:
+  command: codex
+workspace:
+  default: /path/to/repo
+runtime:
+  stream_update_interval_milliseconds: 200
+  stream_update_attempt_timeout_milliseconds: 1500
+  stream_retry_delay_milliseconds: 800
 ```
 
-Use `@backend` only when `projects.backend` is configured; omit the prefix to use `workspace.default`.
+完整字段见 [config.example.yaml](config.example.yaml)。需要代理时配置 `feishu.proxy_url`；修改配置后重启服务。
 
-To continue an existing Codex Desktop thread, send `/sessions` in a private chat, select a thread, then use the attached task card to send a follow-up. The bridge keeps the Codex thread id locally and resumes it through app-server.
+## 使用
 
-While a turn is running, one task card remains attached to that turn. It shows the current phase, key milestones, and throttled processing detail from app-server item events, without exposing reasoning, commands, or command output. Use **Add to current turn** to steer the active Codex turn with an extra constraint; it does not create another task or card. Stop is acknowledged immediately and does not wait for the app-server interrupt to finish.
+<img src="docs/assets/task-card-flow.svg" alt="任务卡从发起或继续、运行中到结果的状态变化" width="100%">
 
-When the turn completes, the same card presents the final agent reply as its conclusion, alongside changes and verification.
+| 输入或操作 | 结果 |
+| --- | --- |
+| 私聊发送任务 | 创建本地 Codex 任务 |
+| `@backend 修复测试` | 在 `projects.backend` 工作区执行 |
+| `/sessions` | 选择并接管桌面 Codex 会话 |
+| 补充到本轮 | 向当前 turn 追加约束 |
+| 继续跟进 | 基于原会话开始下一轮 |
 
-`feishu.card_display_mode` defaults to `preview`, which shows throttled processing detail while the turn is running. Set it to `concise` to show only phases and milestones. Neither mode exposes raw reasoning or tool output.
-
-In a supervised private-chat deployment, send `/restart`, `restart service`, or `重启服务` to restart the bridge. The command first confirms the restart and rejects the request while any task is queued or running, so it never interrupts an active Codex turn.
-
-## Commands
+## 运维
 
 ```bash
-codex-feishu-bridge init-config [--config path] [--force]
 codex-feishu-bridge doctor [--config path]
-codex-feishu-bridge serve [--config path]
 codex-feishu-bridge tasks list [--config path]
 codex-feishu-bridge tasks show [--config path] <task_id>
 ```
 
-## Security Model
+## 边界
 
-Only `security.allowed_open_ids` can use the bridge. Unauthorized private-chat requests receive a rejection, and all non-private events are ignored. Task continuation and stopping are creator-only.
+- 仅处理私聊，且仅允许 `security.allowed_open_ids` 中的用户。
+- 继续、补充与停止均校验任务创建者。
+- 本地状态位于 `~/.codex-feishu-bridge/state.db`；卡片会隐藏绝对路径、密钥和完整 thread ID。
+- 所有 turn 固定使用 `danger-full-access` 与 `approvalPolicy: never`。
 
-Feishu cards are sent only to private chats and redact local absolute paths, secrets, proxy credentials, and full Codex thread ids. SQLite stores the local task-to-thread and task-to-turn mapping under `~/.codex-feishu-bridge/state.db`.
+## 相关文档
 
-## Local Permissions
-
-The bridge has one execution path: the configured local `app_server` command and the app-server protocol. It keeps task state only, not raw execution transcripts. Every turn is fixed to `danger-full-access` and `approvalPolicy: never`; there is no project-level permission override or Feishu approval card.
+- [飞书机器人接入教程](docs/feishu-quickstart.zh-CN.md)
+- [安全模型](docs/security.md)
+- [本地开发](docs/development.md)
+- [故障排查](docs/troubleshooting.md)
 
 ## License
 

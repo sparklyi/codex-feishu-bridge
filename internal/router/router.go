@@ -277,6 +277,7 @@ func (r *Router) startTask(ctx context.Context, ev contracts.InboundEvent, alias
 		ProjectAlias: admit.Task.ProjectAlias,
 		CWDLabel:     admit.Task.CWD,
 		Body:         "正在创建 Codex 会话。",
+		UserInputs:   []string{admit.Run.Prompt},
 	})
 	if err != nil {
 		return r.failQueuedRun(admit.Task, admit.Run, ev.DedupKey, err)
@@ -289,7 +290,7 @@ func (r *Router) startTask(ctx context.Context, ev contracts.InboundEvent, alias
 	}
 	if err := r.controller.Enqueue(ctx, runtime.StartInput{Task: admit.Task, Run: admit.Run, Project: project, CardMessageID: sent.MessageID, DedupKey: ev.DedupKey}); err != nil {
 		finishErr := r.failQueuedRun(admit.Task, admit.Run, ev.DedupKey, err)
-		_, notifyErr := r.notifier.Failure(ctx, taskCard(admit.Task, "failed", err.Error(), sent.MessageID))
+		_, notifyErr := r.notifier.Failure(ctx, taskCard(admit.Task, "failed", err.Error(), sent.MessageID, admit.Run.Prompt))
 		return errors.Join(finishErr, notifyErr)
 	}
 	return nil
@@ -335,7 +336,7 @@ func (r *Router) resumeTask(ctx context.Context, ev contracts.InboundEvent, text
 	project.CWD = admit.Task.CWD
 	cardID := admit.Task.RootMessageID
 	if cardID == "" {
-		sent, sendErr := r.notifier.Start(ctx, taskCard(admit.Task, "queued", "正在恢复 Codex 会话。", ""))
+		sent, sendErr := r.notifier.Start(ctx, taskCard(admit.Task, "queued", "正在恢复 Codex 会话。", "", admit.Run.Prompt))
 		if sendErr != nil {
 			return r.failQueuedRun(admit.Task, admit.Run, ev.DedupKey, sendErr)
 		}
@@ -485,7 +486,7 @@ func (r *Router) authorized(ctx context.Context, openID string) (bool, error) {
 	return r.store.UserEnabled(ctx, openID)
 }
 
-func taskCard(task store.Task, status, body, updateMessageID string) notifier.TaskCardInput {
+func taskCard(task store.Task, status, body, updateMessageID string, userInputs ...string) notifier.TaskCardInput {
 	return notifier.TaskCardInput{
 		ChatID:          task.ChatID,
 		UpdateMessageID: updateMessageID,
@@ -494,6 +495,7 @@ func taskCard(task store.Task, status, body, updateMessageID string) notifier.Ta
 		ProjectAlias:    task.ProjectAlias,
 		CWDLabel:        task.CWD,
 		Body:            body,
+		UserInputs:      userInputs,
 	}
 }
 

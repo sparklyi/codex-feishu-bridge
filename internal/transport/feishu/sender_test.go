@@ -166,9 +166,11 @@ func TestBuildInteractiveCardRendersDeveloperRunningWorkspace(t *testing.T) {
 			Layout:           contracts.TaskCardRunning,
 			Stage:            "验证",
 			Activity:         "正在执行测试。",
+			UserInputs:       []string{"修复测试", "补充：保留接口兼容"},
 			Milestones:       []contracts.TaskMilestone{{Label: "已读取代码", Kind: "read"}, {Label: "已修改 2 个文件", Kind: "change"}},
 			ProcessingDetail: "正在整理可读的处理详情。",
 		},
+		StreamDetail: true,
 		Actions: []contracts.Action{
 			{ID: "steer_submit", Label: "补充到本轮", Style: "primary", Value: map[string]string{"action": "steer", "task_id": "task-1"}},
 			{ID: "stop_task", Label: "停止", Style: "danger", Value: map[string]string{"action": "stop_task", "task_id": "task-1"}},
@@ -178,7 +180,7 @@ func TestBuildInteractiveCardRendersDeveloperRunningWorkspace(t *testing.T) {
 		t.Fatal(err)
 	}
 	body := string(card)
-	for _, want := range []string{"阶段", "验证", "里程碑", "当前活动", "关键里程碑", "处理详情", "补充到本轮", "正在执行测试。"} {
+	for _, want := range []string{"阶段", "验证", "里程碑", "当前活动", "本轮输入", "修复测试", "关键里程碑", "处理详情", "补充到本轮", "正在执行测试。"} {
 		if !jsonContains(body, want) {
 			t.Fatalf("running workspace missing %q: %s", want, body)
 		}
@@ -197,6 +199,16 @@ func TestBuildInteractiveCardRendersDeveloperRunningWorkspace(t *testing.T) {
 	if steer == nil || callbackValue(t, steer, card)["action"] != "steer" {
 		t.Fatalf("steer form callback malformed: %s", body)
 	}
+	var streamDetail map[string]any
+	for _, markdown := range taggedElements(decoded["body"], "markdown") {
+		if markdown["element_id"] == taskProcessingDetailElementID {
+			streamDetail = markdown
+			break
+		}
+	}
+	if streamDetail == nil {
+		t.Fatalf("running card is missing its CardKit stream target: %s", body)
+	}
 }
 
 func TestBuildInteractiveCardRendersInlineResultLayout(t *testing.T) {
@@ -207,6 +219,7 @@ func TestBuildInteractiveCardRendersInlineResultLayout(t *testing.T) {
 		Subtitle: "项目：backend",
 		Presentation: &contracts.TaskPresentation{
 			Layout:       contracts.TaskCardResult,
+			UserInputs:   []string{"修复任务卡", "补充测试场景"},
 			Conclusion:   "最终 AI 回复内容。",
 			Changes:      []string{"新增事件归类"},
 			Verification: []string{"go test ./... 已通过"},
@@ -216,7 +229,7 @@ func TestBuildInteractiveCardRendersInlineResultLayout(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	for _, want := range []string{"结论", "最终 AI 回复内容。", "改动", "验证", "继续跟进"} {
+	for _, want := range []string{"结论", "最终 AI 回复内容。", "本轮输入", "修复任务卡", "改动", "验证", "继续跟进"} {
 		if !jsonContains(string(result), want) {
 			t.Fatalf("result card missing %q: %s", want, string(result))
 		}
@@ -547,6 +560,131 @@ func TestSenderPatchesUpdateTarget(t *testing.T) {
 	}
 }
 
+func TestSenderStreamsTaskDetailThroughCardKitAndClosesBeforeTerminalPatch(t *testing.T) {
+	api := &streamingCardAPI{fakeCardAPI: fakeCardAPI{results: []sendResult{{messageID: "message-1"}}}}
+	sender := &Sender{API: api, MaxAttempts: 1}
+	initial := streamTaskMessage("", "first detail")
+	if _, err := sender.Send(context.Background(), initial); err != nil {
+		t.Fatal(err)
+	}
+	if api.resolveCalls != 1 || len(api.settings) != 1 || !api.settings[0].enabled || api.settings[0].sequence != 1 {
+		t.Fatalf("initial task card should enable CardKit streaming: %+v", api)
+	}
+	progress := streamTaskMessage("message-1", "first detail plus delta")
+	if _, err := sender.Send(context.Background(), progress); err != nil {
+		t.Fatal(err)
+	}
+	if api.patchCalls != 0 || len(api.content) != 1 || api.content[0].elementID != taskProcessingDetailElementID || api.content[0].content != "first detail plus delta" || api.content[0].sequence != 2 {
+		t.Fatalf("streamed detail should update only the CardKit element: %+v", api)
+	}
+	terminal := streamTaskMessage("message-1", "")
+	terminal.CardKind = contracts.CardSuccess
+	terminal.Status = "succeeded"
+	terminal.StreamDetail = false
+	terminal.Presentation = &contracts.TaskPresentation{Layout: contracts.TaskCardResult, Conclusion: "done"}
+	if _, err := sender.Send(context.Background(), terminal); err != nil {
+		t.Fatal(err)
+	}
+	if api.patchCalls != 1 || len(api.settings) != 2 || api.settings[1].enabled || api.settings[1].sequence != 3 {
+		t.Fatalf("terminal patch should close CardKit streaming first: %+v", api)
+	}
+}
+
+func TestTaskStreamSettingsUseSmoothClientRendering(t *testing.T) {
+	config, ok := taskStreamSettings(true)["config"].(map[string]any)
+	if !ok || config["streaming_mode"] != true {
+		t.Fatalf("streaming settings must enable CardKit mode: %+v", config)
+	}
+	streaming, ok := config["streaming_config"].(map[string]any)
+	if !ok || streaming["print_strategy"] != "delay" {
+		t.Fatalf("streaming settings must preserve queued text: %+v", config)
+	}
+	frequency, ok := streaming["print_frequency_ms"].(map[string]int)
+	if !ok || frequency["default"] != taskStreamPrintFrequencyMS {
+		t.Fatalf("streaming frequency is malformed: %+v", streaming)
+	}
+	step, ok := streaming["print_step"].(map[string]int)
+	if !ok || step["default"] != 1 {
+		t.Fatalf("streaming step is malformed: %+v", streaming)
+	}
+	if disabled, ok := taskStreamSettings(false)["config"].(map[string]any); !ok || disabled["streaming_mode"] != false || disabled["streaming_config"] != nil {
+		t.Fatalf("streaming settings must only include print config while active: %+v", disabled)
+	}
+}
+
+func TestSenderFallsBackToPatchWhenCardKitContentFails(t *testing.T) {
+	api := &streamingCardAPI{
+		fakeCardAPI: fakeCardAPI{results: []sendResult{{messageID: "message-1"}}},
+		contentErr:  errors.New("CardKit unavailable"),
+	}
+	sender := &Sender{API: api, MaxAttempts: 1}
+	if _, err := sender.Send(context.Background(), streamTaskMessage("", "first detail")); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := sender.Send(context.Background(), streamTaskMessage("message-1", "first detail plus next detail")); err != nil {
+		t.Fatal(err)
+	}
+	if len(api.content) != 1 || api.patchCalls != 1 || len(api.settings) != 2 || api.settings[1].enabled || api.settings[1].sequence != 3 {
+		t.Fatalf("failed CardKit content should use the normal patch path: %+v", api)
+	}
+	if _, err := sender.Send(context.Background(), streamTaskMessage("message-1", "later detail")); err != nil {
+		t.Fatal(err)
+	}
+	if len(api.content) != 1 || api.patchCalls != 2 {
+		t.Fatalf("unavailable CardKit should stay on the normal patch path: %+v", api)
+	}
+}
+
+func TestSenderPatchesStructuralProgressAndResumesCardKitStream(t *testing.T) {
+	api := &streamingCardAPI{fakeCardAPI: fakeCardAPI{results: []sendResult{{messageID: "message-1"}}}}
+	sender := &Sender{API: api, MaxAttempts: 1}
+	if _, err := sender.Send(context.Background(), streamTaskMessage("", "first detail")); err != nil {
+		t.Fatal(err)
+	}
+	structural := streamTaskMessage("message-1", "first detail plus input")
+	structural.Presentation = &contracts.TaskPresentation{
+		Layout:           contracts.TaskCardRunning,
+		Stage:            "验证",
+		Activity:         "正在执行测试。",
+		UserInputs:       []string{"修复任务卡", "补充：保留接口兼容"},
+		ProcessingDetail: "first detail plus input",
+	}
+	if _, err := sender.Send(context.Background(), structural); err != nil {
+		t.Fatal(err)
+	}
+	if api.patchCalls != 1 || len(api.settings) != 3 || api.settings[1].enabled || !api.settings[2].enabled || api.settings[1].sequence != 2 || api.settings[2].sequence != 3 {
+		t.Fatalf("structural update should pause, patch, and resume CardKit streaming: %+v", api)
+	}
+	resumed := streamTaskMessage("message-1", "first detail plus input and final delta")
+	resumed.Presentation = &contracts.TaskPresentation{
+		Layout:           contracts.TaskCardRunning,
+		Stage:            "验证",
+		Activity:         "正在执行测试。",
+		UserInputs:       []string{"修复任务卡", "补充：保留接口兼容"},
+		ProcessingDetail: "first detail plus input and final delta",
+	}
+	if _, err := sender.Send(context.Background(), resumed); err != nil {
+		t.Fatal(err)
+	}
+	if len(api.content) != 1 || api.content[0].sequence != 4 || api.patchCalls != 1 {
+		t.Fatalf("stream should resume after structural patch: %+v", api)
+	}
+}
+
+func TestSenderResetsTaskStreamWhenDetailStopsBeingAppendOnly(t *testing.T) {
+	api := &streamingCardAPI{fakeCardAPI: fakeCardAPI{results: []sendResult{{messageID: "message-1"}}}}
+	sender := &Sender{API: api, MaxAttempts: 1}
+	if _, err := sender.Send(context.Background(), streamTaskMessage("", "first detail")); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := sender.Send(context.Background(), streamTaskMessage("message-1", "replacement detail")); err != nil {
+		t.Fatal(err)
+	}
+	if api.patchCalls != 1 || len(api.content) != 0 || len(api.settings) != 3 || api.settings[1].enabled || !api.settings[2].enabled {
+		t.Fatalf("non-append detail should reset the stream before patching: %+v", api)
+	}
+}
+
 func TestSenderUsesFreshAttemptContextsForPatchRetry(t *testing.T) {
 	api := &contextTrackingCardAPI{}
 	s := &Sender{
@@ -660,6 +798,61 @@ type fakeCardAPI struct {
 	calls              int
 	patchCalls         int
 	lastPatchMessageID string
+}
+
+type streamSetting struct {
+	cardID   string
+	enabled  bool
+	sequence int
+}
+
+type streamContent struct {
+	cardID    string
+	elementID string
+	content   string
+	sequence  int
+}
+
+type streamingCardAPI struct {
+	fakeCardAPI
+	resolveCalls int
+	settings     []streamSetting
+	content      []streamContent
+	contentErr   error
+}
+
+func (f *streamingCardAPI) ResolveCardID(context.Context, string) (string, error) {
+	f.resolveCalls++
+	return "card-1", nil
+}
+
+func (f *streamingCardAPI) SetCardStreaming(_ context.Context, cardID string, enabled bool, sequence int) error {
+	f.settings = append(f.settings, streamSetting{cardID: cardID, enabled: enabled, sequence: sequence})
+	return nil
+}
+
+func (f *streamingCardAPI) SetCardElementContent(_ context.Context, cardID, elementID, content string, sequence int) error {
+	f.content = append(f.content, streamContent{cardID: cardID, elementID: elementID, content: content, sequence: sequence})
+	return f.contentErr
+}
+
+func streamTaskMessage(updateMessageID, detail string) contracts.OutboundMessage {
+	return contracts.OutboundMessage{
+		UpdateMessageID: updateMessageID,
+		CardKind:        contracts.CardStart,
+		TaskID:          "task-1",
+		Status:          "running",
+		Title:           "正在处理",
+		Subtitle:        "项目：backend",
+		StreamDetail:    true,
+		Presentation: &contracts.TaskPresentation{
+			Layout:           contracts.TaskCardRunning,
+			Stage:            "整理结果",
+			Activity:         "正在整理回复。",
+			UserInputs:       []string{"修复任务卡"},
+			ProcessingDetail: detail,
+		},
+	}
 }
 
 type sendResult struct {

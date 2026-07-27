@@ -129,6 +129,7 @@ type activeRun struct {
 	changes            []string
 	verification       []string
 	processingDetail   string
+	userInputs         []string
 	finalText          string
 	lastProgress       time.Time
 	progressRetryAfter time.Time
@@ -257,6 +258,7 @@ func (c *Controller) Enqueue(ctx context.Context, input StartInput) error {
 		displayMode:  c.cardDisplayMode,
 		stage:        "准备中",
 		activity:     "已接收，正在连接 Codex。",
+		userInputs:   nonEmptyStrings(input.Run.Prompt),
 		progressWake: make(chan struct{}, 1),
 	}
 	c.lifecycleMu.Lock()
@@ -355,8 +357,9 @@ func (c *Controller) Steer(ctx context.Context, taskID, text string) error {
 	if returnedTurnID != "" {
 		c.setTurn(active, returnedTurnID)
 	}
-	if active.setActivity("执行中", "已接收补充，正在继续当前任务。") {
-		c.sendProgress(active, false)
+	inputChanged := active.appendUserInput(text)
+	if active.setActivity("执行中", "已接收补充，正在继续当前任务。") || inputChanged {
+		c.sendProgress(active, true)
 	}
 	return nil
 }
@@ -991,6 +994,30 @@ func (a *activeRun) setFinalText(text string) {
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	a.finalText = text
+}
+
+func (a *activeRun) appendUserInput(text string) bool {
+	text = strings.TrimSpace(text)
+	if text == "" {
+		return false
+	}
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	if a.terminal {
+		return false
+	}
+	a.userInputs = append(a.userInputs, text)
+	return true
+}
+
+func nonEmptyStrings(values ...string) []string {
+	result := make([]string, 0, len(values))
+	for _, value := range values {
+		if value = strings.TrimSpace(value); value != "" {
+			result = append(result, value)
+		}
+	}
+	return result
 }
 
 func (a *activeRun) text() string {

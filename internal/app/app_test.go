@@ -84,7 +84,7 @@ func TestServeRecoversStaleRunAndInitConfigUsesAppServer(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(string(data), "app_server:") || !strings.Contains(string(data), "startup_timeout_seconds: 15") || !strings.Contains(string(data), "card_display_mode: preview") || !strings.Contains(string(data), "network:") || !strings.Contains(string(data), "stream_update_interval_milliseconds: 200") || strings.Contains(string(data), "approval:") || strings.Contains(string(data), "sandbox:") || strings.Contains(string(data), "bot_open_id:") || strings.Contains(string(data), "connection:") || strings.Contains(string(data), "projects:") {
+	if !strings.Contains(string(data), "app_server:") || !strings.Contains(string(data), "startup_timeout_seconds: 15") || !strings.Contains(string(data), "card_display_mode: preview") || !strings.Contains(string(data), "network:") || !strings.Contains(string(data), "stream_update_interval_milliseconds: 200") || !strings.Contains(string(data), "stream_update_attempt_timeout_milliseconds: 1500") || strings.Contains(string(data), "approval:") || strings.Contains(string(data), "sandbox:") || strings.Contains(string(data), "bot_open_id:") || strings.Contains(string(data), "connection:") || strings.Contains(string(data), "projects:") {
 		t.Fatalf("unexpected generated config:\n%s", data)
 	}
 }

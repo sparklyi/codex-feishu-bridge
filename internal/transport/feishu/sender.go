@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net/http"
 	"net/url"
 	"strings"
 	"time"
@@ -75,11 +76,16 @@ func NewSDKCardAPI(appID, appSecret string, proxyURL *url.URL) *SDKCardAPI {
 }
 
 func NewSDKCardAPIWithOptions(appID, appSecret string, proxyURL *url.URL, options NetworkOptions) *SDKCardAPI {
-	return &SDKCardAPI{client: lark.NewClient(appID, appSecret, lark.WithHttpClient(newFeishuHTTPClientWithOptions(options, proxyURL)))}
+	httpClient := newFeishuHTTPClientWithOptions(options, proxyURL)
+	return &SDKCardAPI{
+		client:     lark.NewClient(appID, appSecret, lark.WithHttpClient(httpClient)),
+		httpClient: httpClient,
+	}
 }
 
 type SDKCardAPI struct {
-	client *lark.Client
+	client     *lark.Client
+	httpClient *http.Client
 }
 
 func (api *SDKCardAPI) SendCard(ctx context.Context, chatID, replyToMessageID string, cardJSON []byte) (string, time.Duration, error) {
@@ -95,6 +101,7 @@ func (api *SDKCardAPI) SendCard(ctx context.Context, chatID, replyToMessageID st
 			Build()
 		resp, err := api.client.Im.Message.Reply(ctx, req)
 		if err != nil {
+			api.closeIdleConnections()
 			return "", 0, err
 		}
 		if !resp.Success() {
@@ -116,6 +123,7 @@ func (api *SDKCardAPI) SendCard(ctx context.Context, chatID, replyToMessageID st
 		Build()
 	resp, err := api.client.Im.Message.Create(ctx, req)
 	if err != nil {
+		api.closeIdleConnections()
 		return "", 0, err
 	}
 	if !resp.Success() {
@@ -137,12 +145,21 @@ func (api *SDKCardAPI) PatchCard(ctx context.Context, messageID string, cardJSON
 		Build()
 	resp, err := api.client.Im.Message.Patch(ctx, req)
 	if err != nil {
+		api.closeIdleConnections()
 		return 0, err
 	}
 	if !resp.Success() {
 		return 0, feishuResponseError("patch", resp.Code, resp.Msg)
 	}
 	return 0, nil
+}
+
+// closeIdleConnections prevents a timed-out proxy tunnel from being reused by
+// the next coalesced progress patch.
+func (api *SDKCardAPI) closeIdleConnections() {
+	if api.httpClient != nil {
+		api.httpClient.CloseIdleConnections()
+	}
 }
 
 func (s *Sender) Send(ctx context.Context, msg contracts.OutboundMessage) (contracts.SentMessage, error) {
@@ -154,14 +171,17 @@ func (s *Sender) Send(ctx context.Context, msg contracts.OutboundMessage) (contr
 		return contracts.SentMessage{}, err
 	}
 	if msg.UpdateMessageID != "" {
-		if err := s.patchWithRetry(ctx, msg.UpdateMessageID, card); err != nil {
+		if err := s.patchWithRetry(ctx, msg.UpdateMessageID, card, msg.DeliveryMaxAttempts); err != nil {
 			return contracts.SentMessage{}, err
 		}
 		return contracts.SentMessage{MessageID: msg.UpdateMessageID}, nil
 	}
-	maxRetries := s.maxRetries()
+	maxRetries := s.maxRetries(msg.DeliveryMaxAttempts)
 	var lastErr error
 	for attempt := 0; attempt <= maxRetries; attempt++ {
+		if err := ctx.Err(); err != nil {
+			return contracts.SentMessage{}, err
+		}
 		attemptCtx, cancel := s.attemptContext(ctx)
 		messageID, retryAfter, err := s.API.SendCard(attemptCtx, msg.ChatID, msg.ReplyToMessageID, card)
 		cancel()
@@ -175,6 +195,9 @@ func (s *Sender) Send(ctx context.Context, msg contracts.OutboundMessage) (contr
 		if !shouldRetrySendError(err) || attempt == maxRetries {
 			return contracts.SentMessage{}, err
 		}
+		if err := ctx.Err(); err != nil {
+			return contracts.SentMessage{}, err
+		}
 		if retryAfter <= 0 {
 			retryAfter = s.retryDelay(attempt)
 		}
@@ -185,10 +208,13 @@ func (s *Sender) Send(ctx context.Context, msg contracts.OutboundMessage) (contr
 	return contracts.SentMessage{}, lastErr
 }
 
-func (s *Sender) patchWithRetry(ctx context.Context, messageID string, card []byte) error {
-	maxRetries := s.maxRetries()
+func (s *Sender) patchWithRetry(ctx context.Context, messageID string, card []byte, maxAttempts int) error {
+	maxRetries := s.maxRetries(maxAttempts)
 	var lastErr error
 	for attempt := 0; attempt <= maxRetries; attempt++ {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
 		attemptCtx, cancel := s.attemptContext(ctx)
 		retryAfter, err := s.API.PatchCard(attemptCtx, messageID, card)
 		cancel()
@@ -197,6 +223,9 @@ func (s *Sender) patchWithRetry(ctx context.Context, messageID string, card []by
 		}
 		lastErr = err
 		if !shouldRetrySendError(err) || attempt == maxRetries {
+			return err
+		}
+		if err := ctx.Err(); err != nil {
 			return err
 		}
 		if retryAfter <= 0 {
@@ -232,7 +261,10 @@ func (s *Sender) attemptContext(ctx context.Context) (context.Context, context.C
 	return context.WithTimeout(ctx, timeout)
 }
 
-func (s *Sender) maxRetries() int {
+func (s *Sender) maxRetries(maxAttempts int) int {
+	if maxAttempts > 0 {
+		return maxAttempts - 1
+	}
 	if s.MaxAttempts > 0 {
 		return s.MaxAttempts - 1
 	}

@@ -15,36 +15,37 @@ import (
 )
 
 const (
-	defaultCommand                              = "codex"
-	defaultStartupTimeoutSeconds                = 15
-	defaultCardDisplayMode                      = "preview"
-	defaultStreamUpdateIntervalMilliseconds     = 200
-	defaultStreamRetryDelayMilliseconds         = 800
-	defaultNotificationTimeoutSeconds           = 20
-	defaultAppServerTimeoutSeconds              = 30
-	defaultTerminalRetryAttempts                = 3
-	defaultTerminalRetryDelayMilliseconds       = 1000
-	defaultRouteInsertAttempts                  = 2
-	defaultThreadSelectionLimit                 = 8
-	defaultThreadLookupLimit                    = 32
-	defaultFeishuHTTPTimeoutSeconds             = 30
-	defaultFeishuBootstrapTimeoutSeconds        = 8
-	defaultFeishuFallbackHeartbeatSeconds       = 30
-	defaultFeishuMaxHeartbeatSeconds            = 30
-	defaultFeishuReconnectDelayMilliseconds     = 1000
-	defaultFeishuWriteTimeoutSeconds            = 5
-	defaultFeishuFragmentTTLSeconds             = 5
-	defaultFeishuSourceCloseTimeoutSeconds      = 5
-	defaultFeishuMaxIdleConnections             = 32
-	defaultFeishuMaxIdleConnectionsPerHost      = 8
-	defaultFeishuIdleConnectionTimeoutSeconds   = 30
-	defaultFeishuDialKeepAliveSeconds           = 20
-	defaultFeishuDeliveryAttemptTimeoutSeconds  = 5
-	defaultFeishuDeliveryMaxAttempts            = 3
-	defaultFeishuDeliveryRetryDelayMilliseconds = 100
-	defaultFeishuEventQueueCapacity             = 64
-	defaultFeishuCardActionQueueCapacity        = 64
-	defaultFeishuFailureQueueCapacity           = 1
+	defaultCommand                                = "codex"
+	defaultStartupTimeoutSeconds                  = 15
+	defaultCardDisplayMode                        = "preview"
+	defaultStreamUpdateIntervalMilliseconds       = 200
+	defaultStreamUpdateAttemptTimeoutMilliseconds = 1500
+	defaultStreamRetryDelayMilliseconds           = 800
+	defaultNotificationTimeoutSeconds             = 20
+	defaultAppServerTimeoutSeconds                = 30
+	defaultTerminalRetryAttempts                  = 3
+	defaultTerminalRetryDelayMilliseconds         = 1000
+	defaultRouteInsertAttempts                    = 2
+	defaultThreadSelectionLimit                   = 8
+	defaultThreadLookupLimit                      = 32
+	defaultFeishuHTTPTimeoutSeconds               = 30
+	defaultFeishuBootstrapTimeoutSeconds          = 8
+	defaultFeishuFallbackHeartbeatSeconds         = 30
+	defaultFeishuMaxHeartbeatSeconds              = 30
+	defaultFeishuReconnectDelayMilliseconds       = 1000
+	defaultFeishuWriteTimeoutSeconds              = 5
+	defaultFeishuFragmentTTLSeconds               = 5
+	defaultFeishuSourceCloseTimeoutSeconds        = 5
+	defaultFeishuMaxIdleConnections               = 32
+	defaultFeishuMaxIdleConnectionsPerHost        = 8
+	defaultFeishuIdleConnectionTimeoutSeconds     = 30
+	defaultFeishuDialKeepAliveSeconds             = 20
+	defaultFeishuDeliveryAttemptTimeoutSeconds    = 5
+	defaultFeishuDeliveryMaxAttempts              = 3
+	defaultFeishuDeliveryRetryDelayMilliseconds   = 100
+	defaultFeishuEventQueueCapacity               = 64
+	defaultFeishuCardActionQueueCapacity          = 64
+	defaultFeishuFailureQueueCapacity             = 1
 )
 
 type Config struct {
@@ -93,15 +94,16 @@ type RuntimePaths struct {
 
 // RuntimeConfig controls task execution and task-card update behavior.
 type RuntimeConfig struct {
-	StreamUpdateIntervalMilliseconds int `yaml:"stream_update_interval_milliseconds"`
-	StreamRetryDelayMilliseconds     int `yaml:"stream_retry_delay_milliseconds"`
-	NotificationTimeoutSeconds       int `yaml:"notification_timeout_seconds"`
-	AppServerTimeoutSeconds          int `yaml:"app_server_timeout_seconds"`
-	TerminalRetryAttempts            int `yaml:"terminal_retry_attempts"`
-	TerminalRetryDelayMilliseconds   int `yaml:"terminal_retry_delay_milliseconds"`
-	RouteInsertAttempts              int `yaml:"route_insert_attempts"`
-	ThreadSelectionLimit             int `yaml:"thread_selection_limit"`
-	ThreadLookupLimit                int `yaml:"thread_lookup_limit"`
+	StreamUpdateIntervalMilliseconds       int `yaml:"stream_update_interval_milliseconds"`
+	StreamUpdateAttemptTimeoutMilliseconds int `yaml:"stream_update_attempt_timeout_milliseconds"`
+	StreamRetryDelayMilliseconds           int `yaml:"stream_retry_delay_milliseconds"`
+	NotificationTimeoutSeconds             int `yaml:"notification_timeout_seconds"`
+	AppServerTimeoutSeconds                int `yaml:"app_server_timeout_seconds"`
+	TerminalRetryAttempts                  int `yaml:"terminal_retry_attempts"`
+	TerminalRetryDelayMilliseconds         int `yaml:"terminal_retry_delay_milliseconds"`
+	RouteInsertAttempts                    int `yaml:"route_insert_attempts"`
+	ThreadSelectionLimit                   int `yaml:"thread_selection_limit"`
+	ThreadLookupLimit                      int `yaml:"thread_lookup_limit"`
 }
 
 // FeishuNetworkConfig controls Feishu connection and card-delivery behavior.
@@ -218,6 +220,7 @@ func (cfg Config) Validate(getenv func(string) string, stat func(string) error) 
 		value int
 	}{
 		{"runtime.stream_update_interval_milliseconds", cfg.Runtime.StreamUpdateIntervalMilliseconds},
+		{"runtime.stream_update_attempt_timeout_milliseconds", cfg.Runtime.StreamUpdateAttemptTimeoutMilliseconds},
 		{"runtime.stream_retry_delay_milliseconds", cfg.Runtime.StreamRetryDelayMilliseconds},
 		{"runtime.notification_timeout_seconds", cfg.Runtime.NotificationTimeoutSeconds},
 		{"runtime.app_server_timeout_seconds", cfg.Runtime.AppServerTimeoutSeconds},
@@ -321,6 +324,11 @@ func (cfg Config) StartupTimeout() time.Duration {
 func (cfg RuntimeConfig) StreamUpdateInterval() time.Duration {
 	cfg.applyDefaults()
 	return milliseconds(cfg.StreamUpdateIntervalMilliseconds)
+}
+
+func (cfg RuntimeConfig) StreamUpdateAttemptTimeout() time.Duration {
+	cfg.applyDefaults()
+	return milliseconds(cfg.StreamUpdateAttemptTimeoutMilliseconds)
 }
 
 func (cfg RuntimeConfig) StreamRetryDelay() time.Duration {
@@ -452,6 +460,9 @@ func (cfg *Config) applyDefaults(home string) {
 func (cfg *RuntimeConfig) applyDefaults() {
 	if cfg.StreamUpdateIntervalMilliseconds == 0 {
 		cfg.StreamUpdateIntervalMilliseconds = defaultStreamUpdateIntervalMilliseconds
+	}
+	if cfg.StreamUpdateAttemptTimeoutMilliseconds == 0 {
+		cfg.StreamUpdateAttemptTimeoutMilliseconds = defaultStreamUpdateAttemptTimeoutMilliseconds
 	}
 	if cfg.StreamRetryDelayMilliseconds == 0 {
 		cfg.StreamRetryDelayMilliseconds = defaultStreamRetryDelayMilliseconds

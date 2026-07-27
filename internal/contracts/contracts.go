@@ -69,16 +69,19 @@ type OutboundMessage struct {
 	ChatID           string
 	ReplyToMessageID string
 	UpdateMessageID  string
-	CardKind         CardKind
-	TaskID           string
-	Status           string
-	Title            string
-	Subtitle         string
-	BodyMarkdown     string
-	Presentation     *TaskPresentation
-	Fields           []Field
-	Options          []CardOption
-	Actions          []Action
+	// DeliveryMaxAttempts overrides the sender-level retry policy for this
+	// message. Zero preserves the sender default.
+	DeliveryMaxAttempts int
+	CardKind            CardKind
+	TaskID              string
+	Status              string
+	Title               string
+	Subtitle            string
+	BodyMarkdown        string
+	Presentation        *TaskPresentation
+	Fields              []Field
+	Options             []CardOption
+	Actions             []Action
 }
 
 type Field struct {

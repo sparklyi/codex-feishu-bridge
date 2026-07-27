@@ -23,6 +23,9 @@ func TestTaskCardsStreamAndExposeStopOnlyWhileActive(t *testing.T) {
 	if sender.messages[0].Title != "等待处理" || sender.messages[0].Subtitle != "项目：backend" || sender.messages[0].Presentation == nil || sender.messages[0].Presentation.Layout != contracts.TaskCardRunning {
 		t.Fatalf("task card should prioritize its semantic header: %+v", sender.messages[0])
 	}
+	if sender.messages[0].DeliveryMaxAttempts != 0 {
+		t.Fatalf("start card should retain the sender retry policy: %+v", sender.messages[0])
+	}
 	if strings.Contains(sender.messages[0].Subtitle, "/Users/alice/repo") {
 		t.Fatalf("absolute paths should be redacted: %q", sender.messages[0].Subtitle)
 	}
@@ -32,6 +35,9 @@ func TestTaskCardsStreamAndExposeStopOnlyWhileActive(t *testing.T) {
 	if sender.messages[1].UpdateMessageID != "message-1" || sender.messages[1].Status != "running" {
 		t.Fatalf("progress must patch running card: %+v", sender.messages[1])
 	}
+	if sender.messages[1].DeliveryMaxAttempts != 1 {
+		t.Fatalf("progress card must use one delivery attempt: %+v", sender.messages[1])
+	}
 	if !hasAction(sender.messages[1], "steer_submit") || !hasAction(sender.messages[1], "stop_task") {
 		t.Fatalf("running card should expose steer and stop: %+v", sender.messages[1].Actions)
 	}
@@ -40,6 +46,9 @@ func TestTaskCardsStreamAndExposeStopOnlyWhileActive(t *testing.T) {
 	}
 	if hasAction(sender.messages[2], "stop_task") || !hasAction(sender.messages[2], "continue_submit") || sender.messages[2].Presentation == nil || sender.messages[2].Presentation.Layout != contracts.TaskCardResult || sender.messages[2].Presentation.Conclusion != "done" {
 		t.Fatalf("terminal card actions incorrect: %+v", sender.messages[2].Actions)
+	}
+	if sender.messages[2].DeliveryMaxAttempts != 0 {
+		t.Fatalf("terminal card should retain the sender retry policy: %+v", sender.messages[2])
 	}
 }
 

@@ -1,0 +1,47 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1200 340" role="img" aria-labelledby="title desc">
+  <title id="title">codex-feishu-bridge 系统链路</title>
+  <desc id="desc">飞书私聊通过本地桥接服务连接 Codex app-server 和本地工作区，结果以任务卡返回飞书。</desc>
+  <defs>
+    <style>
+      .node { stroke-width: 2; }
+      .title { fill: #182523; font: 600 24px -apple-system, BlinkMacSystemFont, "PingFang SC", "Microsoft YaHei", sans-serif; }
+      .body { fill: #52605D; font: 16px -apple-system, BlinkMacSystemFont, "PingFang SC", "Microsoft YaHei", sans-serif; }
+      .label { fill: #52605D; font: 14px -apple-system, BlinkMacSystemFont, "PingFang SC", "Microsoft YaHei", sans-serif; }
+      .line { stroke: #52605D; stroke-width: 2; fill: none; }
+    </style>
+  </defs>
+  <rect width="1200" height="340" fill="#F7F8F6"/>
+  <rect x="44" y="94" width="236" height="144" rx="8" fill="#FFF8E8" stroke="#D89827" class="node"/>
+  <text x="162" y="146" text-anchor="middle" class="title">飞书私聊</text>
+  <text x="162" y="180" text-anchor="middle" class="body">任务、会话、卡片操作</text>
+  <text x="162" y="206" text-anchor="middle" class="body">只接受授权用户</text>
+
+  <rect x="364" y="72" width="284" height="188" rx="8" fill="#EAF6F1" stroke="#23856F" class="node"/>
+  <text x="506" y="132" text-anchor="middle" class="title">桥接服务</text>
+  <text x="506" y="166" text-anchor="middle" class="body">路由、状态、任务卡</text>
+  <text x="506" y="192" text-anchor="middle" class="body">SQLite 映射</text>
+  <text x="506" y="218" text-anchor="middle" class="body">流式进度合并</text>
+
+  <rect x="732" y="72" width="202" height="188" rx="8" fill="#ECF4FA" stroke="#3C7EAB" class="node"/>
+  <text x="833" y="132" text-anchor="middle" class="title">Codex</text>
+  <text x="833" y="166" text-anchor="middle" class="body">app-server</text>
+  <text x="833" y="192" text-anchor="middle" class="body">本地 stdio</text>
+  <text x="833" y="218" text-anchor="middle" class="body">thread / turn</text>
+
+  <rect x="1018" y="94" width="138" height="144" rx="8" fill="#F5F0E9" stroke="#8A785F" class="node"/>
+  <text x="1087" y="146" text-anchor="middle" class="title">工作区</text>
+  <text x="1087" y="180" text-anchor="middle" class="body">代码与命令</text>
+  <text x="1087" y="206" text-anchor="middle" class="body">本地文件</text>
+
+  <path d="M280 142H350" class="line"/>
+  <path d="M350 142L340 136V148Z" fill="#52605D"/>
+  <path d="M648 142H718" class="line"/>
+  <path d="M718 142L708 136V148Z" fill="#52605D"/>
+  <path d="M934 142H1004" class="line"/>
+  <path d="M1004 142L994 136V148Z" fill="#52605D"/>
+  <path d="M1004 226H946Q914 226 914 258H190V238" class="line"/>
+  <path d="M190 238L184 248H196Z" fill="#52605D"/>
+  <text x="1060" y="278" text-anchor="middle" class="label">执行结果</text>
+  <text x="318" y="60" text-anchor="middle" class="label">事件与卡片</text>
+  <text x="687" y="60" text-anchor="middle" class="label">本地协议</text>
+</svg>

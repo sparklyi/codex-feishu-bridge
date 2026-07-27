@@ -37,6 +37,8 @@ app_server:
 runtime:
   # Cadence for patches of streamed task-card detail.
   stream_update_interval_milliseconds: 200
+  # Bound one non-terminal patch; the latest state is retried after failure.
+  stream_update_attempt_timeout_milliseconds: 1500
   stream_retry_delay_milliseconds: 800
   notification_timeout_seconds: 20
   app_server_timeout_seconds: 30

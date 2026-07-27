@@ -18,15 +18,16 @@ import (
 
 func TestControllerUsesConfiguredOperationalValues(t *testing.T) {
 	controller := New(ControllerOptions{
-		ProgressUpdateInterval: 200 * time.Millisecond,
-		ProgressRetryDelay:     17 * time.Millisecond,
-		NotificationTimeout:    19 * time.Millisecond,
-		AppServerTimeout:       23 * time.Millisecond,
-		TerminalRetryAttempts:  4,
-		TerminalRetryDelay:     29 * time.Millisecond,
+		ProgressUpdateInterval:       200 * time.Millisecond,
+		ProgressUpdateAttemptTimeout: 13 * time.Millisecond,
+		ProgressRetryDelay:           17 * time.Millisecond,
+		NotificationTimeout:          19 * time.Millisecond,
+		AppServerTimeout:             23 * time.Millisecond,
+		TerminalRetryAttempts:        4,
+		TerminalRetryDelay:           29 * time.Millisecond,
 	})
 	defer controller.Close()
-	if controller.progressUpdateInterval != 200*time.Millisecond || controller.progressRetryDelay != 17*time.Millisecond || controller.notificationTimeout != 19*time.Millisecond || controller.appServerTimeout != 23*time.Millisecond || controller.terminalRetryAttempts != 4 || controller.terminalRetryDelay != 29*time.Millisecond {
+	if controller.progressUpdateInterval != 200*time.Millisecond || controller.progressUpdateAttemptTimeout != 13*time.Millisecond || controller.progressRetryDelay != 17*time.Millisecond || controller.notificationTimeout != 19*time.Millisecond || controller.appServerTimeout != 23*time.Millisecond || controller.terminalRetryAttempts != 4 || controller.terminalRetryDelay != 29*time.Millisecond {
 		t.Fatalf("configured controller values were not retained: %+v", controller)
 	}
 }
@@ -137,6 +138,69 @@ func TestControllerRetriesTransientProgressPatch(t *testing.T) {
 		if update.UpdateMessageID != "card" {
 			t.Fatalf("retry must patch the original card: %+v", update)
 		}
+	}
+}
+
+func TestControllerQueuesShortStreamDeltaForProgressPatch(t *testing.T) {
+	ctx := context.Background()
+	st, task, run := newQueuedTask(t, ctx)
+	defer func() { _ = st.Close() }()
+	api := newFakeAPI()
+	notes := &recordingNotifier{}
+	controller := New(ControllerOptions{
+		AppServer:              api,
+		Store:                  st,
+		Notifier:               notes,
+		CardDisplayMode:        "preview",
+		ProgressUpdateInterval: time.Millisecond,
+	})
+	defer controller.Close()
+
+	if err := controller.Enqueue(ctx, StartInput{Task: task, Run: run, Project: config.ResolvedProject{CWD: task.CWD}, CardMessageID: "card", DedupKey: "new"}); err != nil {
+		t.Fatal(err)
+	}
+	waitFor(t, api.startedTurn)
+	waitUntil(t, func() bool { return controller.activeFor("thread-1", "turn-1") != nil })
+	api.events <- appserver.Event{Method: "item/agentMessage/delta", Params: json.RawMessage(`{"threadId":"thread-1","turnId":"turn-1","itemId":"item-1","delta":"ok"}`)}
+
+	waitUntilFor(t, time.Second, func() bool {
+		return notes.hasProgress(func(input notifier.TaskCardInput) bool {
+			return input.Presentation.ProcessingDetail == "ok"
+		})
+	})
+}
+
+func TestControllerRetriesProgressAfterShortAttemptTimeout(t *testing.T) {
+	ctx := context.Background()
+	st, task, run := newQueuedTask(t, ctx)
+	defer func() { _ = st.Close() }()
+	api := newFakeAPI()
+	notes := newDeadlineProgressNotifier()
+	controller := New(ControllerOptions{
+		AppServer:                    api,
+		Store:                        st,
+		Notifier:                     notes,
+		CardDisplayMode:              "preview",
+		ProgressUpdateAttemptTimeout: 75 * time.Millisecond,
+		ProgressRetryDelay:           25 * time.Millisecond,
+		NotificationTimeout:          time.Second,
+	})
+	defer controller.Close()
+
+	started := time.Now()
+	if err := controller.Enqueue(ctx, StartInput{Task: task, Run: run, Project: config.ResolvedProject{CWD: task.CWD}, CardMessageID: "card", DedupKey: "new"}); err != nil {
+		t.Fatal(err)
+	}
+	waitFor(t, notes.firstProgress)
+	waitFor(t, notes.secondProgress)
+	if elapsed := time.Since(started); elapsed > 500*time.Millisecond {
+		t.Fatalf("progress retry waited too long: %s", elapsed)
+	}
+	if elapsed := notes.firstAttemptElapsed(); elapsed > 300*time.Millisecond {
+		t.Fatalf("progress attempt ignored its short timeout: %s", elapsed)
+	}
+	if notes.progressCount() < 2 {
+		t.Fatalf("progress attempts = %d, want at least 2", notes.progressCount())
 	}
 }
 
@@ -792,6 +856,67 @@ func (n *transientProgressNotifier) matchingUpdates() []notifier.TaskCardInput {
 	n.mu.Lock()
 	defer n.mu.Unlock()
 	return append([]notifier.TaskCardInput(nil), n.matched...)
+}
+
+type deadlineProgressNotifier struct {
+	mu                   sync.Mutex
+	progressCalls        int
+	firstAttemptDuration time.Duration
+	firstProgress        chan struct{}
+	secondProgress       chan struct{}
+}
+
+func newDeadlineProgressNotifier() *deadlineProgressNotifier {
+	return &deadlineProgressNotifier{
+		firstProgress:  make(chan struct{}, 1),
+		secondProgress: make(chan struct{}, 1),
+	}
+}
+
+func (n *deadlineProgressNotifier) Progress(ctx context.Context, _ notifier.TaskCardInput) (contracts.SentMessage, error) {
+	n.mu.Lock()
+	n.progressCalls++
+	attempt := n.progressCalls
+	n.mu.Unlock()
+	if attempt == 1 {
+		select {
+		case n.firstProgress <- struct{}{}:
+		default:
+		}
+		started := time.Now()
+		<-ctx.Done()
+		n.mu.Lock()
+		n.firstAttemptDuration = time.Since(started)
+		n.mu.Unlock()
+		return contracts.SentMessage{}, ctx.Err()
+	}
+	if attempt == 2 {
+		select {
+		case n.secondProgress <- struct{}{}:
+		default:
+		}
+	}
+	return contracts.SentMessage{MessageID: "card"}, nil
+}
+
+func (n *deadlineProgressNotifier) Success(context.Context, notifier.TaskCardInput) (contracts.SentMessage, error) {
+	return contracts.SentMessage{MessageID: "card"}, nil
+}
+
+func (n *deadlineProgressNotifier) Failure(context.Context, notifier.TaskCardInput) (contracts.SentMessage, error) {
+	return contracts.SentMessage{MessageID: "card"}, nil
+}
+
+func (n *deadlineProgressNotifier) progressCount() int {
+	n.mu.Lock()
+	defer n.mu.Unlock()
+	return n.progressCalls
+}
+
+func (n *deadlineProgressNotifier) firstAttemptElapsed() time.Duration {
+	n.mu.Lock()
+	defer n.mu.Unlock()
+	return n.firstAttemptDuration
 }
 
 type terminalPatchNotifier struct {

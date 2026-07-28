@@ -2,6 +2,7 @@ package doctor
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
@@ -31,11 +32,13 @@ type Report struct {
 }
 
 type Options struct {
-	ConfigPath string
-	Getenv     func(string) string
-	Stat       func(string) error
-	LookPath   func(string) (string, error)
-	Probe      func(context.Context, appserver.ProcessOptions) (appserver.ProbeResult, error)
+	ConfigPath  string
+	Getenv      func(string) string
+	Stat        func(string) error
+	LookPath    func(string) (string, error)
+	Probe       func(context.Context, appserver.ProcessOptions) (appserver.ProbeResult, error)
+	Version     func(context.Context, string) (string, error)
+	CheckSchema func(context.Context, string) error
 }
 
 func Check(ctx context.Context, opts Options) Report {
@@ -73,6 +76,12 @@ func (opts Options) withDefaults() Options {
 	if opts.Probe == nil {
 		opts.Probe = appserver.Probe
 	}
+	if opts.Version == nil {
+		opts.Version = appserver.Version
+	}
+	if opts.CheckSchema == nil {
+		opts.CheckSchema = appserver.CheckSchema
+	}
 	return opts
 }
 
@@ -90,9 +99,34 @@ func checkAppServer(ctx context.Context, cfg config.Config, opts Options) []Diag
 		return []Diagnostic{{Level: LevelError, Code: "app_server.command", Message: fmt.Sprintf("%s not found: %v", command, err)}}
 	}
 	diags := []Diagnostic{{Level: LevelOK, Code: "app_server.command", Message: "Codex command found: " + resolved}}
+	versionCtx, cancelVersion := context.WithTimeout(ctx, cfg.StartupTimeout())
+	version, err := opts.Version(versionCtx, command)
+	cancelVersion()
+	if err != nil {
+		diags = append(diags, Diagnostic{Level: LevelWarn, Code: "app_server.version", Message: err.Error()})
+	} else {
+		diags = append(diags, Diagnostic{Level: LevelOK, Code: "app_server.version", Message: version})
+	}
+	schemaCtx, cancelSchema := context.WithTimeout(ctx, cfg.StartupTimeout())
+	err = opts.CheckSchema(schemaCtx, command)
+	cancelSchema()
+	if err != nil {
+		level := LevelError
+		if errors.Is(err, appserver.ErrSchemaGeneratorUnavailable) {
+			level = LevelWarn
+		}
+		diags = append(diags, Diagnostic{Level: level, Code: "app_server.schema", Message: err.Error()})
+	} else {
+		diags = append(diags, Diagnostic{Level: LevelOK, Code: "app_server.schema", Message: "bridge app-server request contracts are compatible"})
+	}
 	probeCtx, cancel := context.WithTimeout(ctx, cfg.StartupTimeout())
 	defer cancel()
-	result, err := opts.Probe(probeCtx, appserver.ProcessOptions{Command: command, Version: "doctor", Timeout: cfg.StartupTimeout()})
+	result, err := opts.Probe(probeCtx, appserver.ProcessOptions{
+		Command:         command,
+		Version:         "doctor",
+		Timeout:         cfg.StartupTimeout(),
+		ExperimentalAPI: cfg.AppServer.ExperimentalAPI,
+	})
 	if err != nil {
 		return append(diags, Diagnostic{Level: LevelError, Code: "app_server.probe", Message: err.Error()})
 	}

@@ -132,7 +132,12 @@ func Serve(ctx context.Context, opts ServeOptions) error {
 				return appserver.Open(ctx, processOpts)
 			}
 		}
-		api, err = open(ctx, appserver.ProcessOptions{Command: cfg.AppServer.Command, Version: "dev", Timeout: cfg.StartupTimeout()})
+		api, err = open(ctx, appserver.ProcessOptions{
+			Command:         cfg.AppServer.Command,
+			Version:         "dev",
+			Timeout:         cfg.StartupTimeout(),
+			ExperimentalAPI: cfg.AppServer.ExperimentalAPI,
+		})
 		if err != nil {
 			return err
 		}
@@ -178,11 +183,50 @@ func Serve(ctx context.Context, opts ServeOptions) error {
 		Now:        now,
 		Restart:    restart,
 	})
-	receiveErr := receiver.Receive(ctx, rt.Handle)
-	if errors.Is(context.Cause(ctx), ErrRestartRequested) {
-		return ErrRestartRequested
+	receiveDone := make(chan error, 1)
+	go func() {
+		receiveDone <- receiver.Receive(ctx, rt.Handle)
+	}()
+
+	select {
+	case receiveErr := <-receiveDone:
+		if errors.Is(context.Cause(ctx), ErrRestartRequested) {
+			return ErrRestartRequested
+		}
+		return receiveErr
+	case appServerErr := <-controller.AppServerFailures():
+		if ctx.Err() != nil {
+			awaitReceiver(receiveDone, cfg.Feishu.Network.SourceCloseTimeout())
+			if errors.Is(context.Cause(ctx), ErrRestartRequested) {
+				return ErrRestartRequested
+			}
+			return ctx.Err()
+		}
+		slog.Error("Codex app-server connection lost; restarting bridge", "error", appServerErr)
+		controller.FailActiveRuns()
+		cancel(appServerErr)
+		awaitReceiver(receiveDone, cfg.Feishu.Network.SourceCloseTimeout())
+		return appServerErr
+	case <-ctx.Done():
+		awaitReceiver(receiveDone, cfg.Feishu.Network.SourceCloseTimeout())
+		if errors.Is(context.Cause(ctx), ErrRestartRequested) {
+			return ErrRestartRequested
+		}
+		return ctx.Err()
 	}
-	return receiveErr
+}
+
+func awaitReceiver(done <-chan error, timeout time.Duration) {
+	if timeout <= 0 {
+		timeout = 5 * time.Second
+	}
+	timer := time.NewTimer(timeout)
+	defer timer.Stop()
+	select {
+	case <-done:
+	case <-timer.C:
+		slog.Warn("Feishu receiver did not stop before shutdown timeout", "timeout", timeout)
+	}
 }
 
 func InitConfig(path string, force bool) error {
@@ -304,6 +348,8 @@ app_server:
   command: codex
   default_model: ""
   startup_timeout_seconds: 15
+  # Opt in only when a bridge feature requires an experimental app-server API.
+  experimental_api: false
 runtime:
   stream_update_interval_milliseconds: 200
   stream_update_attempt_timeout_milliseconds: 1500

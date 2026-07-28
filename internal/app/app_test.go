@@ -13,6 +13,7 @@ import (
 	"github.com/sparklyi/codex-feishu-bridge/internal/appserver"
 	"github.com/sparklyi/codex-feishu-bridge/internal/config"
 	"github.com/sparklyi/codex-feishu-bridge/internal/contracts"
+	"github.com/sparklyi/codex-feishu-bridge/internal/runtime"
 	"github.com/sparklyi/codex-feishu-bridge/internal/store"
 	"github.com/sparklyi/codex-feishu-bridge/internal/transport"
 )
@@ -44,6 +45,42 @@ func TestServeFailsBeforeReceiverWhenThreadDiscoveryFails(t *testing.T) {
 	err := Serve(context.Background(), ServeOptions{ConfigPath: writeAppConfig(t, dir, workspace), Getenv: appEnv(dir), Receiver: receiver, Sender: &fakeSender{}, AppServer: &fakeAppServer{listErr: errors.New("desktop unavailable")}})
 	if err == nil || !strings.Contains(err.Error(), "discover desktop Codex threads") || receiver.calls != 0 {
 		t.Fatalf("expected startup probe failure, err=%v receiver=%d", err, receiver.calls)
+	}
+}
+
+func TestServePassesExperimentalAPIToAppServer(t *testing.T) {
+	dir := t.TempDir()
+	workspace := filepath.Join(dir, "workspace")
+	if err := os.MkdirAll(workspace, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	configPath := writeAppConfig(t, dir, workspace)
+	data, err := os.ReadFile(configPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	data = []byte(strings.Replace(string(data), "  command: codex\n", "  command: codex\n  experimental_api: true\n", 1))
+	if err := os.WriteFile(configPath, data, 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	api := &fakeAppServer{threads: []appserver.Thread{{ID: "desktop", CWD: workspace}}}
+	var opened appserver.ProcessOptions
+	err = Serve(context.Background(), ServeOptions{
+		ConfigPath: configPath,
+		Getenv:     appEnv(dir),
+		Receiver:   &fakeReceiver{},
+		Sender:     &fakeSender{},
+		OpenAppServer: func(_ context.Context, opts appserver.ProcessOptions) (AppServer, error) {
+			opened = opts
+			return api, nil
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !opened.ExperimentalAPI {
+		t.Fatalf("app-server options = %+v, want experimental API enabled", opened)
 	}
 }
 
@@ -84,7 +121,7 @@ func TestServeRecoversStaleRunAndInitConfigUsesAppServer(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(string(data), "app_server:") || !strings.Contains(string(data), "startup_timeout_seconds: 15") || !strings.Contains(string(data), "card_display_mode: preview") || !strings.Contains(string(data), "network:") || !strings.Contains(string(data), "stream_update_interval_milliseconds: 200") || !strings.Contains(string(data), "stream_update_attempt_timeout_milliseconds: 1500") || strings.Contains(string(data), "approval:") || strings.Contains(string(data), "sandbox:") || strings.Contains(string(data), "bot_open_id:") || strings.Contains(string(data), "connection:") || strings.Contains(string(data), "projects:") {
+	if !strings.Contains(string(data), "app_server:") || !strings.Contains(string(data), "startup_timeout_seconds: 15") || !strings.Contains(string(data), "experimental_api: false") || !strings.Contains(string(data), "card_display_mode: preview") || !strings.Contains(string(data), "network:") || !strings.Contains(string(data), "stream_update_interval_milliseconds: 200") || !strings.Contains(string(data), "stream_update_attempt_timeout_milliseconds: 1500") || strings.Contains(string(data), "approval:") || strings.Contains(string(data), "sandbox:") || strings.Contains(string(data), "bot_open_id:") || strings.Contains(string(data), "connection:") || strings.Contains(string(data), "projects:") {
 		t.Fatalf("unexpected generated config:\n%s", data)
 	}
 }
@@ -189,6 +226,47 @@ func TestServeReturnsRestartSignalOnlyForSupervisedNativeRestart(t *testing.T) {
 	}
 	if len(sender.messages) != 1 || sender.messages[0].CardKind != contracts.CardRestarting {
 		t.Fatalf("restart confirmation card = %+v", sender.messages)
+	}
+}
+
+func TestServeReturnsAppServerFailureAndClosesDependencies(t *testing.T) {
+	dir := t.TempDir()
+	workspace := filepath.Join(dir, "workspace")
+	if err := os.MkdirAll(workspace, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	receiver := &blockingReceiver{started: make(chan struct{})}
+	api := &fakeAppServer{
+		threads:  []appserver.Thread{{ID: "desktop", CWD: workspace}},
+		events:   make(chan appserver.Event),
+		requests: make(chan appserver.ServerRequest),
+	}
+	done := make(chan error, 1)
+	go func() {
+		done <- Serve(context.Background(), ServeOptions{
+			ConfigPath: writeAppConfig(t, dir, workspace),
+			Getenv:     appEnv(dir),
+			Receiver:   receiver,
+			Sender:     &fakeSender{},
+			AppServer:  api,
+		})
+	}()
+	select {
+	case <-receiver.started:
+	case <-time.After(time.Second):
+		t.Fatal("serve did not reach the receiver")
+	}
+	close(api.events)
+	select {
+	case err := <-done:
+		if !errors.Is(err, runtime.ErrAppServerUnavailable) {
+			t.Fatalf("serve error = %v, want app-server failure", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("serve did not return after app-server failure")
+	}
+	if !api.closed {
+		t.Fatal("app server was not closed after connection loss")
 	}
 }
 

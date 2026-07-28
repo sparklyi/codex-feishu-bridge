@@ -12,9 +12,10 @@ import (
 )
 
 type ProcessOptions struct {
-	Command string
-	Version string
-	Timeout time.Duration
+	Command         string
+	Version         string
+	Timeout         time.Duration
+	ExperimentalAPI bool
 }
 
 // Open starts a local app-server process over its standard JSON-RPC transport.
@@ -71,7 +72,7 @@ func Open(ctx context.Context, opts ProcessOptions) (*Client, error) {
 	client := NewClient(stdout, stdin, closeProcess)
 	initCtx, initCancel := context.WithTimeout(ctx, timeout)
 	defer initCancel()
-	if err := client.Initialize(initCtx, "codex-feishu-bridge", opts.Version); err != nil {
+	if err := client.initialize(initCtx, "codex-feishu-bridge", opts.Version, opts.ExperimentalAPI); err != nil {
 		if closeErr := client.Close(); closeErr != nil {
 			return nil, fmt.Errorf("initialize app-server: %w", errors.Join(err, fmt.Errorf("close app-server: %w", closeErr)))
 		}

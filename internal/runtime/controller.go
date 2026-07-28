@@ -20,7 +20,12 @@ import (
 	"github.com/sparklyi/codex-feishu-bridge/internal/transport"
 )
 
-var ErrNotRunning = errors.New("task has no running bridge turn")
+var (
+	ErrNotRunning           = errors.New("task has no running bridge turn")
+	ErrAppServerUnavailable = errors.New("Codex app-server connection lost")
+)
+
+const appServerFailureMessage = "Codex app-server 连接已中断，桥接服务正在重启。任务未自动恢复，请在服务恢复后继续。"
 
 const (
 	progressUpdateInterval       = 200 * time.Millisecond
@@ -100,7 +105,12 @@ type Controller struct {
 
 	lifecycleMu sync.Mutex
 	closed      bool
+	unavailable bool
 	closeOnce   sync.Once
+	failureOnce sync.Once
+
+	appServerFailures chan error
+	unavailableDone   chan struct{}
 
 	mu       sync.Mutex
 	byRun    map[string]*activeRun
@@ -203,6 +213,8 @@ func New(opts ControllerOptions) *Controller {
 		byTask:                       make(map[string]*activeRun),
 		byThread:                     make(map[string]*activeRun),
 		byTurn:                       make(map[string]*activeRun),
+		appServerFailures:            make(chan error, 1),
+		unavailableDone:              make(chan struct{}),
 	}
 	if c.api != nil {
 		c.start(c.eventLoop)
@@ -211,9 +223,34 @@ func New(opts ControllerOptions) *Controller {
 	return c
 }
 
+// AppServerFailures reports an unexpected loss of the app-server connection.
+// The channel carries at most one error and remains open for the controller's
+// lifetime so callers can safely select on it with other lifecycle signals.
+func (c *Controller) AppServerFailures() <-chan error {
+	return c.appServerFailures
+}
+
+// FailActiveRuns persists and notifies terminal failures for every locally
+// active turn after the app-server has been lost. finish makes this idempotent
+// when a normal terminal event races with the connection failure.
+func (c *Controller) FailActiveRuns() {
+	c.mu.Lock()
+	activeRuns := make([]*activeRun, 0, len(c.byRun))
+	for _, active := range c.byRun {
+		activeRuns = append(activeRuns, active)
+	}
+	c.mu.Unlock()
+	for _, active := range activeRuns {
+		c.finish(active, "failed", -1, appServerFailureMessage)
+	}
+}
+
 func (c *Controller) Probe(ctx context.Context) error {
 	if c.api == nil {
 		return errors.New("app-server client is nil")
+	}
+	if err := c.availabilityError(); err != nil {
+		return err
 	}
 	probeCtx, cancel := c.appServerContext(ctx)
 	defer cancel()
@@ -226,6 +263,9 @@ func (c *Controller) Probe(ctx context.Context) error {
 func (c *Controller) Threads(ctx context.Context, limit int) ([]appserver.Thread, error) {
 	if c.api == nil {
 		return nil, errors.New("app-server client is nil")
+	}
+	if err := c.availabilityError(); err != nil {
+		return nil, err
 	}
 	threadsCtx, cancel := c.appServerContext(ctx)
 	defer cancel()
@@ -262,10 +302,14 @@ func (c *Controller) Enqueue(ctx context.Context, input StartInput) error {
 		progressWake: make(chan struct{}, 1),
 	}
 	c.lifecycleMu.Lock()
-	if c.closed {
+	if c.closed || c.unavailable {
+		err := ErrNotRunning
+		if c.unavailable {
+			err = ErrAppServerUnavailable
+		}
 		c.lifecycleMu.Unlock()
 		cancel()
-		return ErrNotRunning
+		return err
 	}
 	c.mu.Lock()
 	if _, exists := c.byTask[input.Task.ID]; exists {
@@ -286,6 +330,9 @@ func (c *Controller) Enqueue(ctx context.Context, input StartInput) error {
 }
 
 func (c *Controller) Stop(ctx context.Context, taskID string) error {
+	if err := c.availabilityError(); err != nil {
+		return err
+	}
 	c.mu.Lock()
 	active := c.byTask[taskID]
 	c.mu.Unlock()
@@ -330,6 +377,9 @@ func (c *Controller) Stop(ctx context.Context, taskID string) error {
 // does not create a second run or task card, so the card remains the stable
 // representation of the user's current work.
 func (c *Controller) Steer(ctx context.Context, taskID, text string) error {
+	if err := c.availabilityError(); err != nil {
+		return err
+	}
 	text = strings.TrimSpace(text)
 	if text == "" {
 		return errors.New("steer text is required")
@@ -477,8 +527,11 @@ func (c *Controller) eventLoop() {
 		select {
 		case <-c.ctx.Done():
 			return
+		case <-c.unavailableDone:
+			return
 		case event, ok := <-c.api.Events():
 			if !ok {
+				c.reportAppServerLoss("event stream closed")
 				return
 			}
 			c.handleEvent(event)
@@ -491,13 +544,44 @@ func (c *Controller) requestLoop() {
 		select {
 		case <-c.ctx.Done():
 			return
+		case <-c.unavailableDone:
+			return
 		case request, ok := <-c.api.Requests():
 			if !ok {
+				c.reportAppServerLoss("request stream closed")
 				return
 			}
 			c.handleRequest(request)
 		}
 	}
+}
+
+func (c *Controller) availabilityError() error {
+	c.lifecycleMu.Lock()
+	defer c.lifecycleMu.Unlock()
+	if c.unavailable {
+		return ErrAppServerUnavailable
+	}
+	if c.closed {
+		return ErrNotRunning
+	}
+	return nil
+}
+
+func (c *Controller) reportAppServerLoss(reason string) {
+	c.failureOnce.Do(func() {
+		c.lifecycleMu.Lock()
+		if c.closed {
+			c.lifecycleMu.Unlock()
+			return
+		}
+		c.unavailable = true
+		c.lifecycleMu.Unlock()
+
+		err := fmt.Errorf("%w: %s", ErrAppServerUnavailable, reason)
+		close(c.unavailableDone)
+		c.appServerFailures <- err
+	})
 }
 
 func (c *Controller) handleEvent(event appserver.Event) {

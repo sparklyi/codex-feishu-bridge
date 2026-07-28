@@ -62,6 +62,7 @@ security:
 app_server:
   command: /usr/local/bin/codex
   startup_timeout_seconds: 9
+  experimental_api: true
 workspace:
   default: "` + workspace + `"
 projects:
@@ -85,7 +86,7 @@ paths:
 	if err != nil {
 		t.Fatal(err)
 	}
-	if cfg.AppServer.Command != "/usr/local/bin/codex" || cfg.StartupTimeout() != 9*time.Second {
+	if cfg.AppServer.Command != "/usr/local/bin/codex" || cfg.StartupTimeout() != 9*time.Second || !cfg.AppServer.ExperimentalAPI {
 		t.Fatalf("app-server config not loaded: %+v", cfg.AppServer)
 	}
 	if hasError(cfg.Validate(func(key string) string {

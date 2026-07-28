@@ -72,6 +72,54 @@ func TestControllerRunsTurnStreamsResultAndPersistsState(t *testing.T) {
 	}
 }
 
+func TestControllerFailsActiveRunsWhenAppServerStreamCloses(t *testing.T) {
+	ctx := context.Background()
+	st, task, run := newQueuedTask(t, ctx)
+	defer func() { _ = st.Close() }()
+	api := newFakeAPI()
+	notes := &fakeNotifier{}
+	controller := New(ControllerOptions{AppServer: api, Store: st, Notifier: notes})
+	defer controller.Close()
+
+	if err := controller.Enqueue(ctx, StartInput{Task: task, Run: run, Project: config.ResolvedProject{CWD: task.CWD}, CardMessageID: "card", DedupKey: "new"}); err != nil {
+		t.Fatal(err)
+	}
+	waitFor(t, api.startedTurn)
+	waitUntil(t, func() bool {
+		stored, _, err := st.GetTask(ctx, task.ID)
+		return err == nil && stored.Status == "running"
+	})
+
+	close(api.events)
+	var appServerErr error
+	select {
+	case appServerErr = <-controller.AppServerFailures():
+		if !errors.Is(appServerErr, ErrAppServerUnavailable) {
+			t.Fatalf("app-server failure = %v", appServerErr)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("controller did not report app-server stream loss")
+	}
+	if err := controller.Enqueue(ctx, StartInput{Task: task, Run: run, Project: config.ResolvedProject{CWD: task.CWD}, CardMessageID: "card", DedupKey: "duplicate"}); !errors.Is(err, ErrAppServerUnavailable) {
+		t.Fatalf("enqueue after stream loss = %v, want app-server unavailable", err)
+	}
+
+	controller.FailActiveRuns()
+	waitUntil(t, func() bool {
+		stored, runs, err := st.GetTask(ctx, task.ID)
+		return err == nil && stored.Status == "failed" && len(runs) == 1 && runs[0].Status == "failed"
+	})
+	_, runs, err := st.GetTask(ctx, task.ID)
+	if err != nil || runs[0].ExitCode != -1 || !strings.Contains(runs[0].FinalText, "正在重启") {
+		t.Fatalf("unexpected failed run: %+v err=%v", runs, err)
+	}
+	waitUntil(t, func() bool { return notes.count("failure") == 1 })
+	controller.FailActiveRuns()
+	if got := notes.count("failure"); got != 1 {
+		t.Fatalf("failure cards = %d, want one", got)
+	}
+}
+
 func TestControllerCoalescesSlowProgressCardUpdates(t *testing.T) {
 	ctx := context.Background()
 	st, task, run := newQueuedTask(t, ctx)

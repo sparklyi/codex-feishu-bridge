@@ -132,9 +132,11 @@ go run ./cmd/codex-feishu-bridge doctor --config ~/.codex-feishu-bridge/config.y
 - `workspace.default`
 - `paths.state_db`
 - `app_server.command`
+- `app_server.version`
+- `app_server.schema`
 - `app_server.probe`
 
-`app_server.probe` 会启动本机 app-server 进程并列出可见的 Codex 线程。
+`app_server.schema` 会检查本机 CLI 导出的稳定请求契约；较旧 CLI 不支持导出时会显示警告。`app_server.probe` 会启动本机 app-server 进程并列出可见的 Codex 线程。
 
 ## 9. 启动服务
 

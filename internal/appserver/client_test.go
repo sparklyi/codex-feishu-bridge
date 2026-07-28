@@ -102,6 +102,73 @@ func TestClientRoutesServerRequestAndResponse(t *testing.T) {
 	}
 }
 
+func TestClientInitializeUsesStableProtocolByDefault(t *testing.T) {
+	params := captureInitializeParams(t, false)
+	if _, ok := params["capabilities"]; ok {
+		t.Fatalf("stable initialization unexpectedly opted into capabilities: %+v", params)
+	}
+}
+
+func TestClientInitializeCanOptIntoExperimentalAPI(t *testing.T) {
+	params := captureInitializeParams(t, true)
+	capabilities, ok := params["capabilities"].(map[string]any)
+	if !ok || capabilities["experimentalApi"] != true {
+		t.Fatalf("experimental initialization capabilities = %#v", params["capabilities"])
+	}
+}
+
+func captureInitializeParams(t *testing.T, experimentalAPI bool) map[string]any {
+	t.Helper()
+	serverIn, clientOut := io.Pipe()
+	clientIn, serverOut := io.Pipe()
+	client := NewClient(clientIn, clientOut, func() error { return nil })
+	t.Cleanup(func() { _ = client.Close() })
+
+	params := make(chan map[string]any, 1)
+	go func() {
+		reader := bufio.NewScanner(serverIn)
+		writer := bufio.NewWriter(serverOut)
+		defer func() { _ = writer.Flush() }()
+		for reader.Scan() {
+			var message map[string]json.RawMessage
+			if json.Unmarshal(reader.Bytes(), &message) != nil {
+				return
+			}
+			var method string
+			_ = json.Unmarshal(message["method"], &method)
+			switch method {
+			case "initialize":
+				var got map[string]any
+				_ = json.Unmarshal(message["params"], &got)
+				params <- got
+				_, _ = writer.WriteString(`{"id":1,"result":{}}` + "\n")
+				_ = writer.Flush()
+			case "initialized":
+				return
+			}
+		}
+	}()
+
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	var err error
+	if experimentalAPI {
+		err = client.initialize(ctx, "test", "1.0", true)
+	} else {
+		err = client.Initialize(ctx, "test", "1.0")
+	}
+	if err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case got := <-params:
+		return got
+	case <-ctx.Done():
+		t.Fatal("timed out waiting for initialize request")
+		return nil
+	}
+}
+
 func TestClientCloseStopsReadLoopAndClosesStreams(t *testing.T) {
 	serverIn, clientOut := io.Pipe()
 	clientIn, serverOut := io.Pipe()

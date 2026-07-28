@@ -63,7 +63,12 @@ func NewClient(reader io.ReadCloser, writer io.WriteCloser, closeFn func() error
 	return c
 }
 
+// Initialize negotiates only the stable app-server protocol surface.
 func (c *Client) Initialize(ctx context.Context, name, version string) error {
+	return c.initialize(ctx, name, version, false)
+}
+
+func (c *Client) initialize(ctx context.Context, name, version string, experimentalAPI bool) error {
 	if name == "" {
 		name = "codex-feishu-bridge"
 	}
@@ -71,14 +76,17 @@ func (c *Client) Initialize(ctx context.Context, name, version string) error {
 		version = "dev"
 	}
 	var ignored json.RawMessage
-	if err := c.Call(ctx, "initialize", map[string]any{
+	params := map[string]any{
 		"clientInfo": map[string]string{
 			"name":    name,
 			"title":   "Codex Feishu Bridge",
 			"version": version,
 		},
-		"capabilities": map[string]any{"experimentalApi": true},
-	}, &ignored); err != nil {
+	}
+	if experimentalAPI {
+		params["capabilities"] = map[string]any{"experimentalApi": true}
+	}
+	if err := c.Call(ctx, "initialize", params, &ignored); err != nil {
 		return err
 	}
 	return c.Notify("initialized", map[string]any{})

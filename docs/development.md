@@ -26,4 +26,9 @@ The test suite uses fake Feishu transports and a fake app-server API. For a real
 codex-feishu-bridge doctor --config ~/.codex-feishu-bridge/config.yaml
 ```
 
+The report includes the Codex CLI version, a stable request-contract check when
+`codex app-server generate-json-schema` is available, and an app-server
+handshake. The schema-generator diagnostic is a warning for older CLIs; an
+incompatible generated contract is an error.
+
 The bridge starts its own local app-server process; do not start a second bridge instance for normal manual testing.

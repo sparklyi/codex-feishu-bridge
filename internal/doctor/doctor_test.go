@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -24,16 +25,18 @@ func TestCheckProbesManagedAppServerAndSQLite(t *testing.T) {
 			called = opts
 			return appserver.ProbeResult{ThreadCount: 3}, nil
 		},
+		Version:     func(context.Context, string) (string, error) { return "codex-cli 0.145.0", nil },
+		CheckSchema: func(context.Context, string) error { return nil },
 	})
 	if report.HasErrors() {
 		t.Fatalf("expected no errors:\n%s", report.Render())
 	}
-	for _, code := range []string{"config.load", "workspace.default", "paths.state_db", "app_server.command", "app_server.probe"} {
+	for _, code := range []string{"config.load", "workspace.default", "paths.state_db", "app_server.command", "app_server.version", "app_server.schema", "app_server.probe"} {
 		if !report.Has(LevelOK, code) {
 			t.Fatalf("missing OK %s in:\n%s", code, report.Render())
 		}
 	}
-	if called.Command != "codex" || called.Timeout <= 0 {
+	if called.Command != "codex" || called.Timeout <= 0 || called.ExperimentalAPI {
 		t.Fatalf("unexpected probe options: %+v", called)
 	}
 	db, err := sql.Open("sqlite", filepath.Join(dir, "state", "state.db"))
@@ -68,9 +71,40 @@ func TestCheckReportsMissingCommandAndProbeFailure(t *testing.T) {
 		Probe: func(context.Context, appserver.ProcessOptions) (appserver.ProbeResult, error) {
 			return appserver.ProbeResult{}, errors.New("daemon unavailable")
 		},
+		Version:     func(context.Context, string) (string, error) { return "codex-cli 0.145.0", nil },
+		CheckSchema: func(context.Context, string) error { return nil },
 	})
 	if !failedProbe.Has(LevelError, "app_server.probe") || !strings.Contains(failedProbe.Render(), "daemon unavailable") {
 		t.Fatalf("expected probe error:\n%s", failedProbe.Render())
+	}
+}
+
+func TestCheckReportsSchemaCompatibilityDiagnostics(t *testing.T) {
+	cfgPath, dir := writeDoctorConfig(t)
+	base := Options{
+		ConfigPath: cfgPath,
+		Getenv:     doctorEnv(dir),
+		LookPath:   func(command string) (string, error) { return command, nil },
+		Probe: func(context.Context, appserver.ProcessOptions) (appserver.ProbeResult, error) {
+			return appserver.ProbeResult{}, nil
+		},
+		Version: func(context.Context, string) (string, error) { return "codex-cli 0.145.0", nil },
+	}
+
+	missingGenerator := base
+	missingGenerator.CheckSchema = func(context.Context, string) error {
+		return fmt.Errorf("%w: command not found", appserver.ErrSchemaGeneratorUnavailable)
+	}
+	report := Check(context.Background(), missingGenerator)
+	if !report.Has(LevelWarn, "app_server.schema") || report.HasErrors() {
+		t.Fatalf("schema generator warning report:\n%s", report.Render())
+	}
+
+	incompatible := base
+	incompatible.CheckSchema = func(context.Context, string) error { return errors.New("turn/start missing sandboxPolicy") }
+	report = Check(context.Background(), incompatible)
+	if !report.Has(LevelError, "app_server.schema") {
+		t.Fatalf("schema incompatibility report:\n%s", report.Render())
 	}
 }
 

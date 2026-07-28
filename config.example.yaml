@@ -34,6 +34,8 @@ app_server:
   command: codex
   default_model: ""
   startup_timeout_seconds: 15
+  # Keep false unless a bridge feature explicitly requires an experimental API.
+  experimental_api: false
 runtime:
   # Cadence for patches of streamed task-card detail.
   stream_update_interval_milliseconds: 200

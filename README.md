@@ -28,6 +28,7 @@ security:
   allowed_open_ids: [ou_xxx]
 app_server:
   command: codex
+  experimental_api: false
 workspace:
   default: /path/to/repo
 runtime:
@@ -58,12 +59,16 @@ codex-feishu-bridge tasks list [--config path]
 codex-feishu-bridge tasks show [--config path] <task_id>
 ```
 
+`doctor` 会显示实际 Codex CLI 版本；CLI 支持 schema 导出时还会校验桥接依赖的稳定请求契约，最后执行真实 app-server 握手。
+
 ## 边界
 
 - 仅处理私聊，且仅允许 `security.allowed_open_ids` 中的用户。
 - 继续、补充与停止均校验任务创建者。
 - 本地状态位于 `~/.codex-feishu-bridge/state.db`；卡片会隐藏绝对路径、密钥和完整 thread ID。
 - 所有 turn 固定使用 `danger-full-access` 与 `approvalPolicy: never`。
+- `app_server.experimental_api` 默认关闭；仅在桥接功能明确依赖实验协议时才打开。
+- App Server 连接中断时，活动任务会立刻标记失败并发送终态卡；使用 launchd 或 systemd 守护进程自动拉起服务。
 
 ## 相关文档
 

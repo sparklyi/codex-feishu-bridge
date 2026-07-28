@@ -77,6 +77,7 @@ type AppServerConfig struct {
 	Command               string `yaml:"command"`
 	DefaultModel          string `yaml:"default_model"`
 	StartupTimeoutSeconds int    `yaml:"startup_timeout_seconds"`
+	ExperimentalAPI       bool   `yaml:"experimental_api"`
 }
 
 type WorkspaceConfig struct {

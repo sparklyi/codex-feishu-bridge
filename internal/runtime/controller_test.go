@@ -252,7 +252,8 @@ func TestControllerSteersSameActiveTurn(t *testing.T) {
 	st, task, run := newQueuedTask(t, ctx)
 	defer func() { _ = st.Close() }()
 	api := newFakeAPI()
-	controller := New(ControllerOptions{AppServer: api, Store: st, Notifier: &fakeNotifier{}})
+	notes := &recordingNotifier{}
+	controller := New(ControllerOptions{AppServer: api, Store: st, Notifier: notes})
 	defer controller.Close()
 	if err := controller.Enqueue(ctx, StartInput{Task: task, Run: run, Project: config.ResolvedProject{CWD: task.CWD}, CardMessageID: "card", DedupKey: "new"}); err != nil {
 		t.Fatal(err)
@@ -268,6 +269,11 @@ func TestControllerSteersSameActiveTurn(t *testing.T) {
 	if err := controller.Steer(ctx, task.ID, "also verify the test result"); err != nil {
 		t.Fatal(err)
 	}
+	waitUntil(t, func() bool {
+		return notes.hasProgress(func(input notifier.TaskCardInput) bool {
+			return len(input.Presentation.UserInputs) == 2 && input.Presentation.UserInputs[0] == "work" && input.Presentation.UserInputs[1] == "also verify the test result"
+		})
+	})
 	steers := api.steers()
 	if len(steers) != 1 || steers[0].ThreadID != "thread-1" || steers[0].ExpectedTurnID != "turn-1" || steers[0].Text != "also verify the test result" {
 		t.Fatalf("steer did not target the active turn: %+v", steers)
@@ -275,6 +281,16 @@ func TestControllerSteersSameActiveTurn(t *testing.T) {
 	_, runs, err := st.GetTask(ctx, task.ID)
 	if err != nil || len(runs) != 1 || runs[0].Kind != "new" {
 		t.Fatalf("steer should not create a new run: runs=%+v err=%v", runs, err)
+	}
+}
+
+func TestActiveRunCarriesInputsToResultPresentation(t *testing.T) {
+	active := &activeRun{userInputs: []string{"first instruction", "follow-up instruction"}, finalText: "done"}
+	if got := active.progressPresentation().UserInputs; len(got) != 2 || got[0] != "first instruction" || got[1] != "follow-up instruction" {
+		t.Fatalf("running presentation inputs = %+v", got)
+	}
+	if got := active.resultPresentation("succeeded", "").UserInputs; len(got) != 2 || got[0] != "first instruction" || got[1] != "follow-up instruction" {
+		t.Fatalf("result presentation inputs = %+v", got)
 	}
 }
 
@@ -312,6 +328,17 @@ func TestActiveRunRetainsStreamedProcessingDetailWhenCompletionHasNoText(t *test
 	}
 	if got := active.resultPresentation("succeeded", "").Conclusion; got != "streamed final reply" {
 		t.Fatalf("result card conclusion lost the streamed reply, got %q", got)
+	}
+}
+
+func TestTrimProcessingDetailKeepsAppendOnlyPrefix(t *testing.T) {
+	value := strings.Repeat("处理详情", 4000)
+	first := trimProcessingDetail(value)
+	if len(first) > processingDetailLimit {
+		t.Fatalf("processing detail exceeded limit: %d", len(first))
+	}
+	if next := trimProcessingDetail(value + "继续"); !strings.HasPrefix(next, first) {
+		t.Fatalf("processing detail must remain append-only: first=%q next=%q", first, next)
 	}
 }
 

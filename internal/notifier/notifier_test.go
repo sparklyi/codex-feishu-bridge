@@ -13,6 +13,7 @@ func TestTaskCardsStreamAndExposeStopOnlyWhileActive(t *testing.T) {
 	n := New(sender)
 	start, err := n.Start(context.Background(), TaskCardInput{
 		ChatID: "chat", TaskID: "task-1", Status: "queued", ProjectAlias: "backend", CWDLabel: "/Users/alice/repo", Body: "starting",
+		UserInputs: []string{"fix tests", "Authorization: Bearer secret-value"},
 	})
 	if err != nil || start.MessageID != "message-1" {
 		t.Fatalf("start result=%+v err=%v", start, err)
@@ -25,6 +26,9 @@ func TestTaskCardsStreamAndExposeStopOnlyWhileActive(t *testing.T) {
 	}
 	if sender.messages[0].DeliveryMaxAttempts != 0 {
 		t.Fatalf("start card should retain the sender retry policy: %+v", sender.messages[0])
+	}
+	if !sender.messages[0].StreamDetail || len(sender.messages[0].Presentation.UserInputs) != 2 || sender.messages[0].Presentation.UserInputs[0] != "fix tests" || strings.Contains(sender.messages[0].Presentation.UserInputs[1], "secret-value") {
+		t.Fatalf("start card should stream and retain redacted user inputs: %+v", sender.messages[0])
 	}
 	if strings.Contains(sender.messages[0].Subtitle, "/Users/alice/repo") {
 		t.Fatalf("absolute paths should be redacted: %q", sender.messages[0].Subtitle)
@@ -76,8 +80,23 @@ func TestTaskCardDisplayModesKeepProcessingDetailOnTaskCard(t *testing.T) {
 	if _, err := preview.Progress(context.Background(), TaskCardInput{ChatID: "chat", TaskID: "task-1", Status: "running", Presentation: contracts.TaskPresentation{ProcessingDetail: longDetail}}); err != nil {
 		t.Fatal(err)
 	}
-	if got := []rune(previewSender.messages[1].Presentation.ProcessingDetail); len(got) > 600 {
-		t.Fatalf("processing detail should stay compact, got %d runes", len(got))
+	if got := len(previewSender.messages[1].Presentation.ProcessingDetail); got > processingDetailLimit {
+		t.Fatalf("processing detail should stay compact, got %d bytes", got)
+	}
+	first := redactProcessingDetail(longDetail)
+	if next := redactProcessingDetail(longDetail + "继续"); !strings.HasPrefix(next, first) {
+		t.Fatalf("processing detail must remain append-only for CardKit: first=%q next=%q", first, next)
+	}
+}
+
+func TestTaskCardKeepsOriginalPromptWhenInputListIsCompacted(t *testing.T) {
+	inputs := []string{"original prompt"}
+	for index := 1; index <= 10; index++ {
+		inputs = append(inputs, "follow-up "+string(rune('a'+index-1)))
+	}
+	presentation := redactPresentation(contracts.TaskPresentation{UserInputs: inputs}, 4000)
+	if len(presentation.UserInputs) != 10 || presentation.UserInputs[0] != "original prompt" || presentation.UserInputs[1] != "follow-up b" || presentation.UserInputs[9] != "follow-up j" {
+		t.Fatalf("compacted inputs should retain original and newest entries: %+v", presentation.UserInputs)
 	}
 }
 

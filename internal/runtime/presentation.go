@@ -252,13 +252,21 @@ func (a *activeRun) appendProcessingDetail(delta string) bool {
 	return a.displayMode == "preview"
 }
 
+const processingDetailLimit = 8 * 1024
+
 func trimProcessingDetail(text string) string {
-	const limit = 1200
-	if utf8.RuneCountInString(text) <= limit {
+	if len(text) <= processingDetailLimit {
 		return text
 	}
-	runes := []rune(text)
-	return "..." + string(runes[len(runes)-limit:])
+	var result strings.Builder
+	result.Grow(processingDetailLimit)
+	for _, runeValue := range text {
+		if result.Len()+utf8.RuneLen(runeValue) > processingDetailLimit {
+			break
+		}
+		result.WriteRune(runeValue)
+	}
+	return result.String()
 }
 
 func (a *activeRun) progressPresentation() contracts.TaskPresentation {
@@ -268,6 +276,7 @@ func (a *activeRun) progressPresentation() contracts.TaskPresentation {
 		Layout:     contracts.TaskCardRunning,
 		Stage:      a.stage,
 		Activity:   a.activity,
+		UserInputs: append([]string(nil), a.userInputs...),
 		Milestones: append([]contracts.TaskMilestone(nil), a.milestones...),
 	}
 	if a.displayMode == "preview" {
@@ -287,6 +296,7 @@ func (a *activeRun) resultPresentation(status, fallback string) contracts.TaskPr
 	}
 	changes := append([]string(nil), a.changes...)
 	verification := append([]string(nil), a.verification...)
+	userInputs := append([]string(nil), a.userInputs...)
 	a.mu.Unlock()
 
 	responseChanges, responseVerification := extractResultDetails(finalText)
@@ -302,6 +312,7 @@ func (a *activeRun) resultPresentation(status, fallback string) contracts.TaskPr
 	}
 	return contracts.TaskPresentation{
 		Layout:       contracts.TaskCardResult,
+		UserInputs:   userInputs,
 		Conclusion:   conclusion,
 		Changes:      changes,
 		Verification: verification,

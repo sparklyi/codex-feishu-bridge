@@ -58,6 +58,7 @@ type TaskPresentation struct {
 	Layout           TaskCardLayout
 	Stage            string
 	Activity         string
+	UserInputs       []string
 	Milestones       []TaskMilestone
 	ProcessingDetail string
 	Conclusion       string
@@ -79,9 +80,12 @@ type OutboundMessage struct {
 	Subtitle            string
 	BodyMarkdown        string
 	Presentation        *TaskPresentation
-	Fields              []Field
-	Options             []CardOption
-	Actions             []Action
+	// StreamDetail marks a running task card whose processing-detail Markdown
+	// element can be updated through CardKit without rebuilding the full card.
+	StreamDetail bool
+	Fields       []Field
+	Options      []CardOption
+	Actions      []Action
 }
 
 type Field struct {

@@ -16,6 +16,9 @@ const (
 	steerActionID    = "steer_submit"
 	successBodyLimit = 4000
 	failureBodyLimit = 2000
+	// Keep enough output for a useful live preview while leaving room for the
+	// rest of the card under Feishu's card-size limit.
+	processingDetailLimit = 6 * 1024
 	// Progress updates are superseded by newer card state, so the runtime owns
 	// retry scheduling instead of letting a stale patch retry in the sender.
 	progressDeliveryMaxAttempts = 1
@@ -41,6 +44,7 @@ type TaskCardInput struct {
 	ProjectAlias     string
 	CWDLabel         string
 	Body             string
+	UserInputs       []string
 	Presentation     contracts.TaskPresentation
 }
 
@@ -206,6 +210,7 @@ func (n *Notifier) sendTask(ctx context.Context, kind contracts.CardKind, in Tas
 		Title:               taskTitle(kind, in.Status),
 		Subtitle:            taskSubtitle(in),
 		Presentation:        &presentation,
+		StreamDetail:        kind == contracts.CardStart && n.cardDisplayMode == "preview" && (in.Status == "queued" || in.Status == "running"),
 		Actions:             taskActions(in.Status, in.TaskID),
 	}
 	sent, err := n.sender.Send(ctx, msg)
@@ -220,6 +225,9 @@ func (n *Notifier) sendTask(ctx context.Context, kind contracts.CardKind, in Tas
 
 func normalizeTaskPresentation(kind contracts.CardKind, in TaskCardInput, displayMode string, limit int) contracts.TaskPresentation {
 	presentation := in.Presentation
+	if len(presentation.UserInputs) == 0 && len(in.UserInputs) > 0 {
+		presentation.UserInputs = append([]string(nil), in.UserInputs...)
+	}
 	if kind == contracts.CardSuccess || kind == contracts.CardFailure {
 		presentation.Layout = contracts.TaskCardResult
 		if presentation.Conclusion == "" {
@@ -243,12 +251,42 @@ func normalizeTaskPresentation(kind contracts.CardKind, in TaskCardInput, displa
 func redactPresentation(presentation contracts.TaskPresentation, limit int) contracts.TaskPresentation {
 	presentation.Stage = redact.FeishuText(strings.TrimSpace(presentation.Stage), 120)
 	presentation.Activity = redact.FeishuText(strings.TrimSpace(presentation.Activity), 240)
-	presentation.ProcessingDetail = redact.FeishuText(strings.TrimSpace(presentation.ProcessingDetail), 600)
+	presentation.ProcessingDetail = redactProcessingDetail(presentation.ProcessingDetail)
 	presentation.Conclusion = redact.FeishuText(strings.TrimSpace(presentation.Conclusion), limit)
+	presentation.UserInputs = redactUserInputs(presentation.UserInputs)
 	presentation.Milestones = redactMilestones(presentation.Milestones)
 	presentation.Changes = redactItems(presentation.Changes, 5, 220)
 	presentation.Verification = redactItems(presentation.Verification, 5, 220)
 	return presentation
+}
+
+func redactProcessingDetail(value string) string {
+	// CardKit streams only when each value extends the previous one. Preserve
+	// the leading text at the display limit instead of rotating in a suffix.
+	return redact.FeishuText(strings.TrimSpace(value), processingDetailLimit)
+}
+
+func redactUserInputs(values []string) []string {
+	const (
+		maxItems  = 10
+		itemLimit = 800
+	)
+	if len(values) > maxItems {
+		// The original request anchors the current turn, so retain it alongside
+		// the most recent steering inputs when the card must be compacted.
+		compacted := make([]string, 0, maxItems)
+		compacted = append(compacted, values[0])
+		compacted = append(compacted, values[len(values)-(maxItems-1):]...)
+		values = compacted
+	}
+	result := make([]string, 0, len(values))
+	for _, value := range values {
+		value = redact.FeishuText(strings.TrimSpace(value), itemLimit)
+		if value != "" {
+			result = append(result, value)
+		}
+	}
+	return result
 }
 
 func redactMilestones(values []contracts.TaskMilestone) []contracts.TaskMilestone {

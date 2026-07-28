@@ -32,7 +32,7 @@ func TestRouterCreatesQueuedTaskAndDispatchesRuntime(t *testing.T) {
 	if routed, err := st.ResolveMessageRoute(ctx, "card-1"); err != nil || routed.ID != task.ID {
 		t.Fatalf("start card route missing: %+v err=%v", routed, err)
 	}
-	if len(notes.starts) != 1 || notes.starts[0].Status != "queued" {
+	if len(notes.starts) != 1 || notes.starts[0].Status != "queued" || len(notes.starts[0].UserInputs) != 1 || notes.starts[0].UserInputs[0] != "fix tests" {
 		t.Fatalf("unexpected start card: %+v", notes.starts)
 	}
 }

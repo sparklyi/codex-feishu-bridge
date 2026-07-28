@@ -5,12 +5,16 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log/slog"
 	"net/http"
 	"net/url"
+	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	lark "github.com/larksuite/oapi-sdk-go/v3"
+	larkcardkit "github.com/larksuite/oapi-sdk-go/v3/service/cardkit/v1"
 	larkim "github.com/larksuite/oapi-sdk-go/v3/service/im/v1"
 	"github.com/sparklyi/codex-feishu-bridge/internal/contracts"
 	"github.com/sparklyi/codex-feishu-bridge/internal/transport"
@@ -24,11 +28,24 @@ const (
 	defaultDeliveryAttemptTimeout = 5 * time.Second
 	defaultDeliveryMaxRetries     = 2
 	defaultDeliveryRetryDelay     = 100 * time.Millisecond
+	cardStreamSetupTimeout        = 2 * time.Second
+	taskProcessingDetailElementID = "task_processing_detail"
+	taskStreamPrintFrequencyMS    = 30
+	taskStreamPrintStep           = 1
 )
 
 type CardAPI interface {
 	SendCard(ctx context.Context, chatID, replyToMessageID string, cardJSON []byte) (messageID string, retryAfter time.Duration, err error)
 	PatchCard(ctx context.Context, messageID string, cardJSON []byte) (retryAfter time.Duration, err error)
+}
+
+// CardStreamAPI is the optional CardKit surface for updating just the
+// processing-detail component of an IM card. The regular CardAPI remains the
+// compatibility path for clients or applications without CardKit access.
+type CardStreamAPI interface {
+	ResolveCardID(ctx context.Context, messageID string) (string, error)
+	SetCardStreaming(ctx context.Context, cardID string, enabled bool, sequence int) error
+	SetCardElementContent(ctx context.Context, cardID, elementID, content string, sequence int) error
 }
 
 type Sender struct {
@@ -40,6 +57,19 @@ type Sender struct {
 	AttemptTimeout time.Duration
 	RetryDelay     time.Duration
 	Sleep          func(context.Context, time.Duration) error
+
+	streamMu sync.Mutex
+	streams  map[string]*taskCardStream
+}
+
+type taskCardStream struct {
+	mu           sync.Mutex
+	cardID       string
+	nextSequence int
+	lastKey      string
+	lastDetail   string
+	active       bool
+	unavailable  bool
 }
 
 // SenderOptions controls retry behavior for Feishu card delivery.
@@ -154,6 +184,84 @@ func (api *SDKCardAPI) PatchCard(ctx context.Context, messageID string, cardJSON
 	return 0, nil
 }
 
+func (api *SDKCardAPI) ResolveCardID(ctx context.Context, messageID string) (string, error) {
+	request := larkcardkit.NewIdConvertCardReqBuilder().
+		Body(larkcardkit.NewIdConvertCardReqBodyBuilder().MessageId(messageID).Build()).
+		Build()
+	response, err := api.client.Cardkit.V1.Card.IdConvert(ctx, request)
+	if err != nil {
+		api.closeIdleConnections()
+		return "", err
+	}
+	if !response.Success() {
+		return "", feishuResponseError("card id conversion", response.Code, response.Msg)
+	}
+	if response.Data == nil || response.Data.CardId == nil || *response.Data.CardId == "" {
+		return "", errors.New("feishu card id conversion returned empty card id")
+	}
+	return *response.Data.CardId, nil
+}
+
+func (api *SDKCardAPI) SetCardStreaming(ctx context.Context, cardID string, enabled bool, sequence int) error {
+	settings, err := json.Marshal(taskStreamSettings(enabled))
+	if err != nil {
+		return err
+	}
+	request := larkcardkit.NewSettingsCardReqBuilder().
+		CardId(cardID).
+		Body(larkcardkit.NewSettingsCardReqBodyBuilder().
+			Settings(string(settings)).
+			Uuid(cardStreamOperationID(cardID, sequence)).
+			Sequence(sequence).
+			Build()).
+		Build()
+	response, err := api.client.Cardkit.V1.Card.Settings(ctx, request)
+	if err != nil {
+		api.closeIdleConnections()
+		return err
+	}
+	if !response.Success() {
+		return feishuResponseError("card streaming settings", response.Code, response.Msg)
+	}
+	return nil
+}
+
+func taskStreamSettings(enabled bool) map[string]any {
+	config := map[string]any{"streaming_mode": enabled}
+	if enabled {
+		// The bridge sends cumulative content every 200 ms. Let the client finish
+		// each queued glyph before consuming the next update so a new request does
+		// not force the previous text to jump to its final state.
+		config["streaming_config"] = map[string]any{
+			"print_frequency_ms": map[string]int{"default": taskStreamPrintFrequencyMS},
+			"print_step":         map[string]int{"default": taskStreamPrintStep},
+			"print_strategy":     "delay",
+		}
+	}
+	return map[string]any{"config": config}
+}
+
+func (api *SDKCardAPI) SetCardElementContent(ctx context.Context, cardID, elementID, content string, sequence int) error {
+	request := larkcardkit.NewContentCardElementReqBuilder().
+		CardId(cardID).
+		ElementId(elementID).
+		Body(larkcardkit.NewContentCardElementReqBodyBuilder().
+			Content(content).
+			Uuid(cardStreamOperationID(cardID, sequence)).
+			Sequence(sequence).
+			Build()).
+		Build()
+	response, err := api.client.Cardkit.V1.CardElement.Content(ctx, request)
+	if err != nil {
+		api.closeIdleConnections()
+		return err
+	}
+	if !response.Success() {
+		return feishuResponseError("card stream content", response.Code, response.Msg)
+	}
+	return nil
+}
+
 // closeIdleConnections prevents a timed-out proxy tunnel from being reused by
 // the next coalesced progress patch.
 func (api *SDKCardAPI) closeIdleConnections() {
@@ -171,6 +279,10 @@ func (s *Sender) Send(ctx context.Context, msg contracts.OutboundMessage) (contr
 		return contracts.SentMessage{}, err
 	}
 	if msg.UpdateMessageID != "" {
+		if isTaskStreamProgress(msg) {
+			return s.streamTaskProgress(ctx, msg, card)
+		}
+		s.closeTaskStream(ctx, msg.UpdateMessageID)
 		if err := s.patchWithRetry(ctx, msg.UpdateMessageID, card, msg.DeliveryMaxAttempts); err != nil {
 			return contracts.SentMessage{}, err
 		}
@@ -189,7 +301,11 @@ func (s *Sender) Send(ctx context.Context, msg contracts.OutboundMessage) (contr
 			if messageID == "" {
 				return contracts.SentMessage{}, errors.New("feishu send returned empty message id")
 			}
-			return contracts.SentMessage{MessageID: messageID}, nil
+			sent := contracts.SentMessage{MessageID: messageID}
+			if isTaskStreamStart(msg) {
+				s.startTaskStream(ctx, msg, sent.MessageID)
+			}
+			return sent, nil
 		}
 		lastErr = err
 		if !shouldRetrySendError(err) || attempt == maxRetries {
@@ -206,6 +322,207 @@ func (s *Sender) Send(ctx context.Context, msg contracts.OutboundMessage) (contr
 		}
 	}
 	return contracts.SentMessage{}, lastErr
+}
+
+func isTaskStreamProgress(msg contracts.OutboundMessage) bool {
+	return msg.StreamDetail && msg.CardKind == contracts.CardStart && msg.UpdateMessageID != "" && msg.Presentation != nil && msg.Presentation.Layout == contracts.TaskCardRunning
+}
+
+func isTaskStreamStart(msg contracts.OutboundMessage) bool {
+	return msg.StreamDetail && msg.CardKind == contracts.CardStart && msg.UpdateMessageID == "" && msg.Presentation != nil && msg.Presentation.Layout == contracts.TaskCardRunning
+}
+
+func (s *Sender) startTaskStream(ctx context.Context, msg contracts.OutboundMessage, messageID string) {
+	api, ok := s.API.(CardStreamAPI)
+	if !ok {
+		return
+	}
+	stream := s.taskStream(messageID)
+	stream.mu.Lock()
+	defer stream.mu.Unlock()
+	stream.lastKey = taskStreamKey(msg)
+	stream.lastDetail = msg.Presentation.ProcessingDetail
+	setupCtx, cancel := context.WithTimeout(ctx, cardStreamSetupTimeout)
+	defer cancel()
+	if err := s.enableTaskStream(setupCtx, api, messageID, stream); err != nil {
+		stream.unavailable = true
+		slog.Warn("Feishu CardKit stream unavailable; using card patches", "message_id", messageID, "error", err)
+	}
+}
+
+func (s *Sender) streamTaskProgress(ctx context.Context, msg contracts.OutboundMessage, card []byte) (contracts.SentMessage, error) {
+	streamAPI, ok := s.API.(CardStreamAPI)
+	if !ok {
+		if err := s.patchWithRetry(ctx, msg.UpdateMessageID, card, msg.DeliveryMaxAttempts); err != nil {
+			return contracts.SentMessage{}, err
+		}
+		return contracts.SentMessage{MessageID: msg.UpdateMessageID}, nil
+	}
+	stream := s.taskStream(msg.UpdateMessageID)
+	stream.mu.Lock()
+	defer stream.mu.Unlock()
+
+	key := taskStreamKey(msg)
+	detail := msg.Presentation.ProcessingDetail
+	if stream.unavailable {
+		return s.patchTaskProgress(ctx, msg, card, stream, key, detail)
+	}
+	if !stream.active {
+		if sent, err := s.patchTaskProgress(ctx, msg, card, stream, key, detail); err != nil {
+			return sent, err
+		}
+		if err := s.enableTaskStream(ctx, streamAPI, msg.UpdateMessageID, stream); err != nil {
+			stream.unavailable = true
+			slog.Warn("Feishu CardKit stream unavailable; using card patches", "message_id", msg.UpdateMessageID, "error", err)
+		}
+		return contracts.SentMessage{MessageID: msg.UpdateMessageID}, nil
+	}
+	// CardKit only applies a typewriter effect when the next value extends the
+	// current value. Redaction or a bounded display buffer can occasionally
+	// require a replacement, which must be patched outside streaming mode.
+	if key != stream.lastKey || !strings.HasPrefix(detail, stream.lastDetail) {
+		if err := s.pauseTaskStream(ctx, streamAPI, stream); err != nil {
+			s.disableTaskStreamForFallback(ctx, streamAPI, msg.UpdateMessageID, stream, "pause", err)
+			return s.patchTaskProgress(ctx, msg, card, stream, key, detail)
+		}
+		if sent, err := s.patchTaskProgress(ctx, msg, card, stream, key, detail); err != nil {
+			return sent, err
+		}
+		if err := s.enableTaskStream(ctx, streamAPI, msg.UpdateMessageID, stream); err != nil {
+			stream.unavailable = true
+			slog.Warn("Feishu CardKit stream resume failed; using card patches", "message_id", msg.UpdateMessageID, "error", err)
+		}
+		return contracts.SentMessage{MessageID: msg.UpdateMessageID}, nil
+	}
+	if detail == stream.lastDetail {
+		return contracts.SentMessage{MessageID: msg.UpdateMessageID}, nil
+	}
+	if err := streamAPI.SetCardElementContent(ctx, stream.cardID, taskProcessingDetailElementID, detail, stream.next()); err != nil {
+		s.disableTaskStreamForFallback(ctx, streamAPI, msg.UpdateMessageID, stream, "content update", err)
+		return s.patchTaskProgress(ctx, msg, card, stream, key, detail)
+	}
+	stream.lastDetail = detail
+	return contracts.SentMessage{MessageID: msg.UpdateMessageID}, nil
+}
+
+func (s *Sender) patchTaskProgress(ctx context.Context, msg contracts.OutboundMessage, card []byte, stream *taskCardStream, key, detail string) (contracts.SentMessage, error) {
+	if err := s.patchWithRetry(ctx, msg.UpdateMessageID, card, msg.DeliveryMaxAttempts); err != nil {
+		return contracts.SentMessage{}, err
+	}
+	stream.lastKey = key
+	stream.lastDetail = detail
+	return contracts.SentMessage{MessageID: msg.UpdateMessageID}, nil
+}
+
+func (s *Sender) enableTaskStream(ctx context.Context, api CardStreamAPI, messageID string, stream *taskCardStream) error {
+	if stream.cardID == "" {
+		cardID, err := api.ResolveCardID(ctx, messageID)
+		if err != nil {
+			return err
+		}
+		stream.cardID = cardID
+	}
+	if err := api.SetCardStreaming(ctx, stream.cardID, true, stream.next()); err != nil {
+		return err
+	}
+	stream.active = true
+	return nil
+}
+
+func (s *Sender) pauseTaskStream(ctx context.Context, api CardStreamAPI, stream *taskCardStream) error {
+	if !stream.active {
+		return nil
+	}
+	if err := api.SetCardStreaming(ctx, stream.cardID, false, stream.next()); err != nil {
+		return err
+	}
+	stream.active = false
+	return nil
+}
+
+func (s *Sender) disableTaskStreamForFallback(ctx context.Context, api CardStreamAPI, messageID string, stream *taskCardStream, operation string, cause error) {
+	stream.unavailable = true
+	if err := s.pauseTaskStream(ctx, api, stream); err != nil {
+		slog.Warn("Feishu CardKit stream close failed before card patch fallback", "message_id", messageID, "operation", operation, "error", err)
+	}
+	slog.Warn("Feishu CardKit stream unavailable; using card patches", "message_id", messageID, "operation", operation, "error", cause)
+}
+
+func (s *Sender) closeTaskStream(ctx context.Context, messageID string) {
+	stream := s.removeTaskStream(messageID)
+	if stream == nil {
+		return
+	}
+	api, ok := s.API.(CardStreamAPI)
+	if !ok {
+		return
+	}
+	stream.mu.Lock()
+	defer stream.mu.Unlock()
+	if err := s.pauseTaskStream(ctx, api, stream); err != nil {
+		slog.Warn("Feishu CardKit stream close failed", "message_id", messageID, "error", err)
+	}
+}
+
+func (s *Sender) taskStream(messageID string) *taskCardStream {
+	s.streamMu.Lock()
+	defer s.streamMu.Unlock()
+	if s.streams == nil {
+		s.streams = make(map[string]*taskCardStream)
+	}
+	if stream := s.streams[messageID]; stream != nil {
+		return stream
+	}
+	stream := &taskCardStream{nextSequence: 1}
+	s.streams[messageID] = stream
+	return stream
+}
+
+func (s *Sender) removeTaskStream(messageID string) *taskCardStream {
+	s.streamMu.Lock()
+	defer s.streamMu.Unlock()
+	stream := s.streams[messageID]
+	delete(s.streams, messageID)
+	return stream
+}
+
+func (s *taskCardStream) next() int {
+	sequence := s.nextSequence
+	s.nextSequence++
+	return sequence
+}
+
+func taskStreamKey(msg contracts.OutboundMessage) string {
+	state := struct {
+		CardKind     contracts.CardKind
+		TaskID       string
+		Status       string
+		Title        string
+		Subtitle     string
+		Presentation *contracts.TaskPresentation
+		Actions      []contracts.Action
+	}{
+		CardKind: msg.CardKind,
+		TaskID:   msg.TaskID,
+		Status:   msg.Status,
+		Title:    msg.Title,
+		Subtitle: msg.Subtitle,
+		Actions:  msg.Actions,
+	}
+	if msg.Presentation != nil {
+		presentation := *msg.Presentation
+		presentation.ProcessingDetail = ""
+		state.Presentation = &presentation
+	}
+	data, err := json.Marshal(state)
+	if err != nil {
+		return fmt.Sprintf("%#v", state)
+	}
+	return string(data)
+}
+
+func cardStreamOperationID(cardID string, sequence int) string {
+	return "codex-stream-" + cardID + "-" + strconv.Itoa(sequence)
 }
 
 func (s *Sender) patchWithRetry(ctx context.Context, messageID string, card []byte, maxAttempts int) error {
@@ -367,11 +684,14 @@ func runningCardElements(msg contracts.OutboundMessage, presentation contracts.T
 		{Title: "状态", Value: statusLabel(msg)},
 	})}
 	elements = append(elements, sectionMarkdown("当前活动", activity))
+	if len(presentation.UserInputs) > 0 {
+		elements = append(elements, sectionMarkdown("本轮输入", markdownStrings(presentation.UserInputs)))
+	}
 	if len(presentation.Milestones) > 0 {
 		elements = append(elements, sectionMarkdown("关键里程碑", markdownList(presentation.Milestones)))
 	}
-	if presentation.ProcessingDetail != "" {
-		elements = append(elements, sectionMarkdown("处理详情", presentation.ProcessingDetail))
+	if presentation.ProcessingDetail != "" || msg.StreamDetail {
+		elements = append(elements, sectionMarkdownWithElementID("处理详情", presentation.ProcessingDetail, taskProcessingDetailElementID))
 	}
 	return elements
 }
@@ -387,6 +707,9 @@ func resultCardElements(msg contracts.OutboundMessage, presentation contracts.Ta
 		{Title: "验证", Value: fmt.Sprintf("%d 项", len(presentation.Verification))},
 	})}
 	elements = append(elements, sectionMarkdown("结论", conclusion))
+	if len(presentation.UserInputs) > 0 {
+		elements = append(elements, sectionMarkdown("本轮输入", markdownStrings(presentation.UserInputs)))
+	}
 	if len(presentation.Changes) > 0 {
 		elements = append(elements, sectionMarkdown("改动", markdownStrings(presentation.Changes)))
 	}
@@ -397,6 +720,14 @@ func resultCardElements(msg contracts.OutboundMessage, presentation contracts.Ta
 }
 
 func sectionMarkdown(title, content string) map[string]any {
+	return sectionMarkdownWithElementID(title, content, "")
+}
+
+func sectionMarkdownWithElementID(title, content, elementID string) map[string]any {
+	markdown := map[string]any{"tag": "markdown", "content": content, "text_size": "normal"}
+	if elementID != "" {
+		markdown["element_id"] = elementID
+	}
 	return map[string]any{
 		"tag":       "column_set",
 		"flex_mode": "stretch",
@@ -407,7 +738,7 @@ func sectionMarkdown(title, content string) map[string]any {
 			"vertical_spacing": "4px",
 			"elements": []any{
 				plainText(title, "notation", "grey"),
-				map[string]any{"tag": "markdown", "content": content, "text_size": "normal"},
+				markdown,
 			},
 		}},
 	}

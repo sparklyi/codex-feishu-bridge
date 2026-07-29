@@ -336,7 +336,7 @@ func (c *Controller) Stop(ctx context.Context, taskID string) error {
 	c.mu.Lock()
 	active := c.byTask[taskID]
 	c.mu.Unlock()
-	if active == nil {
+	if active == nil || active.isTerminal() {
 		return ErrNotRunning
 	}
 	active.requestStop()
@@ -689,14 +689,12 @@ func (c *Controller) beginFinish(active *activeRun) bool {
 		return false
 	}
 	active.cancel()
-	c.unregister(active)
 	return true
 }
 
 func (c *Controller) finalize(active *activeRun, status string, exitCode int, body string) {
 	threadID, turnID := active.ids()
-	storeCtx, cancelStore := c.notificationContext()
-	if err := c.store.FinishRun(storeCtx, active.dedupKey, store.FinishRunInput{
+	finishInput := store.FinishRunInput{
 		RunID:      active.runID(),
 		ThreadID:   threadID,
 		TurnID:     turnID,
@@ -704,11 +702,14 @@ func (c *Controller) finalize(active *activeRun, status string, exitCode int, bo
 		ExitCode:   exitCode,
 		FinalText:  body,
 		FinishedAt: c.now(),
-	}); err != nil {
-		body = "无法保存 Codex 结果：" + err.Error()
-		status = "failed"
 	}
-	cancelStore()
+	if err := c.persistTerminalState(active, finishInput); err != nil {
+		slog.Error("Codex terminal state could not be persisted", "task_id", active.taskID(), "error", err)
+		return
+	}
+	// Keep the runtime indexes aligned with SQLite: a terminal run is no longer
+	// routable only after its durable terminal state has been committed.
+	c.unregister(active)
 	input := notifier.TaskCardInput{
 		ChatID:          active.chatID(),
 		UpdateMessageID: active.cardID(),
@@ -738,6 +739,26 @@ func (c *Controller) finalize(active *activeRun, status string, exitCode int, bo
 		return
 	}
 	c.insertTerminalRoute(active, sent)
+}
+
+func (c *Controller) persistTerminalState(active *activeRun, input store.FinishRunInput) error {
+	var lastErr error
+	for attempt := 1; ; attempt++ {
+		if attempt > 1 && !c.waitForTerminalRetry(attempt) {
+			return lastErr
+		}
+		storeCtx, cancelStore := c.notificationContext()
+		err := c.store.FinishRun(storeCtx, active.dedupKey, input)
+		cancelStore()
+		if err == nil {
+			return nil
+		}
+		lastErr = err
+		if c.ctx.Err() != nil {
+			return lastErr
+		}
+		slog.Warn("Codex terminal state persistence failed; retrying", "task_id", active.taskID(), "attempt", attempt, "error", err)
+	}
 }
 
 func (c *Controller) respond(request appserver.ServerRequest, response any) {
@@ -786,7 +807,11 @@ func (c *Controller) retryTerminalPatch(active *activeRun, status string, input 
 }
 
 func (c *Controller) waitForTerminalRetry(attempt int) bool {
-	delay := c.terminalRetryDelay * time.Duration(attempt)
+	multiplier := attempt
+	if multiplier > c.terminalRetryAttempts {
+		multiplier = c.terminalRetryAttempts
+	}
+	delay := c.terminalRetryDelay * time.Duration(multiplier)
 	timer := time.NewTimer(delay)
 	defer timer.Stop()
 	select {

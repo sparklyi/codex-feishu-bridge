@@ -72,6 +72,70 @@ func TestControllerRunsTurnStreamsResultAndPersistsState(t *testing.T) {
 	}
 }
 
+func TestControllerRetriesTerminalPersistenceBeforeUnregistering(t *testing.T) {
+	ctx := context.Background()
+	st, task, run := newQueuedTask(t, ctx)
+	defer func() { _ = st.Close() }()
+	api := newFakeAPI()
+	flakyStore := &flakyFinishStore{
+		Store:        st,
+		FinishErrors: 1,
+		FinishFailed: make(chan struct{}, 1),
+		FinishGate:   make(chan struct{}),
+	}
+	notes := &fakeNotifier{}
+	controller := New(ControllerOptions{
+		AppServer:          api,
+		Store:              flakyStore,
+		Notifier:           notes,
+		TerminalRetryDelay: time.Millisecond,
+	})
+	defer controller.Close()
+
+	if err := controller.Enqueue(ctx, StartInput{Task: task, Run: run, Project: config.ResolvedProject{CWD: task.CWD}, CardMessageID: "card", DedupKey: "new"}); err != nil {
+		t.Fatal(err)
+	}
+	waitFor(t, api.startedTurn)
+	waitUntil(t, func() bool { return controller.activeFor("thread-1", "turn-1") != nil })
+	completed := appserver.Event{Method: "turn/completed", Params: json.RawMessage(`{"threadId":"thread-1","turn":{"id":"turn-1","status":"completed"}}`)}
+	api.events <- completed
+	waitFor(t, flakyStore.FinishFailed)
+
+	controller.mu.Lock()
+	active := controller.byTask[task.ID]
+	controller.mu.Unlock()
+	if active == nil {
+		t.Fatal("active run was unregistered before terminal state persistence succeeded")
+	}
+	stored, _, err := st.GetTask(ctx, task.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if stored.Status != "running" {
+		t.Fatalf("task status after failed terminal persistence = %q, want running", stored.Status)
+	}
+
+	// A duplicate terminal event must not create another terminal notification
+	// while the first persistence attempt is being retried.
+	api.events <- completed
+	close(flakyStore.FinishGate)
+	waitUntil(t, func() bool {
+		stored, _, err := st.GetTask(ctx, task.ID)
+		return err == nil && stored.Status == "succeeded"
+	})
+	waitUntil(t, func() bool { return notes.count("success") == 1 })
+	time.Sleep(10 * time.Millisecond)
+	if got := notes.count("success"); got != 1 {
+		t.Fatalf("terminal notifications = %d, want one", got)
+	}
+	controller.mu.Lock()
+	_, stillActive := controller.byTask[task.ID]
+	controller.mu.Unlock()
+	if stillActive {
+		t.Fatal("active run remained registered after terminal state persistence succeeded")
+	}
+}
+
 func TestControllerFailsActiveRunsWhenAppServerStreamCloses(t *testing.T) {
 	ctx := context.Background()
 	st, task, run := newQueuedTask(t, ctx)
@@ -780,6 +844,44 @@ type fakeAPI struct {
 	responseLog []fakeResponse
 	steerLog    []appserver.TurnSteerInput
 	interrupt   int
+}
+
+type flakyFinishStore struct {
+	Store        *store.Store
+	FinishErrors int
+	FinishFailed chan struct{}
+	FinishGate   chan struct{}
+	mu           sync.Mutex
+}
+
+func (s *flakyFinishStore) StartRun(ctx context.Context, in store.StartRunInput) (store.Task, store.Run, error) {
+	return s.Store.StartRun(ctx, in)
+}
+
+func (s *flakyFinishStore) FinishRun(ctx context.Context, dedupKey string, in store.FinishRunInput) error {
+	s.mu.Lock()
+	if s.FinishErrors > 0 {
+		s.FinishErrors--
+		s.mu.Unlock()
+		select {
+		case s.FinishFailed <- struct{}{}:
+		default:
+		}
+		return errors.New("injected FinishRun failure")
+	}
+	s.mu.Unlock()
+	if s.FinishGate != nil {
+		select {
+		case <-s.FinishGate:
+		case <-ctx.Done():
+			return ctx.Err()
+		}
+	}
+	return s.Store.FinishRun(ctx, dedupKey, in)
+}
+
+func (s *flakyFinishStore) InsertMessageRoute(ctx context.Context, messageID, taskID, routeType string) error {
+	return s.Store.InsertMessageRoute(ctx, messageID, taskID, routeType)
 }
 
 type fakeResponse struct {

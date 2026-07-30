@@ -29,9 +29,11 @@ const (
 	defaultDeliveryMaxRetries     = 2
 	defaultDeliveryRetryDelay     = 100 * time.Millisecond
 	cardStreamSetupTimeout        = 2 * time.Second
-	taskProcessingDetailElementID = "task_processing_detail"
+	taskProcessingDetailElementID = "task_stream_detail"
 	taskStreamPrintFrequencyMS    = 30
 	taskStreamPrintStep           = 1
+	cardStreamSequenceBlockSize   = 8192
+	maxCardStreamSequence         = 2147483647
 )
 
 type CardAPI interface {
@@ -48,15 +50,22 @@ type CardStreamAPI interface {
 	SetCardElementContent(ctx context.Context, cardID, elementID, content string, sequence int) error
 }
 
+// CardStreamSequenceAllocator reserves a sequence range before a CardKit
+// stream begins. It keeps a reused task card valid across bridge restarts.
+type CardStreamSequenceAllocator interface {
+	ReserveCardStreamSequence(ctx context.Context, messageID string, minimum, count int) (int, error)
+}
+
 type Sender struct {
-	AppID          string
-	AppSecret      string
-	API            CardAPI
-	MaxAttempts    int
-	MaxRetries     int
-	AttemptTimeout time.Duration
-	RetryDelay     time.Duration
-	Sleep          func(context.Context, time.Duration) error
+	AppID             string
+	AppSecret         string
+	API               CardAPI
+	MaxAttempts       int
+	MaxRetries        int
+	AttemptTimeout    time.Duration
+	RetryDelay        time.Duration
+	Sleep             func(context.Context, time.Duration) error
+	SequenceAllocator CardStreamSequenceAllocator
 
 	streamMu sync.Mutex
 	streams  map[string]*taskCardStream
@@ -66,6 +75,7 @@ type taskCardStream struct {
 	mu           sync.Mutex
 	cardID       string
 	nextSequence int
+	sequenceEnd  int
 	lastKey      string
 	lastDetail   string
 	active       bool
@@ -74,9 +84,10 @@ type taskCardStream struct {
 
 // SenderOptions controls retry behavior for Feishu card delivery.
 type SenderOptions struct {
-	MaxAttempts    int
-	AttemptTimeout time.Duration
-	RetryDelay     time.Duration
+	MaxAttempts       int
+	AttemptTimeout    time.Duration
+	RetryDelay        time.Duration
+	SequenceAllocator CardStreamSequenceAllocator
 }
 
 func NewSenderFromEnv(appID, secretEnv string, getenv func(string) string, api CardAPI) (*Sender, error) {
@@ -92,12 +103,13 @@ func NewSenderFromEnvWithOptions(appID, secretEnv string, getenv func(string) st
 		return nil, fmt.Errorf("missing Feishu app secret env %s", secretEnv)
 	}
 	return &Sender{
-		AppID:          appID,
-		AppSecret:      secret,
-		API:            api,
-		MaxAttempts:    options.MaxAttempts,
-		AttemptTimeout: options.AttemptTimeout,
-		RetryDelay:     options.RetryDelay,
+		AppID:             appID,
+		AppSecret:         secret,
+		API:               api,
+		MaxAttempts:       options.MaxAttempts,
+		AttemptTimeout:    options.AttemptTimeout,
+		RetryDelay:        options.RetryDelay,
+		SequenceAllocator: options.SequenceAllocator,
 	}, nil
 }
 
@@ -229,13 +241,12 @@ func (api *SDKCardAPI) SetCardStreaming(ctx context.Context, cardID string, enab
 func taskStreamSettings(enabled bool) map[string]any {
 	config := map[string]any{"streaming_mode": enabled}
 	if enabled {
-		// The bridge sends cumulative content every 200 ms. Let the client finish
-		// each queued glyph before consuming the next update so a new request does
-		// not force the previous text to jump to its final state.
+		// Fast mode prevents a bursty model response from building an ever-growing
+		// client-side typewriter queue between the bridge's coalesced updates.
 		config["streaming_config"] = map[string]any{
 			"print_frequency_ms": map[string]int{"default": taskStreamPrintFrequencyMS},
 			"print_step":         map[string]int{"default": taskStreamPrintStep},
-			"print_strategy":     "delay",
+			"print_strategy":     "fast",
 		}
 	}
 	return map[string]any{"config": config}
@@ -345,9 +356,15 @@ func (s *Sender) startTaskStream(ctx context.Context, msg contracts.OutboundMess
 	setupCtx, cancel := context.WithTimeout(ctx, cardStreamSetupTimeout)
 	defer cancel()
 	if err := s.enableTaskStream(setupCtx, api, messageID, stream); err != nil {
+		if transport.IsTransientError(err) {
+			slog.Warn("Feishu CardKit stream setup delayed; will retry", "message_id", messageID, "error", err)
+			return
+		}
 		stream.unavailable = true
 		slog.Warn("Feishu CardKit stream unavailable; using card patches", "message_id", messageID, "error", err)
+		return
 	}
+	slog.Info("Feishu CardKit stream enabled", "message_id", messageID)
 }
 
 func (s *Sender) streamTaskProgress(ctx context.Context, msg contracts.OutboundMessage, card []byte) (contracts.SentMessage, error) {
@@ -372,8 +389,13 @@ func (s *Sender) streamTaskProgress(ctx context.Context, msg contracts.OutboundM
 			return sent, err
 		}
 		if err := s.enableTaskStream(ctx, streamAPI, msg.UpdateMessageID, stream); err != nil {
+			if transport.IsTransientError(err) {
+				return contracts.SentMessage{}, err
+			}
 			stream.unavailable = true
 			slog.Warn("Feishu CardKit stream unavailable; using card patches", "message_id", msg.UpdateMessageID, "error", err)
+		} else {
+			slog.Info("Feishu CardKit stream enabled", "message_id", msg.UpdateMessageID)
 		}
 		return contracts.SentMessage{MessageID: msg.UpdateMessageID}, nil
 	}
@@ -381,7 +403,10 @@ func (s *Sender) streamTaskProgress(ctx context.Context, msg contracts.OutboundM
 	// current value. Redaction or a bounded display buffer can occasionally
 	// require a replacement, which must be patched outside streaming mode.
 	if key != stream.lastKey || !strings.HasPrefix(detail, stream.lastDetail) {
-		if err := s.pauseTaskStream(ctx, streamAPI, stream); err != nil {
+		if err := s.pauseTaskStream(ctx, streamAPI, msg.UpdateMessageID, stream); err != nil {
+			if transport.IsTransientError(err) {
+				return contracts.SentMessage{}, err
+			}
 			s.disableTaskStreamForFallback(ctx, streamAPI, msg.UpdateMessageID, stream, "pause", err)
 			return s.patchTaskProgress(ctx, msg, card, stream, key, detail)
 		}
@@ -389,15 +414,27 @@ func (s *Sender) streamTaskProgress(ctx context.Context, msg contracts.OutboundM
 			return sent, err
 		}
 		if err := s.enableTaskStream(ctx, streamAPI, msg.UpdateMessageID, stream); err != nil {
+			if transport.IsTransientError(err) {
+				return contracts.SentMessage{}, err
+			}
 			stream.unavailable = true
 			slog.Warn("Feishu CardKit stream resume failed; using card patches", "message_id", msg.UpdateMessageID, "error", err)
+		} else {
+			slog.Info("Feishu CardKit stream resumed", "message_id", msg.UpdateMessageID)
 		}
 		return contracts.SentMessage{MessageID: msg.UpdateMessageID}, nil
 	}
 	if detail == stream.lastDetail {
 		return contracts.SentMessage{MessageID: msg.UpdateMessageID}, nil
 	}
-	if err := streamAPI.SetCardElementContent(ctx, stream.cardID, taskProcessingDetailElementID, detail, stream.next()); err != nil {
+	sequence, err := s.nextTaskStreamSequence(ctx, msg.UpdateMessageID, stream)
+	if err != nil {
+		return contracts.SentMessage{}, err
+	}
+	if err := streamAPI.SetCardElementContent(ctx, stream.cardID, taskProcessingDetailElementID, detail, sequence); err != nil {
+		if transport.IsTransientError(err) {
+			return contracts.SentMessage{}, err
+		}
 		s.disableTaskStreamForFallback(ctx, streamAPI, msg.UpdateMessageID, stream, "content update", err)
 		return s.patchTaskProgress(ctx, msg, card, stream, key, detail)
 	}
@@ -422,18 +459,26 @@ func (s *Sender) enableTaskStream(ctx context.Context, api CardStreamAPI, messag
 		}
 		stream.cardID = cardID
 	}
-	if err := api.SetCardStreaming(ctx, stream.cardID, true, stream.next()); err != nil {
+	sequence, err := s.nextTaskStreamSequence(ctx, messageID, stream)
+	if err != nil {
+		return err
+	}
+	if err := api.SetCardStreaming(ctx, stream.cardID, true, sequence); err != nil {
 		return err
 	}
 	stream.active = true
 	return nil
 }
 
-func (s *Sender) pauseTaskStream(ctx context.Context, api CardStreamAPI, stream *taskCardStream) error {
+func (s *Sender) pauseTaskStream(ctx context.Context, api CardStreamAPI, messageID string, stream *taskCardStream) error {
 	if !stream.active {
 		return nil
 	}
-	if err := api.SetCardStreaming(ctx, stream.cardID, false, stream.next()); err != nil {
+	sequence, err := s.nextTaskStreamSequence(ctx, messageID, stream)
+	if err != nil {
+		return err
+	}
+	if err := api.SetCardStreaming(ctx, stream.cardID, false, sequence); err != nil {
 		return err
 	}
 	stream.active = false
@@ -442,7 +487,7 @@ func (s *Sender) pauseTaskStream(ctx context.Context, api CardStreamAPI, stream 
 
 func (s *Sender) disableTaskStreamForFallback(ctx context.Context, api CardStreamAPI, messageID string, stream *taskCardStream, operation string, cause error) {
 	stream.unavailable = true
-	if err := s.pauseTaskStream(ctx, api, stream); err != nil {
+	if err := s.pauseTaskStream(ctx, api, messageID, stream); err != nil {
 		slog.Warn("Feishu CardKit stream close failed before card patch fallback", "message_id", messageID, "operation", operation, "error", err)
 	}
 	slog.Warn("Feishu CardKit stream unavailable; using card patches", "message_id", messageID, "operation", operation, "error", cause)
@@ -459,7 +504,7 @@ func (s *Sender) closeTaskStream(ctx context.Context, messageID string) {
 	}
 	stream.mu.Lock()
 	defer stream.mu.Unlock()
-	if err := s.pauseTaskStream(ctx, api, stream); err != nil {
+	if err := s.pauseTaskStream(ctx, api, messageID, stream); err != nil {
 		slog.Warn("Feishu CardKit stream close failed", "message_id", messageID, "error", err)
 	}
 }
@@ -473,7 +518,7 @@ func (s *Sender) taskStream(messageID string) *taskCardStream {
 	if stream := s.streams[messageID]; stream != nil {
 		return stream
 	}
-	stream := &taskCardStream{nextSequence: 1}
+	stream := &taskCardStream{}
 	s.streams[messageID] = stream
 	return stream
 }
@@ -486,10 +531,38 @@ func (s *Sender) removeTaskStream(messageID string) *taskCardStream {
 	return stream
 }
 
-func (s *taskCardStream) next() int {
-	sequence := s.nextSequence
-	s.nextSequence++
-	return sequence
+func (s *Sender) nextTaskStreamSequence(ctx context.Context, messageID string, stream *taskCardStream) (int, error) {
+	if stream.nextSequence == 0 || stream.nextSequence > stream.sequenceEnd {
+		start, end, err := s.reserveTaskStreamSequence(ctx, messageID)
+		if err != nil {
+			return 0, err
+		}
+		stream.nextSequence = start
+		stream.sequenceEnd = end
+	}
+	sequence := stream.nextSequence
+	stream.nextSequence++
+	return sequence, nil
+}
+
+func (s *Sender) reserveTaskStreamSequence(ctx context.Context, messageID string) (int, int, error) {
+	if s.SequenceAllocator == nil {
+		// Compatibility for callers that construct Sender directly. The bridge
+		// injects a durable allocator in app.Serve.
+		return 1, maxCardStreamSequence, nil
+	}
+	minimum := int(time.Now().Unix())
+	if minimum < 1 || minimum > maxCardStreamSequence {
+		return 0, 0, errors.New("current time cannot seed a CardKit stream sequence")
+	}
+	start, err := s.SequenceAllocator.ReserveCardStreamSequence(ctx, messageID, minimum, cardStreamSequenceBlockSize)
+	if err != nil {
+		return 0, 0, err
+	}
+	if start < 1 || start > maxCardStreamSequence || cardStreamSequenceBlockSize-1 > maxCardStreamSequence-start {
+		return 0, 0, errors.New("CardKit sequence allocator returned an invalid range")
+	}
+	return start, start + cardStreamSequenceBlockSize - 1, nil
 }
 
 func taskStreamKey(msg contracts.OutboundMessage) string {

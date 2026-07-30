@@ -1,6 +1,6 @@
 package store
 
-const migrationVersion = 2
+const migrationVersion = 3
 
 // schema is intentionally installed only for a fresh state database. This
 // bridge does not migrate old state because its task and permission model is a
@@ -60,6 +60,11 @@ CREATE TABLE users (
 	feishu_open_id TEXT PRIMARY KEY,
 	role TEXT NOT NULL,
 	enabled INTEGER NOT NULL CHECK (enabled IN (0,1))
+);
+
+CREATE TABLE card_stream_sequences (
+	feishu_message_id TEXT PRIMARY KEY,
+	last_sequence INTEGER NOT NULL CHECK (last_sequence BETWEEN 1 AND 2147483647)
 );
 
 CREATE INDEX idx_tasks_codex_thread_id ON tasks(codex_thread_id);

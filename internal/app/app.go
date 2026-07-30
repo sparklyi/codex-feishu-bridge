@@ -115,9 +115,10 @@ func Serve(ctx context.Context, opts ServeOptions) error {
 	if sender == nil {
 		api := feishu.NewSDKCardAPIWithOptions(cfg.Feishu.AppID, secret, proxyURL, networkOptions)
 		sender, err = feishu.NewSenderFromEnvWithOptions(cfg.Feishu.AppID, cfg.Feishu.AppSecretEnv, getenv, api, feishu.SenderOptions{
-			MaxAttempts:    cfg.Feishu.Network.DeliveryMaxAttempts,
-			AttemptTimeout: cfg.Feishu.Network.DeliveryAttemptTimeout(),
-			RetryDelay:     cfg.Feishu.Network.DeliveryRetryDelay(),
+			MaxAttempts:       cfg.Feishu.Network.DeliveryMaxAttempts,
+			AttemptTimeout:    cfg.Feishu.Network.DeliveryAttemptTimeout(),
+			RetryDelay:        cfg.Feishu.Network.DeliveryRetryDelay(),
+			SequenceAllocator: st,
 		})
 		if err != nil {
 			return err

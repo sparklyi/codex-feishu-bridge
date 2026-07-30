@@ -253,11 +253,15 @@ func taskStreamSettings(enabled bool) map[string]any {
 }
 
 func (api *SDKCardAPI) SetCardElementContent(ctx context.Context, cardID, elementID, content string, sequence int) error {
+	payload, err := cardStreamContentPayload(content)
+	if err != nil {
+		return err
+	}
 	request := larkcardkit.NewContentCardElementReqBuilder().
 		CardId(cardID).
 		ElementId(elementID).
 		Body(larkcardkit.NewContentCardElementReqBodyBuilder().
-			Content(content).
+			Content(payload).
 			Uuid(cardStreamOperationID(cardID, sequence)).
 			Sequence(sequence).
 			Build()).
@@ -271,6 +275,16 @@ func (api *SDKCardAPI) SetCardElementContent(ctx context.Context, cardID, elemen
 		return feishuResponseError("card stream content", response.Code, response.Msg)
 	}
 	return nil
+}
+
+func cardStreamContentPayload(content string) (string, error) {
+	payload, err := json.Marshal(struct {
+		Content string `json:"content"`
+	}{Content: content})
+	if err != nil {
+		return "", err
+	}
+	return string(payload), nil
 }
 
 // closeIdleConnections prevents a timed-out proxy tunnel from being reused by

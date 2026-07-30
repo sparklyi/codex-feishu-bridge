@@ -612,6 +612,23 @@ func TestTaskStreamSettingsAvoidQueuedClientRendering(t *testing.T) {
 	}
 }
 
+func TestCardStreamContentPayloadUsesCardKitJSONEnvelope(t *testing.T) {
+	want := "next line\nwith a quote: \\\""
+	payload, err := cardStreamContentPayload(want)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var decoded struct {
+		Content string `json:"content"`
+	}
+	if err := json.Unmarshal([]byte(payload), &decoded); err != nil {
+		t.Fatalf("CardKit content payload is invalid JSON: %q (%v)", payload, err)
+	}
+	if decoded.Content != want {
+		t.Fatalf("CardKit content = %q, want %q", decoded.Content, want)
+	}
+}
+
 func TestSenderReservesCardKitSequencesAcrossBridgeRestart(t *testing.T) {
 	allocator := &sequenceAllocator{}
 	api := &streamingCardAPI{fakeCardAPI: fakeCardAPI{results: []sendResult{{messageID: "message-1"}}}}

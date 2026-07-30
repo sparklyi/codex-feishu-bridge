@@ -14,7 +14,7 @@ func TestFreshSchemaAndTaskLifecycle(t *testing.T) {
 	ctx := context.Background()
 	s := openTestStore(t)
 	defer func() { _ = s.Close() }()
-	for _, table := range []string{"schema_migrations", "tasks", "runs", "message_routes", "event_dedup", "users"} {
+	for _, table := range []string{"schema_migrations", "tasks", "runs", "message_routes", "event_dedup", "users", "card_stream_sequences"} {
 		if !tableExists(t, s.db, table) {
 			t.Fatalf("missing table %s", table)
 		}
@@ -69,6 +69,62 @@ func TestFreshSchemaAndTaskLifecycle(t *testing.T) {
 	}
 	if _, _, err := s.StartRun(ctx, StartRunInput{RunID: resume.Run.ID, ThreadID: "thread-1", TurnID: "turn-2", Now: now}); !errors.Is(err, ErrNotFound) {
 		t.Fatalf("terminal run must not restart, got %v", err)
+	}
+}
+
+func TestReserveCardStreamSequencePersistsAcrossStoreReopen(t *testing.T) {
+	ctx := context.Background()
+	path := filepath.Join(t.TempDir(), "state.db")
+	store, err := Open(ctx, path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	first, err := store.ReserveCardStreamSequence(ctx, "message-1", 100, 8)
+	if err != nil || first != 100 {
+		t.Fatalf("first reservation = %d, %v", first, err)
+	}
+	if err := store.Close(); err != nil {
+		t.Fatal(err)
+	}
+	store, err = Open(ctx, path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = store.Close() }()
+	second, err := store.ReserveCardStreamSequence(ctx, "message-1", 100, 8)
+	if err != nil || second != 108 {
+		t.Fatalf("second reservation = %d, %v", second, err)
+	}
+}
+
+func TestMigratesCurrentStateSchemaForCardStreamSequences(t *testing.T) {
+	ctx := context.Background()
+	path := filepath.Join(t.TempDir(), "state.db")
+	db, err := sql.Open("sqlite", path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(`
+CREATE TABLE schema_migrations (version INTEGER PRIMARY KEY, applied_at TEXT NOT NULL);
+CREATE TABLE tasks (id TEXT PRIMARY KEY);
+INSERT INTO schema_migrations(version,applied_at) VALUES(2,'2026-07-30T00:00:00Z');`); err != nil {
+		_ = db.Close()
+		t.Fatal(err)
+	}
+	if err := db.Close(); err != nil {
+		t.Fatal(err)
+	}
+	store, err := Open(ctx, path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = store.Close() }()
+	if !tableExists(t, store.db, "card_stream_sequences") {
+		t.Fatal("v2 migration did not create card_stream_sequences")
+	}
+	var version int
+	if err := store.db.QueryRow(`SELECT version FROM schema_migrations`).Scan(&version); err != nil || version != migrationVersion {
+		t.Fatalf("migration version = %d, want %d (err=%v)", version, migrationVersion, err)
 	}
 }
 

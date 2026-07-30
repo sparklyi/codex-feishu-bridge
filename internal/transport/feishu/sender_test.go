@@ -590,14 +590,14 @@ func TestSenderStreamsTaskDetailThroughCardKitAndClosesBeforeTerminalPatch(t *te
 	}
 }
 
-func TestTaskStreamSettingsUseSmoothClientRendering(t *testing.T) {
+func TestTaskStreamSettingsAvoidQueuedClientRendering(t *testing.T) {
 	config, ok := taskStreamSettings(true)["config"].(map[string]any)
 	if !ok || config["streaming_mode"] != true {
 		t.Fatalf("streaming settings must enable CardKit mode: %+v", config)
 	}
 	streaming, ok := config["streaming_config"].(map[string]any)
-	if !ok || streaming["print_strategy"] != "delay" {
-		t.Fatalf("streaming settings must preserve queued text: %+v", config)
+	if !ok || streaming["print_strategy"] != "fast" {
+		t.Fatalf("streaming settings must prevent a queued text backlog: %+v", config)
 	}
 	frequency, ok := streaming["print_frequency_ms"].(map[string]int)
 	if !ok || frequency["default"] != taskStreamPrintFrequencyMS {
@@ -609,6 +609,42 @@ func TestTaskStreamSettingsUseSmoothClientRendering(t *testing.T) {
 	}
 	if disabled, ok := taskStreamSettings(false)["config"].(map[string]any); !ok || disabled["streaming_mode"] != false || disabled["streaming_config"] != nil {
 		t.Fatalf("streaming settings must only include print config while active: %+v", disabled)
+	}
+}
+
+func TestSenderReservesCardKitSequencesAcrossBridgeRestart(t *testing.T) {
+	allocator := &sequenceAllocator{}
+	api := &streamingCardAPI{fakeCardAPI: fakeCardAPI{results: []sendResult{{messageID: "message-1"}}}}
+	initialSender := &Sender{API: api, MaxAttempts: 1, SequenceAllocator: allocator}
+	if _, err := initialSender.Send(context.Background(), streamTaskMessage("", "first detail")); err != nil {
+		t.Fatal(err)
+	}
+	if len(api.settings) != 1 {
+		t.Fatalf("initial stream settings = %+v, want one enable", api.settings)
+	}
+	firstSequence := api.settings[0].sequence
+
+	// A new Sender models a bridge process that was restarted while the task
+	// card remains active in Feishu.
+	restartedSender := &Sender{API: api, MaxAttempts: 1, SequenceAllocator: allocator}
+	if _, err := restartedSender.Send(context.Background(), streamTaskMessage("message-1", "first detail plus after restart")); err != nil {
+		t.Fatal(err)
+	}
+	if api.patchCalls != 1 || len(api.settings) != 2 || !api.settings[1].enabled {
+		t.Fatalf("restarted sender should patch then re-enable the stream: %+v", api)
+	}
+	if api.settings[1].sequence != firstSequence+cardStreamSequenceBlockSize {
+		t.Fatalf("restarted stream sequence = %d, want %d", api.settings[1].sequence, firstSequence+cardStreamSequenceBlockSize)
+	}
+	if len(allocator.calls) != 2 || allocator.calls[0].count != cardStreamSequenceBlockSize || allocator.calls[1].count != cardStreamSequenceBlockSize {
+		t.Fatalf("unexpected sequence reservations: %+v", allocator.calls)
+	}
+
+	if _, err := restartedSender.Send(context.Background(), streamTaskMessage("message-1", "first detail plus after restart and one more delta")); err != nil {
+		t.Fatal(err)
+	}
+	if len(api.content) != 1 || api.content[0].sequence != api.settings[1].sequence+1 {
+		t.Fatalf("resumed streamed detail did not continue from the reserved range: %+v", api)
 	}
 }
 
@@ -779,16 +815,17 @@ func TestNewSenderFromEnv(t *testing.T) {
 
 func TestNewSenderFromEnvWithOptions(t *testing.T) {
 	api := &fakeCardAPI{}
+	allocator := &sequenceAllocator{}
 	s, err := NewSenderFromEnvWithOptions("cli_test", "FEISHU_APP_SECRET", func(key string) string {
 		if key == "FEISHU_APP_SECRET" {
 			return "secret"
 		}
 		return ""
-	}, api, SenderOptions{MaxAttempts: 4, AttemptTimeout: 5 * time.Millisecond, RetryDelay: 6 * time.Millisecond})
+	}, api, SenderOptions{MaxAttempts: 4, AttemptTimeout: 5 * time.Millisecond, RetryDelay: 6 * time.Millisecond, SequenceAllocator: allocator})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if s.MaxAttempts != 4 || s.AttemptTimeout != 5*time.Millisecond || s.RetryDelay != 6*time.Millisecond {
+	if s.MaxAttempts != 4 || s.AttemptTimeout != 5*time.Millisecond || s.RetryDelay != 6*time.Millisecond || s.SequenceAllocator != allocator {
 		t.Fatalf("sender options were not retained: %+v", s)
 	}
 }
@@ -811,6 +848,27 @@ type streamContent struct {
 	elementID string
 	content   string
 	sequence  int
+}
+
+type sequenceReservation struct {
+	messageID string
+	minimum   int
+	count     int
+}
+
+type sequenceAllocator struct {
+	next  int
+	calls []sequenceReservation
+}
+
+func (a *sequenceAllocator) ReserveCardStreamSequence(_ context.Context, messageID string, minimum, count int) (int, error) {
+	a.calls = append(a.calls, sequenceReservation{messageID: messageID, minimum: minimum, count: count})
+	if a.next < minimum {
+		a.next = minimum
+	}
+	start := a.next
+	a.next += count
+	return start, nil
 }
 
 type streamingCardAPI struct {

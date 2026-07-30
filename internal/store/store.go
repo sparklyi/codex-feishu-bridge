@@ -154,10 +154,16 @@ func (s *Store) migrate(ctx context.Context) error {
 		if err != nil {
 			return err
 		}
-		if count != 1 || version != migrationVersion || hasApprovals {
+		if count != 1 || hasApprovals {
 			return errors.New("existing state database is not supported; remove it and start the bridge with a fresh state database")
 		}
-		return nil
+		if version == migrationVersion {
+			return nil
+		}
+		if version != 2 {
+			return errors.New("existing state database is not supported; remove it and start the bridge with a fresh state database")
+		}
+		return s.migrateV2ToV3(ctx)
 	}
 	hasLegacyState, err := s.hasState(ctx)
 	if err != nil {
@@ -176,6 +182,31 @@ func (s *Store) migrate(ctx context.Context) error {
 	}
 	if _, err := tx.ExecContext(ctx, `INSERT INTO schema_migrations(version,applied_at) VALUES(?,?)`, migrationVersion, formatTime(time.Now().UTC())); err != nil {
 		return err
+	}
+	return tx.Commit()
+}
+
+func (s *Store) migrateV2ToV3(ctx context.Context) error {
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer rollback(tx)
+	if _, err := tx.ExecContext(ctx, `
+CREATE TABLE card_stream_sequences (
+	feishu_message_id TEXT PRIMARY KEY,
+	last_sequence INTEGER NOT NULL CHECK (last_sequence BETWEEN 1 AND 2147483647)
+);`); err != nil {
+		return err
+	}
+	result, err := tx.ExecContext(ctx, `UPDATE schema_migrations SET version=?,applied_at=? WHERE version=2`, migrationVersion, formatTime(time.Now().UTC()))
+	if err != nil {
+		return err
+	}
+	if changed, err := result.RowsAffected(); err != nil {
+		return err
+	} else if changed != 1 {
+		return errors.New("existing state database is not supported; remove it and start the bridge with a fresh state database")
 	}
 	return tx.Commit()
 }

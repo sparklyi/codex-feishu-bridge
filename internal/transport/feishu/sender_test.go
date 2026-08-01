@@ -724,7 +724,7 @@ func TestSenderPatchesStructuralProgressAndResumesCardKitStream(t *testing.T) {
 	}
 }
 
-func TestSenderResetsTaskStreamWhenDetailStopsBeingAppendOnly(t *testing.T) {
+func TestSenderReplacesTaskStreamDetailWithoutReset(t *testing.T) {
 	api := &streamingCardAPI{fakeCardAPI: fakeCardAPI{results: []sendResult{{messageID: "message-1"}}}}
 	sender := &Sender{API: api, MaxAttempts: 1}
 	if _, err := sender.Send(context.Background(), streamTaskMessage("", "first detail")); err != nil {
@@ -733,8 +733,14 @@ func TestSenderResetsTaskStreamWhenDetailStopsBeingAppendOnly(t *testing.T) {
 	if _, err := sender.Send(context.Background(), streamTaskMessage("message-1", "replacement detail")); err != nil {
 		t.Fatal(err)
 	}
-	if api.patchCalls != 1 || len(api.content) != 0 || len(api.settings) != 3 || api.settings[1].enabled || !api.settings[2].enabled {
-		t.Fatalf("non-append detail should reset the stream before patching: %+v", api)
+	if api.patchCalls != 0 || len(api.content) != 1 || api.content[0].content != "replacement detail" || len(api.settings) != 1 || !api.settings[0].enabled || api.content[0].sequence != 2 {
+		t.Fatalf("detail replacement should remain a local CardKit update: %+v", api)
+	}
+	if _, err := sender.Send(context.Background(), streamTaskMessage("message-1", "replacement detail plus next delta")); err != nil {
+		t.Fatal(err)
+	}
+	if api.patchCalls != 0 || len(api.content) != 2 || api.content[1].sequence != 3 || len(api.settings) != 1 {
+		t.Fatalf("stream should continue after a local detail replacement: %+v", api)
 	}
 }
 

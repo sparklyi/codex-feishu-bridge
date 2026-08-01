@@ -8,6 +8,7 @@ import (
 	"sync"
 	"testing"
 	"time"
+	"unicode/utf8"
 
 	"github.com/sparklyi/codex-feishu-bridge/internal/appserver"
 	"github.com/sparklyi/codex-feishu-bridge/internal/config"
@@ -433,7 +434,7 @@ func TestActiveRunUsesCompletedAgentMessageAsAuthoritativeText(t *testing.T) {
 }
 
 func TestActiveRunRetainsStreamedProcessingDetailWhenCompletionHasNoText(t *testing.T) {
-	active := &activeRun{processingDetail: "streamed final reply"}
+	active := &activeRun{streamedFallback: "streamed final reply"}
 	active.setFinalText("")
 	if got := active.text(); got != "streamed final reply" {
 		t.Fatalf("empty completed item must retain the streamed reply, got %q", got)
@@ -443,14 +444,66 @@ func TestActiveRunRetainsStreamedProcessingDetailWhenCompletionHasNoText(t *test
 	}
 }
 
-func TestTrimProcessingDetailKeepsAppendOnlyPrefix(t *testing.T) {
-	value := strings.Repeat("处理详情", 4000)
-	first := trimProcessingDetail(value)
-	if len(first) > processingDetailLimit {
-		t.Fatalf("processing detail exceeded limit: %d", len(first))
+func TestActiveRunRollsProcessingPreviewAndRetainsTerminalFallback(t *testing.T) {
+	value := "early marker\n" + strings.Repeat("处理中", 700) + "\nlatest marker"
+	active := &activeRun{displayMode: "preview"}
+	if !active.appendProcessingDetail(value) {
+		t.Fatal("preview delta should schedule progress")
 	}
-	if next := trimProcessingDetail(value + "继续"); !strings.HasPrefix(next, first) {
-		t.Fatalf("processing detail must remain append-only: first=%q next=%q", first, next)
+
+	preview := active.progressPresentation().ProcessingDetail
+	if !strings.HasPrefix(preview, processingDetailPreviewOmissionMarker) {
+		t.Fatalf("rolled preview missing omission marker: %q", preview)
+	}
+	if len(preview) > len(processingDetailPreviewOmissionMarker)+processingDetailPreviewLimit {
+		t.Fatalf("rolled preview exceeded byte limit: %d", len(preview))
+	}
+	if !utf8.ValidString(preview) || strings.Contains(preview, "early marker") || !strings.Contains(preview, "latest marker") {
+		t.Fatalf("rolled preview did not retain a valid latest window: %q", preview)
+	}
+	if next := appendProcessingPreview(preview, " trailing delta"); !strings.HasPrefix(next, preview) {
+		t.Fatalf("preview should append normally between rollovers: previous=%q next=%q", preview, next)
+	}
+	if got := active.text(); got != value {
+		t.Fatalf("terminal fallback lost streamed text: %q", got)
+	}
+	if got := active.resultPresentation("succeeded", "").Conclusion; got != value {
+		t.Fatalf("terminal presentation lost streamed text: %q", got)
+	}
+}
+
+func TestProcessingPreviewRollsAtLineBoundary(t *testing.T) {
+	value := strings.Repeat("line\n", processingDetailPreviewResetLineLimit)
+	preview := appendProcessingPreview("", value)
+	if !strings.HasPrefix(preview, processingDetailPreviewOmissionMarker) {
+		t.Fatalf("line overflow did not rotate preview: %q", preview)
+	}
+	content := strings.TrimPrefix(preview, processingDetailPreviewOmissionMarker)
+	if lines := processingDetailLineCount(content); lines > processingDetailPreviewLineLimit {
+		t.Fatalf("rolled preview retained %d lines, want at most %d", lines, processingDetailPreviewLineLimit)
+	}
+}
+
+func TestProcessingPreviewRedactsBeforeRollingTail(t *testing.T) {
+	const secret = "streamed-secret-value"
+	preview := appendProcessingPreview("", "Authorization: Bearer ")
+	preview = appendProcessingPreview(preview, secret+strings.Repeat(" latest", 400))
+	if strings.Contains(preview, secret) {
+		t.Fatalf("rolled preview leaked a split secret: %q", preview)
+	}
+	if !strings.HasPrefix(preview, processingDetailPreviewOmissionMarker) {
+		t.Fatalf("long redacted preview did not roll: %q", preview)
+	}
+}
+
+func TestProcessingFallbackStaysWithinUTF8Limit(t *testing.T) {
+	value := strings.Repeat("处理详情", 4000)
+	fallback := trimProcessingFallback(value)
+	if len(fallback) > processingDetailFallbackLimit {
+		t.Fatalf("streamed fallback exceeded limit: %d", len(fallback))
+	}
+	if !utf8.ValidString(fallback) {
+		t.Fatalf("streamed fallback contains invalid UTF-8: %q", fallback)
 	}
 }
 

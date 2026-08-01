@@ -83,9 +83,9 @@ func TestTaskCardDisplayModesKeepProcessingDetailOnTaskCard(t *testing.T) {
 	if got := len(previewSender.messages[1].Presentation.ProcessingDetail); got > processingDetailLimit {
 		t.Fatalf("processing detail should stay compact, got %d bytes", got)
 	}
-	first := redactProcessingDetail(longDetail)
-	if next := redactProcessingDetail(longDetail + "继续"); !strings.HasPrefix(next, first) {
-		t.Fatalf("processing detail must remain append-only for CardKit: first=%q next=%q", first, next)
+	previewMarker := "...\n\nlatest progress"
+	if got := redactProcessingDetail(previewMarker); got != previewMarker {
+		t.Fatalf("processing preview marker changed during redaction: %q", got)
 	}
 }
 

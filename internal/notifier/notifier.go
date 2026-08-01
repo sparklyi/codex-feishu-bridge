@@ -16,9 +16,9 @@ const (
 	steerActionID    = "steer_submit"
 	successBodyLimit = 4000
 	failureBodyLimit = 2000
-	// Keep enough output for a useful live preview while leaving room for the
-	// rest of the card under Feishu's card-size limit.
-	processingDetailLimit = 6 * 1024
+	// The runtime rolls live previews before this point. Keep a final payload
+	// guard for callers outside that reducer and room for the rest of the card.
+	processingDetailLimit = 2 * 1024
 	// Progress updates are superseded by newer card state, so the runtime owns
 	// retry scheduling instead of letting a stale patch retry in the sender.
 	progressDeliveryMaxAttempts = 1
@@ -261,8 +261,7 @@ func redactPresentation(presentation contracts.TaskPresentation, limit int) cont
 }
 
 func redactProcessingDetail(value string) string {
-	// CardKit streams only when each value extends the previous one. Preserve
-	// the leading text at the display limit instead of rotating in a suffix.
+	// The runtime owns preview rollovers. This is only a final size boundary.
 	return redact.FeishuText(strings.TrimSpace(value), processingDetailLimit)
 }
 

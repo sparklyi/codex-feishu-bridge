@@ -22,7 +22,7 @@ import (
 
 var (
 	ErrNotRunning           = errors.New("task has no running bridge turn")
-	ErrAppServerUnavailable = errors.New("Codex app-server connection lost")
+	ErrAppServerUnavailable = errors.New("codex app-server connection lost")
 )
 
 const appServerFailureMessage = "Codex app-server 连接已中断，桥接服务正在重启。任务未自动恢复，请在服务恢复后继续。"
@@ -139,6 +139,7 @@ type activeRun struct {
 	changes            []string
 	verification       []string
 	processingDetail   string
+	streamedFallback   string
 	userInputs         []string
 	finalText          string
 	lastProgress       time.Time
@@ -1134,6 +1135,9 @@ func (a *activeRun) text() string {
 	defer a.mu.Unlock()
 	if strings.TrimSpace(a.finalText) != "" {
 		return strings.TrimSpace(a.finalText)
+	}
+	if strings.TrimSpace(a.streamedFallback) != "" {
+		return strings.TrimSpace(a.streamedFallback)
 	}
 	return strings.TrimSpace(a.processingDetail)
 }

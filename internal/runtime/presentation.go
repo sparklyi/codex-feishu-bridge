@@ -6,6 +6,7 @@ import (
 	"unicode/utf8"
 
 	"github.com/sparklyi/codex-feishu-bridge/internal/contracts"
+	"github.com/sparklyi/codex-feishu-bridge/internal/redact"
 )
 
 // itemEventParams intentionally accepts only the portable portion of the
@@ -246,27 +247,89 @@ func (a *activeRun) appendProcessingDetail(delta string) bool {
 	if a.terminal {
 		return false
 	}
-	a.processingDetail = trimProcessingDetail(a.processingDetail + delta)
+	a.processingDetail = appendProcessingPreview(a.processingDetail, delta)
+	a.streamedFallback = trimProcessingFallback(a.streamedFallback + delta)
 	// flushProgress is the cadence governor. Queue every visible delta so a
 	// short answer is not held behind an arbitrary character threshold.
 	return a.displayMode == "preview"
 }
 
-const processingDetailLimit = 8 * 1024
+const (
+	processingDetailFallbackLimit         = 8 * 1024
+	processingDetailPreviewLimit          = 1200
+	processingDetailPreviewLineLimit      = 12
+	processingDetailPreviewResetLimit     = 1800
+	processingDetailPreviewResetLineLimit = 18
+	processingDetailPreviewOmissionMarker = "...\n\n"
+)
 
-func trimProcessingDetail(text string) string {
-	if len(text) <= processingDetailLimit {
+func appendProcessingPreview(preview, delta string) string {
+	// Redact before trimming the tail so a credential beginning outside the
+	// visible window cannot expose its suffix.
+	next := redact.FeishuText(preview+delta, 0)
+	if len(next) <= processingDetailPreviewResetLimit && processingDetailLineCount(next) <= processingDetailPreviewResetLineLimit {
+		return next
+	}
+	return processingDetailPreviewOmissionMarker + trimProcessingPreviewTail(next)
+}
+
+func trimProcessingPreviewTail(text string) string {
+	text = trimTextTailLines(text, processingDetailPreviewLineLimit)
+	return trimTextSuffix(text, processingDetailPreviewLimit)
+}
+
+func trimProcessingFallback(text string) string {
+	return trimTextPrefix(text, processingDetailFallbackLimit)
+}
+
+func trimTextPrefix(text string, limit int) string {
+	if len(text) <= limit {
 		return text
 	}
 	var result strings.Builder
-	result.Grow(processingDetailLimit)
+	result.Grow(limit)
 	for _, runeValue := range text {
-		if result.Len()+utf8.RuneLen(runeValue) > processingDetailLimit {
+		if result.Len()+utf8.RuneLen(runeValue) > limit {
 			break
 		}
 		result.WriteRune(runeValue)
 	}
 	return result.String()
+}
+
+func trimTextSuffix(text string, limit int) string {
+	if len(text) <= limit {
+		return text
+	}
+	start := len(text) - limit
+	for start < len(text) && !utf8.RuneStart(text[start]) {
+		start++
+	}
+	return text[start:]
+}
+
+func trimTextTailLines(text string, limit int) string {
+	if limit <= 0 || text == "" {
+		return ""
+	}
+	lines := 1
+	for index := len(text) - 1; index >= 0; index-- {
+		if text[index] != '\n' {
+			continue
+		}
+		if lines == limit {
+			return text[index+1:]
+		}
+		lines++
+	}
+	return text
+}
+
+func processingDetailLineCount(text string) int {
+	if text == "" {
+		return 0
+	}
+	return strings.Count(text, "\n") + 1
 }
 
 func (a *activeRun) progressPresentation() contracts.TaskPresentation {
@@ -288,6 +351,9 @@ func (a *activeRun) progressPresentation() contracts.TaskPresentation {
 func (a *activeRun) resultPresentation(status, fallback string) contracts.TaskPresentation {
 	a.mu.Lock()
 	finalText := strings.TrimSpace(a.finalText)
+	if finalText == "" {
+		finalText = strings.TrimSpace(a.streamedFallback)
+	}
 	if finalText == "" {
 		finalText = strings.TrimSpace(a.processingDetail)
 	}

@@ -413,10 +413,10 @@ func (s *Sender) streamTaskProgress(ctx context.Context, msg contracts.OutboundM
 		}
 		return contracts.SentMessage{MessageID: msg.UpdateMessageID}, nil
 	}
-	// CardKit only applies a typewriter effect when the next value extends the
-	// current value. Redaction or a bounded display buffer can occasionally
-	// require a replacement, which must be patched outside streaming mode.
-	if key != stream.lastKey || !strings.HasPrefix(detail, stream.lastDetail) {
+	// A structural card change must still be patched atomically. A detail-only
+	// replacement is safe through CardKit's content API: it overwrites the
+	// element once, then following prefix extensions resume native streaming.
+	if key != stream.lastKey {
 		if err := s.pauseTaskStream(ctx, streamAPI, msg.UpdateMessageID, stream); err != nil {
 			if transport.IsTransientError(err) {
 				return contracts.SentMessage{}, err
